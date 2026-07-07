@@ -42,10 +42,6 @@ wheels/
 .DS_Store
 Thumbs.db
 
-# Aider
-.aider*
-!.aider.conf.yml
-
 # Database
 *.db
 *.sqlite
