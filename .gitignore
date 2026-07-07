@@ -1,4 +1,6 @@
+
 .aider*
+.aider.conf.yml
 # Python
 __pycache__/
 *.py[cod]
