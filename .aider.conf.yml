@@ -1,5 +1,0 @@
-model: ollama/qwen2.5-coder:14b-instruct-q4_K_M
-auto-commits: true
-show-diffs: true
-encoding: utf-8
-analytics-disable: true
