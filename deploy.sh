@@ -158,6 +158,7 @@ setup_systemd() {
     
     systemctl is-active --quiet "$SERVICE_NAME" && systemctl stop "$SERVICE_NAME"
     
+    # ВАЖНО: убрали ProtectHome и ProtectSystem чтобы бот мог работать из /root
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
@@ -180,10 +181,6 @@ SyslogIdentifier=$SERVICE_NAME
 
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$PROJECT_DIR
-ReadWritePaths=$BACKUP_DIR
 
 [Install]
 WantedBy=multi-user.target
