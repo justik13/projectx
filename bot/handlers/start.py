@@ -106,10 +106,15 @@ async def accept_tos(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "read_tos")
 async def read_tos(callback: CallbackQuery):
     """Обработчик чтения оферты"""
-    await callback.message.edit_text(
-        TOS_TEXT,
-        reply_markup=get_tos_keyboard()
-    )
+    try:
+        await callback.message.edit_text(
+            TOS_TEXT,
+            reply_markup=get_tos_keyboard()
+        )
+    except Exception as e:
+        # Игнорируем ошибку если текст не изменился
+        if "message is not modified" not in str(e):
+            raise
     await callback.answer()
 
 @router.message(F.text == "👤 Профиль")
