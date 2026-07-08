@@ -59,15 +59,18 @@ async def cmd_start(message: Message, state: FSMContext, command: Command):
         
         # Проверяем, принял ли пользователь оферту
         if not user.tos_accepted:
+            # Показываем оферту с кнопками
             await message.answer(
                 TOS_ACCEPT_PROMPT,
                 reply_markup=get_tos_keyboard()
             )
             return
         
-        # Показываем главное меню
+        # Пользователь уже принял оферту — показываем главное меню
         settings = get_settings()
         is_admin = telegram_id in settings.ADMIN_IDS
+        
+        # Отправляем приветствие И главное меню в одном сообщении
         await message.answer(
             WELCOME_TEXT,
             reply_markup=get_main_menu(is_admin=is_admin)
