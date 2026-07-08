@@ -89,13 +89,13 @@ def get_payment_method_keyboard(tariff_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_payment_confirm_keyboard(payment_id: int, amount: int, currency: str) -> InlineKeyboardMarkup:
+def get_payment_confirm_keyboard(tariff_id: int, amount: int, currency: str) -> InlineKeyboardMarkup:
     """Клавиатура для подтверждения оплаты"""
     builder = InlineKeyboardBuilder()
     if currency == "stars":
-        builder.button(text=f"💎 Оплатить {amount} ⭐", callback_data=f"confirm_payment:{payment_id}")
+        builder.button(text=f"💎 Оплатить {amount} ⭐", callback_data=f"confirm_payment:{tariff_id}")
     else:
-        builder.button(text=f"💎 Оплатить {amount} ₽", callback_data=f"confirm_payment:{payment_id}")
+        builder.button(text=f"💎 Оплатить {amount} ₽", callback_data=f"confirm_payment:{tariff_id}")
     builder.button(text="← Назад", callback_data="back_to_payment_method")
     builder.adjust(1)
     return builder.as_markup()
