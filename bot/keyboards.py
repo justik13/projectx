@@ -220,3 +220,15 @@ def get_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="❌ Отмена", callback_data="admin_menu")
     builder.adjust(2, 1)
     return builder.as_markup()
+
+def get_tos_accept_keyboard():
+    """Клавиатура для принятия оферты с 3 кнопками"""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from bot.texts import TOS_AGREEMENT_URL, PRIVACY_POLICY_URL
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📖 Пользовательское соглашение", url=TOS_AGREEMENT_URL)
+    builder.button(text="🔒 Политика конфиденциальности", url=PRIVACY_POLICY_URL)
+    builder.button(text="✅ Принять", callback_data="accept_tos")
+    builder.adjust(1)
+    return builder.as_markup()

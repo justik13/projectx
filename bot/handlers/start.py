@@ -6,7 +6,7 @@ from database.connection import get_session
 from database.repositories.users_repo import get_user_by_telegram_id, create_user, update_user
 from services.subscription import SubscriptionService
 from bot.texts import WELCOME_TEXT, TOS_TEXT, TOS_ACCEPT_PROMPT
-from bot.keyboards import get_main_menu, get_tos_keyboard
+from bot.keyboards import get_main_menu, get_tos_keyboard, get_tos_accept_keyboard
 from config.settings import get_settings
 import logging
 import re
@@ -57,7 +57,6 @@ async def cmd_start(message: Message, state: FSMContext, command: Command):
             logging.info(f"New user created: {telegram_id} (referred by {ref_id})")
         
         if not user.tos_accepted:
-            from bot.keyboards import get_tos_accept_keyboard
             await message.answer(
                 TOS_ACCEPT_PROMPT,
                 reply_markup=get_tos_accept_keyboard()
@@ -89,17 +88,14 @@ async def accept_tos(callback: CallbackQuery, state: FSMContext):
             await update_user(session, user, tos_accepted=True)
             logging.info(f"User {telegram_id} accepted ToS")
         
-        # Отвечаем на callback
         await callback.answer("✅ Оферта принята!", show_alert=False)
         
-        # Пытаемся отредактировать сообщение
         try:
             await callback.message.edit_text(WELCOME_TEXT)
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
                 raise
         
-        # Отправляем главное меню отдельным сообщением
         settings = get_settings()
         is_admin = telegram_id in settings.ADMIN_IDS
         await callback.message.answer(
@@ -115,7 +111,6 @@ async def read_tos(callback: CallbackQuery):
     """Обработчик чтения оферты"""
     from aiogram.exceptions import TelegramBadRequest
     
-    # Сначала отвечаем на callback, чтобы убрать "часики"
     await callback.answer()
     
     try:
@@ -124,34 +119,33 @@ async def read_tos(callback: CallbackQuery):
             reply_markup=get_tos_keyboard()
         )
     except TelegramBadRequest as e:
-        # Игнорируем ошибку "message is not modified" (пользователь нажал кнопку повторно)
         if "message is not modified" not in str(e):
             raise
 
 @router.message(F.text == "👤 Профиль")
 async def show_profile(message: Message):
-    """Заглушка для раздела Профиль (будет реализовано позже)"""
+    """Заглушка для раздела Профиль"""
     await message.answer("👤 Раздел 'Профиль' находится в разработке.")
 
 @router.message(F.text == "🔌 Подключение")
 async def show_connection(message: Message):
-    """Заглушка для раздела Подключение (будет реализовано позже)"""
+    """Заглушка для раздела Подключение"""
     await message.answer("🔌 Раздел 'Подключение' находится в разработке.")
 
 @router.message(F.text == "💳 Оплата")
 async def show_payment(message: Message):
-    """Заглушка для раздела Оплата (будет реализовано позже)"""
+    """Заглушка для раздела Оплата"""
     await message.answer("💳 Раздел 'Оплата' находится в разработке.")
 
 @router.message(F.text == "💬 Поддержка")
 async def show_support(message: Message):
-    """Заглушка для раздела Поддержка (будет реализовано позже)"""
+    """Заглушка для раздела Поддержка"""
     settings = get_settings()
     await message.answer(f"💬 Поддержка: {settings.SUPPORT_USERNAME}")
 
 @router.message(F.text == "🛠 Админка")
 async def show_admin(message: Message):
-    """Заглушка для админки (будет реализовано позже)"""
+    """Заглушка для админки"""
     settings = get_settings()
     if message.from_user.id not in settings.ADMIN_IDS:
         await message.answer("⛔️ У вас нет доступа к админ-панели.")

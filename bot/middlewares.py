@@ -1,13 +1,9 @@
 from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject, Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery
 from database.connection import get_session
 from database.repositories.users_repo import get_user_by_telegram_id
-from config.settings import get_settings
 from typing import Callable, Dict, Any, Awaitable
-import logging
-from bot.middlewares import ToSCheckMiddleware
-router.message.middleware(ToSCheckMiddleware())
-router.callback_query.middleware(ToSCheckMiddleware())
+
 
 class BanCheckMiddleware(BaseMiddleware):
     """Проверяет, забанен ли пользователь"""
@@ -21,16 +17,19 @@ class BanCheckMiddleware(BaseMiddleware):
         
         if user_id:
             session = await get_session()
-            user = await get_user_by_telegram_id(session, user_id)
-            if user and user.is_banned:
-                if isinstance(event, Message):
-                    await event.answer("⛔️ У вас заблокирован доступ к сервису.")
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("⛔️ У вас заблокирован доступ к сервису.", show_alert=True)
-                return
-            await session.close()
+            try:
+                user = await get_user_by_telegram_id(session, user_id)
+                if user and user.is_banned:
+                    if isinstance(event, Message):
+                        await event.answer("⛔️ У вас заблокирован доступ к сервису.")
+                    elif isinstance(event, CallbackQuery):
+                        await event.answer("⛔️ У вас заблокирован доступ к сервису.", show_alert=True)
+                    return
+            finally:
+                await session.close()
         
         return await handler(event, data)
+
 
 class ToSCheckMiddleware(BaseMiddleware):
     """Проверяет, принял ли пользователь оферту"""
@@ -53,13 +52,15 @@ class ToSCheckMiddleware(BaseMiddleware):
 
         if user_id:
             session = await get_session()
-            user = await get_user_by_telegram_id(session, user_id)
-            if user and not user.tos_accepted:
-                if isinstance(event, Message):
-                    await event.answer("📋 Сначала примите пользовательское соглашение. Нажмите /start")
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("📋 Сначала примите пользовательское соглашение. Нажмите /start", show_alert=True)
-                return
-            await session.close()
+            try:
+                user = await get_user_by_telegram_id(session, user_id)
+                if user and not user.tos_accepted:
+                    if isinstance(event, Message):
+                        await event.answer("📋 Сначала примите пользовательское соглашение. Нажмите /start")
+                    elif isinstance(event, CallbackQuery):
+                        await event.answer("📋 Сначала примите пользовательское соглашение. Нажмите /start", show_alert=True)
+                    return
+            finally:
+                await session.close()
 
         return await handler(event, data)
