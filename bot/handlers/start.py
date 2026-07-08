@@ -13,6 +13,9 @@ import re
 
 router = Router()
 
+# Импортируем middleware
+from bot.middlewares import BanCheckMiddleware
+
 # Регистрируем middleware для проверки бана
 router.message.middleware(BanCheckMiddleware())
 router.callback_query.middleware(BanCheckMiddleware())
