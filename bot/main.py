@@ -1,4 +1,4 @@
-# bot/main.py — точка входа бота
+# bot/main.py
 import asyncio
 import logging
 
@@ -7,8 +7,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config.settings import get_settings
 from database.connection import init_db, close_db
+from services.background_worker import start_background_worker
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -17,17 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 async def setup_bot() -> tuple[Bot, Dispatcher]:
-    """Инициализация бота и диспетчера"""
     settings = get_settings()
-
-    # Создаём бота
     bot = Bot(token=settings.BOT_TOKEN)
-
-    # Создаём диспетчер с FSM-хранилищем в памяти
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
-    # Регистрируем роутеры
+    # Регистрация роутеров
     from bot.handlers.start import router as start_router
     from bot.handlers.profile import router as profile_router
     from bot.handlers.connection import router as connection_router
@@ -39,50 +34,41 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     from bot.handlers.admin.tariffs import router as admin_tariffs_router
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
     
-    # Пользовательские роутеры
     dp.include_router(start_router)
     dp.include_router(profile_router)
     dp.include_router(connection_router)
     dp.include_router(support_router)
     dp.include_router(payment_router)
     
-    # Админ-роутеры
     dp.include_router(admin_dashboard_router)
     dp.include_router(admin_users_router)
     dp.include_router(admin_servers_router)
     dp.include_router(admin_tariffs_router)
     dp.include_router(admin_broadcast_router)
 
-    logger.info("Routers registered")
-    logger.info("Profile router registered")
-    logger.info("Connection router registered")
-    logger.info("Support router registered")
-    logger.info("Payment router registered")
-    logger.info("Admin routers registered")
+    logger.info("Все роутеры успешно зарегистрированы")
     return bot, dp
 
 
 async def main():
-    """Главная функция запуска бота"""
     try:
-        # Инициализируем базу данных
-        logger.info("Initializing database...")
+        logger.info("Инициализация базы данных...")
         await init_db()
-        logger.info("Database initialized")
+        logger.info("База данных успешно инициализирована")
 
-        # Настраиваем бота
         bot, dp = await setup_bot()
 
-        # Запускаем polling
-        logger.info("Starting polling...")
+        # Запускаем фоновый мониторинг трафика и подписок
+        await start_background_worker()
+
+        logger.info("Запуск polling процесса...")
         await dp.start_polling(bot)
 
     except Exception as e:
-        logger.error(f"Error during bot startup: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
     finally:
-        # Закрываем соединение с БД
         await close_db()
-        logger.info("Bot stopped")
+        logger.info("Работа бота завершена")
 
 
 if __name__ == "__main__":
