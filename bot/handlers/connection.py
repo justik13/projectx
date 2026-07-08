@@ -15,7 +15,6 @@ from bot.states import DeviceCreationStates
 from utils.formatters import format_traffic, format_datetime
 from config.settings import get_settings
 import logging
-import uuid
 
 router = Router()
 
@@ -197,24 +196,30 @@ async def enter_device_name(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        # Генерируем уникальный peer_id
-        peer_id = str(uuid.uuid4())
-        
         # Вызываем amnezia-api для создания клиента
-        client = AmneziaClient(server.api_url, server.api_key)
-        result = await client.create_user(peer_id, server.protocol)
-        
-        if not result:
-            await message.answer(ERROR_SERVER_UNAVAILABLE)
-            await state.clear()
-            return
-        
-        # Получаем конфигурацию
-        raw_config = result.get("config", "")
-        if not raw_config:
-            raw_config = f"# Конфигурация для {device_name}\n# Peer ID: {peer_id}"
-        
-        # Сохраняем профиль в БД
+    # API сам сгенерирует ID (публичный ключ)
+    client = AmneziaClient(server.api_url, server.api_key)
+    result = await client.create_user(
+        client_name=device_name,
+        protocol=server.protocol,
+        expires_at=None  # бессрочно, управление через админку
+    )
+
+    if not result:
+        await message.answer(ERROR_SERVER_UNAVAILABLE)
+        await state.clear()
+        return
+
+    # Получаем данные от API
+    peer_id = result.get("id")  # публичный ключ, сгенерированный API
+    raw_config = result.get("config", "")
+
+    if not peer_id or not raw_config:
+        await message.answer(ERROR_SERVER_UNAVAILABLE)
+        await state.clear()
+        return
+
+    # Сохраняем профиль в БД
         profile = await create_profile(
             session,
             user_id=user.id,

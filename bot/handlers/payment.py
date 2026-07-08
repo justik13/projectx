@@ -17,6 +17,7 @@ from bot.keyboards import (
 from bot.states import PaymentStates
 from utils.formatters import format_datetime
 import logging
+from datetime import datetime
 
 router = Router()
 
@@ -169,10 +170,14 @@ async def back_to_payment(callback: CallbackQuery, state: FSMContext):
             price_stars=tariff.price_stars
         )
         
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_payment_method_keyboard(tariff.id)
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_payment_method_keyboard(tariff.id)
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e):
+                raise
         await callback.answer()
     finally:
         await session.close()
@@ -204,9 +209,13 @@ async def confirm_payment(callback: CallbackQuery, state: FSMContext):
             user_id=user.id,
             tariff_id=tariff.id,
             amount=amount,
-            currency=currency,
-            status="completed"
+            currency=currency
         )
+        # Устанавливаем статус "оплачен"
+        payment.status = "completed"
+        payment.paid_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(payment)
         
         # Продлеваем подписку
         await SubscriptionService.extend_subscription(
