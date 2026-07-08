@@ -14,11 +14,15 @@ import re
 router = Router()
 
 # Импортируем middleware
-from bot.middlewares import BanCheckMiddleware
+from bot.middlewares import BanCheckMiddleware, ToSCheckMiddleware
 
 # Регистрируем middleware для проверки бана
 router.message.middleware(BanCheckMiddleware())
 router.callback_query.middleware(BanCheckMiddleware())
+
+# Регистрируем middleware для проверки принятия оферты
+router.message.middleware(ToSCheckMiddleware())
+router.callback_query.middleware(ToSCheckMiddleware())
 
 def parse_referral_id(command_args: str) -> int | None:
     """Парсит реферальный ID из аргументов /start"""
@@ -31,46 +35,38 @@ def parse_referral_id(command_args: str) -> int | None:
 async def cmd_start(message: Message, state: FSMContext, command: Command):
     """Обработчик /start с поддержкой реферальной ссылки"""
     
-    # Очищаем FSM состояние
     await state.clear()
     
     telegram_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
     
-    # Парсим реферальный ID из аргументов
     ref_id = None
     if command.args:
         ref_id = parse_referral_id(command.args)
     
-    # Получаем сессию БД
     session = await get_session()
     
     try:
-        # Проверяем, существует ли пользователь
         user = await get_user_by_telegram_id(session, telegram_id)
         
         if not user:
-            # Создаём нового пользователя с учётом реферала
             user = await SubscriptionService.process_onboarding(
                 session, telegram_id, username, first_name, ref_id
             )
             logging.info(f"New user created: {telegram_id} (referred by {ref_id})")
         
-        # Проверяем, принял ли пользователь оферту
         if not user.tos_accepted:
-            # Показываем оферту с кнопками
+            from bot.keyboards import get_tos_accept_keyboard
             await message.answer(
                 TOS_ACCEPT_PROMPT,
-                reply_markup=get_tos_keyboard()
+                reply_markup=get_tos_accept_keyboard()
             )
             return
         
-        # Пользователь уже принял оферту — показываем главное меню
         settings = get_settings()
         is_admin = telegram_id in settings.ADMIN_IDS
         
-        # Отправляем приветствие И главное меню в одном сообщении
         await message.answer(
             WELCOME_TEXT,
             reply_markup=get_main_menu(is_admin=is_admin)

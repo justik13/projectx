@@ -118,3 +118,9 @@ ERROR_SERVER_UNAVAILABLE = (
     "⚠️ Выбранный сервер временно недоступен.\n\n"
     "Попробуйте другую локацию или обратитесь в поддержку."
 )
+# Ссылки на документы
+TOS_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19"
+PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-04-01-26"
+
+# Сообщение блокировки
+TOS_BLOCKED_MESSAGE = "📋 Сначала примите пользовательское соглашение. Нажмите /start"

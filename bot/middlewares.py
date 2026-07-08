@@ -5,6 +5,9 @@ from database.repositories.users_repo import get_user_by_telegram_id
 from config.settings import get_settings
 from typing import Callable, Dict, Any, Awaitable
 import logging
+from bot.middlewares import ToSCheckMiddleware
+router.message.middleware(ToSCheckMiddleware())
+router.callback_query.middleware(ToSCheckMiddleware())
 
 class BanCheckMiddleware(BaseMiddleware):
     """Проверяет, забанен ли пользователь"""
@@ -27,4 +30,36 @@ class BanCheckMiddleware(BaseMiddleware):
                 return
             await session.close()
         
+        return await handler(event, data)
+
+class ToSCheckMiddleware(BaseMiddleware):
+    """Проверяет, принял ли пользователь оферту"""
+
+    async def __call__(self, handler, event, data):
+        # Разрешаем команду /start и callback'и принятия оферты
+        if isinstance(event, Message) and event.text and event.text.startswith("/start"):
+            return await handler(event, data)
+
+        if isinstance(event, CallbackQuery):
+            if event.data in ["accept_tos", "read_tos"]:
+                return await handler(event, data)
+
+        # Проверяем tos_accepted для остальных событий
+        user_id = None
+        if isinstance(event, Message):
+            user_id = event.from_user.id
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id
+
+        if user_id:
+            session = await get_session()
+            user = await get_user_by_telegram_id(session, user_id)
+            if user and not user.tos_accepted:
+                if isinstance(event, Message):
+                    await event.answer("📋 Сначала примите пользовательское соглашение. Нажмите /start")
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("📋 Сначала примите пользовательское соглашение. Нажмите /start", show_alert=True)
+                return
+            await session.close()
+
         return await handler(event, data)
