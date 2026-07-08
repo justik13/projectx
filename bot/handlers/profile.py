@@ -149,3 +149,12 @@ async def back_to_profile_or_main(callback: CallbackQuery):
     else:
         await callback.message.delete()
         await callback.answer()
+
+@router.callback_query(F.data == "back_to_main_menu")
+async def back_to_main_menu(callback: CallbackQuery):
+    """Удаляет инлайн-интерфейс, возвращая фокус на Reply-клавиатуру нижнего меню"""
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
