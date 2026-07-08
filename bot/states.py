@@ -50,3 +50,6 @@ class AdminStates(StatesGroup):
     viewing_tariff_card = State()
     adding_tariff = State()
     editing_tariff = State()
+    editing_tariff_days = State()
+    editing_tariff_rub = State()
+    editing_tariff_stars = State()
