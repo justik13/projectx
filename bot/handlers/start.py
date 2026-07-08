@@ -120,3 +120,28 @@ async def read_tos(callback: CallbackQuery):
         if "message is not modified" not in str(e):
             raise
 
+@router.message(F.text == "🔌 Подключение")
+async def show_connection(message: Message):
+    """Заглушка для раздела Подключение"""
+    await message.answer("🔌 Раздел 'Подключение' находится в разработке.")
+
+@router.message(F.text == "💳 Оплата")
+async def show_payment(message: Message):
+    """Заглушка для раздела Оплата"""
+    await message.answer("💳 Раздел 'Оплата' находится в разработке.")
+
+@router.message(F.text == "💬 Поддержка")
+async def show_support(message: Message):
+    """Заглушка для раздела Поддержка"""
+    settings = get_settings()
+    await message.answer(f"💬 Поддержка: {settings.SUPPORT_USERNAME}")
+
+@router.message(F.text == "🛠 Админка")
+async def show_admin(message: Message):
+    """Заглушка для админки"""
+    settings = get_settings()
+    if message.from_user.id not in settings.ADMIN_IDS:
+        await message.answer("⛔️ У вас нет доступа к админ-панели.")
+        return
+    await message.answer("🛠 Админ-панель находится в разработке.")
+

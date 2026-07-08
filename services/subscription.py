@@ -10,7 +10,7 @@ class SubscriptionService:
     @staticmethod
     async def check_access(session: AsyncSession, telegram_id: int) -> bool:
         user = await get_user_by_telegram_id(session, telegram_id)
-        if not user or user.banned or not user.subscription_end or user.subscription_end < datetime.utcnow():
+        if not user or user.is_banned or not user.subscription_end or user.subscription_end < datetime.utcnow():
             return False
         return True
 
