@@ -128,3 +128,10 @@ async def get_active_users(session: AsyncSession) -> list[User]:
         select(User).where(User.subscription_end > datetime.utcnow())
     )
     return result.scalars().all()
+
+
+async def get_user_referrals(session: AsyncSession, telegram_id: int) -> list[User]:
+    """Получить список рефералов пользователя"""
+    stmt = select(User).where(User.referred_by == telegram_id).order_by(User.created_at.desc())
+    result = await session.execute(stmt)
+    return result.scalars().all()

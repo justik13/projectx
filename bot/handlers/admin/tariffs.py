@@ -253,3 +253,174 @@ async def delete_tariff_handler(callback: CallbackQuery):
         )
     finally:
         await session.close()
+
+
+@router.callback_query(F.data.startswith("admin_tariff_edit_days:"))
+async def start_edit_tariff_days(callback: CallbackQuery, state: FSMContext):
+    """Начать редактирование дней тарифа"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
+    
+    tariff_id = int(callback.data.split(":")[1])
+    await state.update_data(tariff_id=tariff_id)
+    await state.set_state(AdminStates.editing_tariff_days)
+    
+    await callback.message.edit_text(
+        "⏱ Введите новое количество дней:",
+        reply_markup=get_back_button("admin_tariffs")
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_tariff_days)
+async def process_edit_tariff_days(message: Message, state: FSMContext):
+    """Обработать редактирование дней тарифа"""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    
+    try:
+        days = int(message.text.strip())
+        if days < 0:
+            raise ValueError("Дни не могут быть отрицательными")
+    except ValueError:
+        await message.answer("⚠️ Введите положительное число. Попробуйте ещё раз:")
+        return
+    
+    data = await state.get_data()
+    tariff_id = data["tariff_id"]
+    
+    session = await get_session()
+    try:
+        tariff = await get_tariff_by_id(session, tariff_id)
+        if not tariff:
+            await message.answer("❌ Тариф не найден", show_alert=True)
+            await state.clear()
+            return
+        
+        await update_tariff(session, tariff, duration_days=days)
+        
+        await message.answer(
+            f"✅ Дни тарифа изменены на {days} дней",
+            reply_markup=get_back_button("admin_tariffs")
+        )
+        
+        logging.info(f"Admin {message.from_user.id} updated tariff {tariff_id} days to {days}")
+        await state.clear()
+    finally:
+        await session.close()
+
+
+@router.callback_query(F.data.startswith("admin_tariff_edit_rub:"))
+async def start_edit_tariff_rub(callback: CallbackQuery, state: FSMContext):
+    """Начать редактирование цены в рублях тарифа"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
+    
+    tariff_id = int(callback.data.split(":")[1])
+    await state.update_data(tariff_id=tariff_id)
+    await state.set_state(AdminStates.editing_tariff_rub)
+    
+    await callback.message.edit_text(
+        "💵 Введите новую цену в рублях:",
+        reply_markup=get_back_button("admin_tariffs")
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_tariff_rub)
+async def process_edit_tariff_rub(message: Message, state: FSMContext):
+    """Обработать редактирование цены в рублях тарифа"""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    
+    try:
+        price_rub = int(message.text.strip())
+        if price_rub < 0:
+            raise ValueError("Цена не может быть отрицательной")
+    except ValueError:
+        await message.answer("⚠️ Введите положительное число. Попробуйте ещё раз:")
+        return
+    
+    data = await state.get_data()
+    tariff_id = data["tariff_id"]
+    
+    session = await get_session()
+    try:
+        tariff = await get_tariff_by_id(session, tariff_id)
+        if not tariff:
+            await message.answer("❌ Тариф не найден", show_alert=True)
+            await state.clear()
+            return
+        
+        await update_tariff(session, tariff, price_rub=price_rub)
+        
+        await message.answer(
+            f"✅ Цена в рублях тарифа изменена на {price_rub} ₽",
+            reply_markup=get_back_button("admin_tariffs")
+        )
+        
+        logging.info(f"Admin {message.from_user.id} updated tariff {tariff_id} price rub to {price_rub}")
+        await state.clear()
+    finally:
+        await session.close()
+
+
+@router.callback_query(F.data.startswith("admin_tariff_edit_stars:"))
+async def start_edit_tariff_stars(callback: CallbackQuery, state: FSMContext):
+    """Начать редактирование цены в stars тарифа"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
+    
+    tariff_id = int(callback.data.split(":")[1])
+    await state.update_data(tariff_id=tariff_id)
+    await state.set_state(AdminStates.editing_tariff_stars)
+    
+    await callback.message.edit_text(
+        "⭐ Введите новую цену в Stars:",
+        reply_markup=get_back_button("admin_tariffs")
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_tariff_stars)
+async def process_edit_tariff_stars(message: Message, state: FSMContext):
+    """Обработать редактирование цены в stars тарифа"""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    
+    try:
+        price_stars = int(message.text.strip())
+        if price_stars < 0:
+            raise ValueError("Цена не может быть отрицательной")
+    except ValueError:
+        await message.answer("⚠️ Введите положительное число. Попробуйте ещё раз:")
+        return
+    
+    data = await state.get_data()
+    tariff_id = data["tariff_id"]
+    
+    session = await get_session()
+    try:
+        tariff = await get_tariff_by_id(session, tariff_id)
+        if not tariff:
+            await message.answer("❌ Тариф не найден", show_alert=True)
+            await state.clear()
+            return
+        
+        await update_tariff(session, tariff, price_stars=price_stars)
+        
+        await message.answer(
+            f"✅ Цена в Stars тарифа изменена на {price_stars} ⭐",
+            reply_markup=get_back_button("admin_tariffs")
+        )
+        
+        logging.info(f"Admin {message.from_user.id} updated tariff {tariff_id} price stars to {price_stars}")
+        await state.clear()
+    finally:
+        await session.close()

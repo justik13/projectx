@@ -269,3 +269,71 @@ async def delete_server_handler(callback: CallbackQuery):
         )
     finally:
         await session.close()
+
+
+@router.callback_query(F.data.startswith("admin_server_edit:"))
+async def start_edit_server(callback: CallbackQuery, state: FSMContext):
+    """Начать редактирование сервера"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
+    
+    server_id = int(callback.data.split(":")[1])
+    await state.update_data(server_id=server_id)
+    await state.set_state(AdminStates.editing_server)
+    
+    await callback.message.edit_text(
+        "✏️ Введите новое имя сервера:",
+        reply_markup=get_back_button("admin_servers")
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_server)
+async def process_edit_server(message: Message, state: FSMContext):
+    """Обработать редактирование сервера"""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    server_id = data["server_id"]
+    
+    session = await get_session()
+    try:
+        server = await get_server_by_id(session, server_id)
+        if not server:
+            await message.answer("❌ Сервер не найден", show_alert=True)
+            await state.clear()
+            return
+        
+        new_name = message.text.strip()
+        await update_server(session, server, name=new_name)
+        
+        await message.answer(
+            f"✅ Имя сервера изменено на: {new_name}",
+            reply_markup=get_back_button("admin_servers")
+        )
+        
+        logging.info(f"Admin {message.from_user.id} updated server {server_id} name to {new_name}")
+        
+        # Возвращаемся к карточке сервера
+        flag = server.country_flag or "🌍"
+        status = "🟢 Активен" if server.is_active else "🔴 Отключен"
+        
+        text = f"{flag} Сервер: {new_name}\n"
+        text += "─────────────────────────────\n\n"
+        text += f"<b>ID:</b> {server.id}\n"
+        text += f"<b>Статус:</b> {status}\n"
+        text += f"<b>Протокол:</b> {server.protocol}\n"
+        text += f"<b>API URL:</b> {server.api_url}\n"
+        text += f"<b>Макс клиентов:</b> {server.max_clients}\n"
+        
+        await message.answer(
+            text,
+            reply_markup=get_admin_server_card_keyboard(server.id, server.is_active),
+            parse_mode="HTML"
+        )
+        await state.clear()
+    finally:
+        await session.close()

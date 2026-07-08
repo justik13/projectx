@@ -1,7 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from database.connection import get_session
-from database.repositories.users_repo import get_user_by_telegram_id
+from database.repositories.users_repo import get_user_by_telegram_id, get_user_referrals
 from database.repositories.profiles_repo import get_user_profiles, get_user_profiles_count
 from services.subscription import SubscriptionService
 from bot.texts import PROFILE_TEXT, REFERRAL_TEXT, REFERRALS_LIST_HEADER, REFERRAL_ITEM
@@ -93,13 +93,38 @@ async def show_referral(callback: CallbackQuery, db_user: User | None = None):
 
 
 @router.callback_query(F.data == "referrals_list")
-async def show_referrals_list(callback: CallbackQuery):
-    """Показать список рефералов (заглушка для MVP)"""
-    await callback.message.edit_text(
-        "👥 Список рефералов пока пуст.\n\nПригласите друзей по вашей ссылке, чтобы они появились здесь.",
-        reply_markup=get_back_button("referral")
-    )
-    await callback.answer()
+async def show_referrals_list(callback: CallbackQuery, db_user: User | None = None):
+    """Показать список рефералов"""
+    user = db_user
+    if not user:
+        await callback.answer("❌ Пользователь не найден", show_alert=True)
+        return
+
+    session = await get_session()
+    try:
+        referrals = await get_user_referrals(session, user.telegram_id)
+        
+        if not referrals:
+            text = "👥 Список рефералов пока пуст.\n\nПригласите друзей по вашей ссылке, чтобы они появились здесь."
+        else:
+            settings = get_settings()
+            text = "👥 Ваши рефералы:\n"
+            text += "─────────────────────────────\n\n"
+            
+            for referral in referrals:
+                username = f"@{referral.username}" if referral.username else f"ID: {referral.telegram_id}"
+                bonus_days = settings.REFERRAL_BONUS_DAYS
+                text += f"• {username} — {bonus_days} бонусных дней\n"
+            
+            text += f"\nВсего приглашено: {len(referrals)} пользователей"
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_back_button("referral")
+        )
+        await callback.answer()
+    finally:
+        await session.close()
 
 
 @router.callback_query(F.data.in_(["back_to_profile", "back_to_main"]))
