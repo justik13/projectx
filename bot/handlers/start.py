@@ -79,26 +79,34 @@ async def cmd_start(message: Message, state: FSMContext, command: Command):
 @router.callback_query(F.data == "accept_tos")
 async def accept_tos(callback: CallbackQuery, state: FSMContext):
     """Обработчик принятия оферты"""
+    from aiogram.exceptions import TelegramBadRequest
     
     telegram_id = callback.from_user.id
     session = await get_session()
     
     try:
         user = await get_user_by_telegram_id(session, telegram_id)
-        if user:
+        if user and not user.tos_accepted:
             await update_user(session, user, tos_accepted=True)
             logging.info(f"User {telegram_id} accepted ToS")
         
-        # Показываем главное меню
+        # Отвечаем на callback
+        await callback.answer("✅ Оферта принята!", show_alert=False)
+        
+        # Пытаемся отредактировать сообщение
+        try:
+            await callback.message.edit_text(WELCOME_TEXT)
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        
+        # Отправляем главное меню отдельным сообщением
         settings = get_settings()
         is_admin = telegram_id in settings.ADMIN_IDS
-        await callback.message.edit_text(WELCOME_TEXT)
         await callback.message.answer(
             "✅ Добро пожаловать!",
             reply_markup=get_main_menu(is_admin=is_admin)
         )
-        
-        await callback.answer()
     
     finally:
         await session.close()
@@ -106,16 +114,20 @@ async def accept_tos(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "read_tos")
 async def read_tos(callback: CallbackQuery):
     """Обработчик чтения оферты"""
+    from aiogram.exceptions import TelegramBadRequest
+    
+    # Сначала отвечаем на callback, чтобы убрать "часики"
+    await callback.answer()
+    
     try:
         await callback.message.edit_text(
             TOS_TEXT,
             reply_markup=get_tos_keyboard()
         )
-    except Exception as e:
-        # Игнорируем ошибку если текст не изменился
+    except TelegramBadRequest as e:
+        # Игнорируем ошибку "message is not modified" (пользователь нажал кнопку повторно)
         if "message is not modified" not in str(e):
             raise
-    await callback.answer()
 
 @router.message(F.text == "👤 Профиль")
 async def show_profile(message: Message):
