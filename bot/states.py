@@ -10,8 +10,8 @@ class OnboardingStates(StatesGroup):
 
 class DeviceCreationStates(StatesGroup):
     """Состояния для создания устройства"""
-    choose_location = State()
-    enter_name = State()
+    choose_server = State()
+    enter_device_name = State()
 
 
 class DeviceManagementStates(StatesGroup):
