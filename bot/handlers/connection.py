@@ -193,7 +193,10 @@ async def delete_device(callback: CallbackQuery):
         if server:
             # Синхронно деактивируем клиента на стороне Amnezia API перед очисткой БД
             client = AmneziaClient(server.api_url, server.api_key)
-            await client.delete_user(client_id=profile.peer_id, protocol=server.protocol)
+            deleted = await client.delete_user(client_id=profile.peer_id, protocol=server.protocol)
+            if not deleted:
+                await callback.answer("❌ Сервер недоступен. Попробуйте удалить устройство позже.", show_alert=True)
+                return
 
         await delete_profile(session, profile)
         await callback.answer("🗑 Устройство успешно удалено", show_alert=True)
@@ -290,14 +293,25 @@ async def enter_device_name(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        profile = await create_profile(
-            session,
-            user_id=user.id,
-            server_id=server.id,
-            device_name=device_name,
-            peer_id=result.get("id"),
-            raw_config=result.get("config")
-        )
+        try:
+            profile = await create_profile(
+                session,
+                user_id=user.id,
+                server_id=server.id,
+                device_name=device_name,
+                peer_id=result.get("id"),
+                raw_config=result.get("config")
+            )
+        except Exception as e:
+            # Если создание профиля в БД не удалось, откатываем создание на сервере
+            logging.error(f"Failed to create profile in DB: {e}")
+            try:
+                await client.delete_user(client_id=result.get("id"), protocol=server.protocol)
+            except Exception as rollback_error:
+                logging.error(f"Failed to rollback user creation on server: {rollback_error}")
+            await message.answer("❌ Произошла ошибка при создании устройства. Попробуйте еще раз.")
+            await state.clear()
+            return
 
         await state.clear()
         builder = InlineKeyboardBuilder()

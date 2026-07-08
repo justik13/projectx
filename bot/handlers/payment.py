@@ -15,6 +15,7 @@ from bot.keyboards import (
     get_payment_tariff_keyboard, get_payment_method_keyboard, get_back_button
 )
 from datetime import datetime
+from config.settings import get_settings
 
 router = Router()
 
