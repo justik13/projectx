@@ -32,3 +32,17 @@ async def get_last_payment(session: AsyncSession, user_id: int) -> Optional[Paym
     stmt = select(Payment).where(Payment.user_id == user_id).order_by(Payment.created_at.desc()).limit(1)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+async def get_payment_by_id(session: AsyncSession, payment_id: int) -> Optional[Payment]:
+    """Получить платёж по ID с загрузкой связей"""
+    from sqlalchemy.orm import selectinload
+    
+    result = await session.execute(
+        select(Payment)
+        .options(
+            selectinload(Payment.user),
+            selectinload(Payment.tariff)
+        )
+        .where(Payment.id == payment_id)
+    )
+    return result.scalar_one_or_none()

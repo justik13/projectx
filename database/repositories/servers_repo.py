@@ -44,3 +44,22 @@ async def update_server(session: AsyncSession, server: Server, **kwargs) -> Serv
 async def delete_server(session: AsyncSession, server: Server) -> None:
     await session.delete(server)
     await session.commit()
+
+async def get_all_servers(session: AsyncSession) -> list[Server]:
+    """Получить все серверы"""
+    result = await session.execute(select(Server))
+    return result.scalars().all()
+
+
+async def get_total_free_ips(session: AsyncSession) -> int:
+    """Посчитать общее количество свободных IP на всех серверах"""
+    result = await session.execute(
+        select(func.sum(Server.max_clients)).where(Server.is_active == True)
+    )
+    total_capacity = result.scalar() or 0
+    
+    # Вычитаем количество созданных профилей на активных серверах
+    from database.repositories.profiles_repo import get_all_profiles_count
+    used_profiles = await get_all_profiles_count(session)
+    
+    return max(0, total_capacity - used_profiles)

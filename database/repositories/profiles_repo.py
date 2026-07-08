@@ -42,3 +42,8 @@ async def get_user_profiles_count(session: AsyncSession, user_id: int) -> int:
     stmt = select(func.count(VPNProfile.id)).where(VPNProfile.user_id == user_id)
     result = await session.execute(stmt)
     return result.scalar_one()
+
+async def get_all_profiles_count(session: AsyncSession) -> int:
+    """Посчитать общее количество профилей (устройств)"""
+    result = await session.execute(select(func.count()).select_from(VPNProfile))
+    return result.scalar() or 0

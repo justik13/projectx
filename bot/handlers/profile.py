@@ -13,7 +13,7 @@ import logging
 router = Router()
 
 
-@router.message(F.text == " Профиль")
+@router.message(F.text == "👤 Профиль")
 async def show_profile(message: Message):
     """Показать профиль пользователя"""
     telegram_id = message.from_user.id
