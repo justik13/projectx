@@ -19,6 +19,7 @@ from bot.texts import (
 from bot.keyboards import get_device_keyboard, get_back_button
 from bot.states import DeviceCreationStates, DeviceManagementStates
 from utils.formatters import format_traffic, format_datetime
+from database.models import User
 import logging
 import uuid
 
@@ -69,25 +70,34 @@ async def _build_connections_screen(user_id: int, session) -> tuple[str, InlineK
     return text, builder
 
 @router.message(F.text == "🔌 Подключение")
-async def show_connections(message: Message):
-    telegram_id = message.from_user.id
+async def show_connections(message: Message, db_user: User | None = None):
+    user = db_user
+    if not user:
+        await message.answer("❌ Пользователь не найден.")
+        return
+
     session = await get_session()
     try:
-        if not await SubscriptionService.check_access(session, telegram_id):
+        if not await SubscriptionService.check_access(session, user.telegram_id):
             await message.answer(ERROR_NO_SUBSCRIPTION)
             return
 
-        text, builder = await _build_connections_screen(telegram_id, session)
+        text, builder = await _build_connections_screen(user.id, session)
         await message.answer(text, reply_markup=builder.as_markup())
     finally:
         await session.close()
 
 @router.callback_query(F.data == "back_to_connections")
-async def back_to_connections(callback: CallbackQuery, state: FSMContext):
+async def back_to_connections(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
     await state.clear()
+    user = db_user
+    if not user:
+        await callback.answer("❌ Пользователь не найден", show_alert=True)
+        return
+
     session = await get_session()
     try:
-        text, builder = await _build_connections_screen(callback.from_user.id, session)
+        text, builder = await _build_connections_screen(user.id, session)
         await callback.message.edit_text(text, reply_markup=builder.as_markup())
         await callback.answer()
     except Exception as e:
@@ -261,7 +271,7 @@ async def select_server(callback: CallbackQuery, state: FSMContext):
         await session.close()
 
 @router.message(DeviceCreationStates.enter_device_name)
-async def enter_device_name(message: Message, state: FSMContext):
+async def enter_device_name(message: Message, state: FSMContext, db_user: User | None = None):
     device_name = message.text.strip()
     if not device_name or len(device_name) > 16 or not device_name.replace(" ", "").isalnum():
         await message.answer("⚠️ Имя устройства должно быть от 1 до 16 символов (только буквы и цифры):")
@@ -269,10 +279,14 @@ async def enter_device_name(message: Message, state: FSMContext):
 
     data = await state.get_data()
     server_id = data.get("server_id")
-    telegram_id = message.from_user.id
     session = await get_session()
     try:
-        user = await get_user_by_telegram_id(session, telegram_id)
+        user = db_user
+        if not user:
+            await message.answer("❌ Пользователь не найден.")
+            await state.clear()
+            return
+            
         server = await get_server_by_id(session, server_id)
         
         profiles_count = await get_user_profiles_count(session, user.id)
@@ -283,7 +297,7 @@ async def enter_device_name(message: Message, state: FSMContext):
 
         short_hash = uuid.uuid4().hex[:4]
         clean_device_name = "".join(c for c in device_name if c.isalnum())[:10]
-        client_name = f"tg_{telegram_id}_{clean_device_name}_{short_hash}"
+        client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
         
         client = AmneziaClient(server.api_url, server.api_key)
         result = await client.create_user(client_name=client_name, protocol=server.protocol, expires_at=None)
@@ -331,12 +345,12 @@ async def enter_device_name(message: Message, state: FSMContext):
         await session.close()
 
 @router.callback_query(F.data.startswith("copy_config:"))
-async def copy_config(callback: CallbackQuery):
+async def copy_config(callback: CallbackQuery, db_user: User | None = None):
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:
         profile = await get_profile_by_id(session, profile_id)
-        user = await get_user_by_telegram_id(session, callback.from_user.id)
+        user = db_user
         if not user or profile.user_id != user.id:
             await callback.answer("⛔️ Нет доступа", show_alert=True)
             return

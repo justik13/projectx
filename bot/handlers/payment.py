@@ -16,6 +16,7 @@ from bot.keyboards import (
 )
 from datetime import datetime
 from config.settings import get_settings
+from database.models import User
 
 router = Router()
 
@@ -60,14 +61,13 @@ async def select_tariff(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("pay_stars:"))
-async def pay_stars(callback: CallbackQuery, state: FSMContext):
+async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
     """Выставление счета (Invoice) для оплаты через Telegram Stars"""
     tariff_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:
         tariff = await get_tariff_by_id(session, tariff_id)
-        user = await get_user_by_telegram_id(session, callback.from_user.id)
-        
+        user = db_user
         if not tariff or not user:
             await callback.answer("❌ Ошибка данных", show_alert=True)
             return
@@ -169,14 +169,16 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("confirm_payment_sbp:"))
-async def confirm_payment_sbp(callback: CallbackQuery, state: FSMContext):
+async def confirm_payment_sbp(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
     """Создание заявки на ручную проверку администратором при оплате по СБП"""
     tariff_id = int(callback.data.split(":")[1])
-    telegram_id = callback.from_user.id
-    
     session = await get_session()
     try:
-        user = await get_user_by_telegram_id(session, telegram_id)
+        user = db_user
+        if not user:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+            
         tariff = await get_tariff_by_id(session, tariff_id)
         
         # Создаем платеж со статусом pending
@@ -197,7 +199,7 @@ async def confirm_payment_sbp(callback: CallbackQuery, state: FSMContext):
         settings = get_settings()
         admin_text = (
             f"🔔 <b>Новый платёж СБП (Требуется проверка)!</b>\n"
-            f"👤 Пользователь: ID {telegram_id} (@{user.username or '—'})\n"
+            f"👤 Пользователь: ID {user.telegram_id} (@{user.username or '—'})\n"
             f"💰 Сумма: {tariff.price_rub} ₽\n"
             f"⏱ Тариф: {tariff.duration_days} дней\n\n"
             f"Для подтверждения используйте ID платежа: <code>{payment.id}</code> через админ-панель."
