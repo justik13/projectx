@@ -8,18 +8,11 @@ from database.repositories.users_repo import get_user_by_telegram_id, update_use
 from services.subscription import SubscriptionService
 from bot.texts import WELCOME_TEXT, TOS_TEXT, TOS_ACCEPT_PROMPT
 from bot.keyboards import get_main_menu, get_tos_keyboard, get_tos_accept_keyboard
-from bot.middlewares import BanCheckMiddleware, ToSCheckMiddleware
 from config.settings import get_settings
 import logging
 import re
 
 router = Router()
-
-# Регистрируем middleware
-router.message.middleware(BanCheckMiddleware())
-router.callback_query.middleware(BanCheckMiddleware())
-router.message.middleware(ToSCheckMiddleware())
-router.callback_query.middleware(ToSCheckMiddleware())
 
 
 def parse_referral_id(command_args: str) -> int | None:

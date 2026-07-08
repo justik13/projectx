@@ -8,6 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config.settings import get_settings
 from database.connection import init_db, close_db
 from services.background_worker import start_background_worker
+from bot.middlewares import UserContextMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,6 +22,10 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     bot = Bot(token=settings.BOT_TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+
+    # Регистрируем middleware глобально
+    dp.message.middleware(UserContextMiddleware())
+    dp.callback_query.middleware(UserContextMiddleware())
 
     # Регистрация роутеров
     from bot.handlers.start import router as start_router
