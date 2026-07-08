@@ -35,15 +35,16 @@ class ToSCheckMiddleware(BaseMiddleware):
     """Проверяет, принял ли пользователь оферту"""
 
     async def __call__(self, handler, event, data):
-        # Разрешаем команду /start и callback'и принятия оферты
+        # Разрешаем команду /start (любой текст, начинающийся с /start)
         if isinstance(event, Message) and event.text and event.text.startswith("/start"):
             return await handler(event, data)
 
+        # Разрешаем callback'и принятия оферты
         if isinstance(event, CallbackQuery):
             if event.data in ["accept_tos", "read_tos"]:
                 return await handler(event, data)
 
-        # Проверяем tos_accepted для остальных событий
+        # Получаем user_id
         user_id = None
         if isinstance(event, Message):
             user_id = event.from_user.id
@@ -54,11 +55,13 @@ class ToSCheckMiddleware(BaseMiddleware):
             session = await get_session()
             try:
                 user = await get_user_by_telegram_id(session, user_id)
-                if user and not user.tos_accepted:
+                
+                # 🔑 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: блокируем если пользователь НЕ СУЩЕСТВУЕТ или не принял оферту
+                if not user or not user.tos_accepted:
                     if isinstance(event, Message):
-                        await event.answer("📋 Сначала примите пользовательское соглашение. Нажмите /start")
+                        await event.answer("📋 Сначала примите пользовательское соглашение.\n\nНажмите /start")
                     elif isinstance(event, CallbackQuery):
-                        await event.answer("📋 Сначала примите пользовательское соглашение. Нажмите /start", show_alert=True)
+                        await event.answer("📋 Сначала примите пользовательское соглашение", show_alert=True)
                     return
             finally:
                 await session.close()
