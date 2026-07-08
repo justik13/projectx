@@ -10,11 +10,6 @@ from database.connection import init_db, close_db, get_session
 from services.background_worker import start_background_worker
 from bot.middlewares import UserContextMiddleware
 from cryptography.fernet import Fernet
-from datetime import datetime
-from database.repositories.users_repo import get_all_users, get_user_by_telegram_id
-from database.repositories.profiles_repo import get_user_profiles
-from database.repositories.servers_repo import get_server_by_id
-from services.amnezia_client import AmneziaClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,58 +56,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     return bot, dp
 
 
-async def revoke_expired_subscriptions():
-    """Фоновая задача для автоматического отзыва истекших подписок"""
-    while True:
-        try:
-            logger.info("Проверка истекших подписок...")
-            
-            # Получаем все пользователей с истекшей подпиской
-            session = await get_session()
-            expired_users = await get_all_users(session)
-            
-            for user in expired_users:
-                if user.subscription_end and user.subscription_end < datetime.utcnow():
-                    logger.info(f"Найден истекший пользователь: {user.telegram_id}")
-                    
-                    # Получаем активные профили пользователя
-                    profiles = await get_user_profiles(session, user.id)
-                    
-                    for profile in profiles:
-                        try:
-                            # Получаем информацию о сервере
-                            server = await get_server_by_id(session, profile.server_id)
-                            
-                            if server:
-                                # Создаем клиент для Amnezia API
-                                client = AmneziaClient(server.api_url, server.api_key)
-                                
-                                # Отключаем клиента на сервере
-                                result = await client.update_client(
-                                    client_id=profile.peer_id,
-                                    protocol=server.protocol,
-                                    status="disabled"
-                                )
-                                
-                                if result:
-                                    logger.info(f"Отключен клиент {profile.peer_id} на сервере {server.name}")
-                                else:
-                                    logger.warning(f"Не удалось отключить клиента {profile.peer_id} на сервере {server.name}")
-                            else:
-                                logger.warning(f"Сервер не найден для профиля {profile.id}")
-                                
-                        except Exception as e:
-                            logger.error(f"Ошибка при обработке профиля {profile.id}: {e}", exc_info=True)
-            
-            await session.close()
-            
-        except Exception as e:
-            logger.error(f"Ошибка в фоновой задаче проверки подписок: {e}", exc_info=True)
-        
-        # Ждем 30 минут перед следующей проверкой
-        await asyncio.sleep(1800)
-
-
 async def main():
     try:
         settings = get_settings()
@@ -134,9 +77,6 @@ async def main():
 
         # Запускаем фоновый мониторинг трафика и подписок
         await start_background_worker()
-
-        # Запускаем фоновую задачу для отзывания истекших подписок
-        asyncio.create_task(revoke_expired_subscriptions())
 
         logger.info("Запуск polling процесса...")
         await dp.start_polling(bot)

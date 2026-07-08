@@ -54,7 +54,7 @@ async def subscription_expiry_checker_loop():
         except Exception as e:
             logger.error(f"Ошибка в цикле проверки подписок: {e}", exc_info=True)
             
-        await asyncio.sleep(3600)  # Проверка каждый час
+        await asyncio.sleep(1800)  # Проверка каждые 30 минут
 
 
 async def traffic_sync_loop():
