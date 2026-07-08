@@ -30,10 +30,12 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     
     # Регистрируем роутеры
     from bot.handlers.start import router as start_router
+    from bot.handlers.profile import router as profile_router  # Добавлено
     dp.include_router(start_router)
+    dp.include_router(profile_router)  # Добавлено
     
     logger.info("Routers registered")
-    logger.info("Bot initialized successfully")
+    logger.info("Profile router registered")  # Добавлено
     return bot, dp
 
 

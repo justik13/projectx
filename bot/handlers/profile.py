@@ -1,0 +1,169 @@
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery
+from database.connection import get_session
+from database.repositories.users_repo import get_user_by_telegram_id
+from database.repositories.profiles_repo import get_user_profiles, get_user_profiles_count
+from services.subscription import SubscriptionService
+from bot.texts import PROFILE_TEXT, REFERRAL_TEXT, REFERRALS_LIST_HEADER, REFERRAL_ITEM
+from bot.keyboards import get_profile_keyboard, get_referral_keyboard, get_back_button
+from utils.formatters import format_traffic, format_datetime, format_days_left
+from config.settings import get_settings
+import logging
+
+router = Router()
+
+@router.message(F.text == "👤 Профиль")
+async def show_profile(message: Message):
+    """Показать профиль пользователя"""
+    telegram_id = message.from_user.id
+    session = await get_session()
+    
+    try:
+        user = await get_user_by_telegram_id(session, telegram_id)
+        if not user:
+            await message.answer("❌ Пользователь не найден.")
+            return
+        
+        # Получаем количество устройств
+        profiles_count = await get_user_profiles_count(session, user.id)
+        
+        # Считаем общий трафик по всем устройствам
+        profiles = await get_user_profiles(session, user.id)
+        total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
+        
+        # Определяем статус подписки
+        has_access = await SubscriptionService.check_access(session, telegram_id)
+        status_emoji = "🟢" if has_access else "🔴"
+        status_text = "Активен" if has_access else "Неактивен"
+        
+        # Форматируем данные
+        valid_until = format_datetime(user.subscription_end)
+        days_left = format_days_left(user.subscription_end)
+        total_traffic_str = format_traffic(total_traffic)
+        
+        # Считаем количество рефералов (пользователей, у которых referred_by = telegram_id)
+        # Для MVP используем referral_days как счётчик полученных дней
+        # referrals_count можно получить отдельным запросом, но пока оставим 0 или из поля
+        
+        # Формируем текст профиля
+        text = PROFILE_TEXT.format(
+            name=user.first_name or "Пользователь",
+            username=user.username or "—",
+            telegram_id=user.telegram_id,
+            status_emoji=status_emoji,
+            status_text=status_text,
+            valid_until=valid_until,
+            days_left=days_left,
+            devices_count=profiles_count,
+            device_limit=user.device_limit,
+            total_traffic=total_traffic_str,
+            referrals_count=user.referral_days // get_settings().REFERRAL_BONUS_DAYS if user.referral_days > 0 else 0,
+            referral_days=user.referral_days
+        )
+        
+        await message.answer(
+            text,
+            reply_markup=get_profile_keyboard(),
+            parse_mode=None
+        )
+    
+    finally:
+        await session.close()
+
+
+@router.callback_query(F.data == "referral")
+async def show_referral(callback: CallbackQuery):
+    """Показать экран рефералов"""
+    telegram_id = callback.from_user.id
+    session = await get_session()
+    
+    try:
+        user = await get_user_by_telegram_id(session, telegram_id)
+        if not user:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+        
+        settings = get_settings()
+        bot_info = await callback.bot.get_me()
+        referral_link = f"https://t.me/{bot_info.username}?start=ref_{telegram_id}"
+        
+        # Считаем приглашённых (пока используем referral_days как индикатор)
+        invited_count = user.referral_days // settings.REFERRAL_BONUS_DAYS if user.referral_days > 0 else 0
+        
+        text = REFERRAL_TEXT.format(
+            bonus_days=settings.REFERRAL_BONUS_DAYS,
+            referral_link=referral_link,
+            invited_count=invited_count,
+            bonus_total=user.referral_days
+        )
+        
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_referral_keyboard()
+        )
+        await callback.answer()
+    
+    finally:
+        await session.close()
+
+
+@router.callback_query(F.data == "referrals_list")
+async def show_referrals_list(callback: CallbackQuery):
+    """Показать список рефералов (заглушка для MVP)"""
+    # Для MVP просто показываем сообщение, что список пуст
+    # В будущем нужно добавить запрос в users_repo для получения рефералов
+    await callback.message.edit_text(
+        "👥 Список рефералов пока пуст.\n\nПригласите друзей по вашей ссылке, чтобы они появились здесь.",
+        reply_markup=get_back_button("referral")
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_(["back_to_profile", "back_to_main"]))
+async def back_to_profile_or_main(callback: CallbackQuery):
+    """Возврат к профилю или главному меню"""
+    if callback.data == "back_to_profile":
+        # Имитируем нажатие кнопки "👤 Профиль"
+        from aiogram.types import Message
+        # Просто отправляем профиль заново
+        telegram_id = callback.from_user.id
+        session = await get_session()
+        try:
+            user = await get_user_by_telegram_id(session, telegram_id)
+            if not user:
+                await callback.answer("❌ Пользователь не найден", show_alert=True)
+                return
+            
+            profiles_count = await get_user_profiles_count(session, user.id)
+            profiles = await get_user_profiles(session, user.id)
+            total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
+            has_access = await SubscriptionService.check_access(session, telegram_id)
+            status_emoji = "🟢" if has_access else "🔴"
+            status_text = "Активен" if has_access else "Неактивен"
+            
+            text = PROFILE_TEXT.format(
+                name=user.first_name or "Пользователь",
+                username=user.username or "—",
+                telegram_id=user.telegram_id,
+                status_emoji=status_emoji,
+                status_text=status_text,
+                valid_until=format_datetime(user.subscription_end),
+                days_left=format_days_left(user.subscription_end),
+                devices_count=profiles_count,
+                device_limit=user.device_limit,
+                total_traffic=format_traffic(total_traffic),
+                referrals_count=user.referral_days // get_settings().REFERRAL_BONUS_DAYS if user.referral_days > 0 else 0,
+                referral_days=user.referral_days
+            )
+            
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_profile_keyboard()
+            )
+            await callback.answer()
+        finally:
+            await session.close()
+    else:
+        # Возврат к главному меню
+        await callback.message.delete()
+        await callback.answer()
