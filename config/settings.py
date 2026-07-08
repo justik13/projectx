@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from typing import List
 import logging
+from pydantic import field_validator
 
 class Settings(BaseSettings):
     BOT_TOKEN: str
@@ -13,11 +14,19 @@ class Settings(BaseSettings):
     
     model_config = {
         "env_file": ".env",
-        "env_file_encoding": "utf-8"
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False
     }
     
-    class Config:
-        case_sensitive = False
+    @field_validator("ADMIN_IDS", mode="before")
+    @classmethod
+    def parse_admins(cls, v: str | list | int) -> list[int]:
+        if isinstance(v, str):
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        elif isinstance(v, int):
+            return [v]
+        else:
+            return v
 
 _settings = None
 
