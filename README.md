@@ -3,11 +3,6 @@
 
 ## Production-ready Telegram бот для управления Amnezia VPN
 
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/downloads/)
-[![Aiogram 3.x](https://img.shields.io/badge/Aiogram-3.x-blue)](https://docs.aiogram.dev/)
-[![SQLAlchemy 2.0](https://img.shields.io/badge/SQLAlchemy-2.0-blue)](https://docs.sqlalchemy.org/)
-[![License MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-
 **ProjectX Bot** — это современный, отказоустойчивый Telegram-бот для продажи и управления VPN-подключениями через Amnezia API. Поддерживает мульти-VPS, нативную оплату Stars, реферальную систему и автоматический отзыв истекших подписок.
 
 ---
