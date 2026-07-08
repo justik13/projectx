@@ -3,7 +3,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from database.connection import get_session
-from database.repositories.users_repo import get_user_by_telegram_id, create_user, update_user
+from database.repositories.users_repo import get_user_by_telegram_id, update_user
 from services.subscription import SubscriptionService
 from bot.texts import WELCOME_TEXT, TOS_TEXT, TOS_ACCEPT_PROMPT
 from bot.keyboards import get_main_menu, get_tos_keyboard, get_tos_accept_keyboard
@@ -16,11 +16,9 @@ router = Router()
 # Импортируем middleware
 from bot.middlewares import BanCheckMiddleware, ToSCheckMiddleware
 
-# Регистрируем middleware для проверки бана
+# Регистрируем middleware для проверки бана и принятия оферты
 router.message.middleware(BanCheckMiddleware())
 router.callback_query.middleware(BanCheckMiddleware())
-
-# Регистрируем middleware для проверки принятия оферты
 router.message.middleware(ToSCheckMiddleware())
 router.callback_query.middleware(ToSCheckMiddleware())
 
