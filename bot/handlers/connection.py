@@ -14,6 +14,7 @@ from bot.states import DeviceCreationStates
 from utils.formatters import format_traffic, format_datetime
 from config.settings import get_settings
 import logging
+import uuid
 
 router = Router()
 
@@ -184,11 +185,18 @@ async def enter_device_name(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        # Вызываем amnezia-api для создания клиента
-        # API сам сгенерирует ID (публичный ключ)
+        # Формируем уникальное имя клиента для Amnezia API
+        # Формат: tg_{user_id}_{device_name}_{short_hash}
+        # Пример: tg_872658825_iPhone_a3f9
+        short_hash = uuid.uuid4().hex[:4]
+        # Убираем пробелы и спецсимволы из device_name для API
+        clean_device_name = "".join(c for c in device_name if c.isalnum())[:10]
+        client_name = f"tg_{telegram_id}_{clean_device_name}_{short_hash}"
+        
+        # Вызываем amnezia-api (API сам сгенерирует peer ID)
         client = AmneziaClient(server.api_url, server.api_key)
         result = await client.create_user(
-            client_name=device_name,
+            client_name=client_name,
             protocol=server.protocol,
             expires_at=None
         )
