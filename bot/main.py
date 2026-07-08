@@ -28,15 +28,11 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
     
-    # TODO: Здесь будут регистрироваться роутеры
-    # from bot.handlers import start, profile, connection, payment, support, admin
-    # dp.include_router(start.router)
-    # dp.include_router(profile.router)
-    # dp.include_router(connection.router)
-    # dp.include_router(payment.router)
-    # dp.include_router(support.router)
-    # dp.include_router(admin.router)
+    # Регистрируем роутеры
+    from bot.handlers.start import router as start_router
+    dp.include_router(start_router)
     
+    logger.info("Routers registered")
     logger.info("Bot initialized successfully")
     return bot, dp
 
