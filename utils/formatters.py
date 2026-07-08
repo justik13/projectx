@@ -30,7 +30,7 @@ def format_days_left(dt: Optional[datetime]) -> str:
     if dt is None:
         return "—"
     
-    now = datetime.now()
+    now = datetime.utcnow()
     if dt < now:
         return "—"
     
