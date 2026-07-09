@@ -1,9 +1,10 @@
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from database.models import VPNProfile
 
 async def get_user_profiles(session: AsyncSession, user_id: int) -> list[VPNProfile]:
-    stmt = select(VPNProfile).where(VPNProfile.user_id == user_id).order_by(VPNProfile.created_at.desc())
+    stmt = select(VPNProfile).where(VPNProfile.user_id == user_id).options(selectinload(VPNProfile.server)).order_by(VPNProfile.created_at.desc())
     result = await session.execute(stmt)
     return result.scalars().all()
 

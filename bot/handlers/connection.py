@@ -118,12 +118,14 @@ async def manage_device(callback: CallbackQuery):
         
         server = await get_server_by_id(session, profile.server_id)
         flag = server.country_flag if server else "🌍"
+        server_name = server.name if server else "Неизвестно"
+        protocol = server.protocol if server else "—"
         
         text = (
             f"📱 Управление устройством: <b>{profile.device_name}</b>\n"
             f"─────────────────────────────\n\n"
-            f"📍 Локация: {flag} {server.name if server else 'Неизвестно'}\n"
-            f"📡 Протокол: {server.protocol if server else '—'}\n"
+            f"📍 Локация: {flag} {server_name}\n"
+            f"📡 Протокол: {protocol}\n"
             f"📊 Трафик: ∑ {format_traffic(profile.traffic_down + profile.traffic_up)}\n"
             f"⏱ Последняя активность: {format_datetime(profile.last_connected) if profile.last_connected else 'Нет данных'}"
         )
@@ -207,6 +209,8 @@ async def delete_device(callback: CallbackQuery):
             if not deleted:
                 await callback.answer("❌ Сервер недоступен. Попробуйте удалить устройство позже.", show_alert=True)
                 return
+        else:
+            logging.warning(f"Deleting orphan profile {profile.id} (server not found)")
 
         await delete_profile(session, profile)
         await callback.answer("🗑 Устройство успешно удалено", show_alert=True)
