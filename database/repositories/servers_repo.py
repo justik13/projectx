@@ -46,12 +46,6 @@ async def delete_server(session: AsyncSession, server: Server) -> None:
     await session.delete(server)
     await session.commit()
 
-async def get_all_servers(session: AsyncSession) -> list[Server]:
-    """Получить все серверы"""
-    result = await session.execute(select(Server))
-    return result.scalars().all()
-
-
 async def get_total_free_ips(session: AsyncSession) -> int:
     """Посчитать общее количество свободных IP на всех серверах"""
     result = await session.execute(

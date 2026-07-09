@@ -1,53 +1,24 @@
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import VPNProfile
-from typing import Optional, List
-from utils.encryption import encrypt_value, decrypt_value
-from config.settings import get_settings
 
-async def get_user_profiles(session: AsyncSession, user_id: int) -> List[VPNProfile]:
+async def get_user_profiles(session: AsyncSession, user_id: int) -> list[VPNProfile]:
     stmt = select(VPNProfile).where(VPNProfile.user_id == user_id).order_by(VPNProfile.created_at.desc())
     result = await session.execute(stmt)
-    profiles = result.scalars().all()
-    
-    if profiles:
-        settings = get_settings()
-        key = settings.DB_ENCRYPTION_KEY
-        # Расшифровываем конфиденциальные данные для каждого профиля
-        for profile in profiles:
-            profile.peer_id = decrypt_value(profile.peer_id, key)
-            profile.raw_config = decrypt_value(profile.raw_config, key)
-    
-    return profiles
+    return result.scalars().all()
 
-async def get_profile_by_id(session: AsyncSession, profile_id: int) -> Optional[VPNProfile]:
+async def get_profile_by_id(session: AsyncSession, profile_id: int) -> VPNProfile | None:
     stmt = select(VPNProfile).where(VPNProfile.id == profile_id)
     result = await session.execute(stmt)
-    profile = result.scalar_one_or_none()
-    
-    if profile:
-        settings = get_settings()
-        key = settings.DB_ENCRYPTION_KEY
-        # Расшифровываем конфиденциальные данные после чтения из БД
-        profile.peer_id = decrypt_value(profile.peer_id, key)
-        profile.raw_config = decrypt_value(profile.raw_config, key)
-    
-    return profile
+    return result.scalar_one_or_none()
 
 async def create_profile(session: AsyncSession, user_id: int, server_id: int, device_name: str, peer_id: str, raw_config: str) -> VPNProfile:
-    settings = get_settings()
-    key = settings.DB_ENCRYPTION_KEY
-    
-    # Шифруем конфиденциальные данные перед сохранением в БД
-    encrypted_peer_id = encrypt_value(peer_id, key)
-    encrypted_raw_config = encrypt_value(raw_config, key)
-    
     profile = VPNProfile(
         user_id=user_id,
         server_id=server_id,
         device_name=device_name,
-        peer_id=encrypted_peer_id,
-        raw_config=encrypted_raw_config
+        peer_id=peer_id,
+        raw_config=raw_config
     )
     session.add(profile)
     await session.commit()

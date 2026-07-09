@@ -223,7 +223,7 @@ async def toggle_server(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_server_delete:"))
 async def delete_server_handler(callback: CallbackQuery):
-    """Удалить сервер"""
+    """Отключить сервер (soft delete)"""
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
@@ -236,10 +236,11 @@ async def delete_server_handler(callback: CallbackQuery):
             await callback.answer("❌ Сервер не найден", show_alert=True)
             return
         
-        await delete_server(session, server_id)
+        # Отключаем сервер вместо удаления
+        await update_server(session, server, is_active=False)
         
-        await callback.answer("✅ Сервер удалён", show_alert=True)
-        logging.info(f"Admin {callback.from_user.id} deleted server {server_id}")
+        await callback.answer("✅ Сервер отключен", show_alert=True)
+        logging.info(f"Admin {callback.from_user.id} disabled server {server_id}")
         
         # Возвращаемся к списку
         servers = await get_all_servers(session)

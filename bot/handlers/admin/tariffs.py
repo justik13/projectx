@@ -214,7 +214,7 @@ async def toggle_tariff(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_tariff_delete:"))
 async def delete_tariff_handler(callback: CallbackQuery):
-    """Удалить тариф"""
+    """Отключить тариф (soft delete)"""
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
@@ -227,10 +227,11 @@ async def delete_tariff_handler(callback: CallbackQuery):
             await callback.answer("❌ Тариф не найден", show_alert=True)
             return
         
-        await delete_tariff(session, tariff_id)
+        # Отключаем тариф вместо удаления
+        await update_tariff(session, tariff, is_active=False)
         
-        await callback.answer("✅ Тариф удалён", show_alert=True)
-        logging.info(f"Admin {callback.from_user.id} deleted tariff {tariff_id}")
+        await callback.answer("✅ Тариф отключен", show_alert=True)
+        logging.info(f"Admin {callback.from_user.id} disabled tariff {tariff_id}")
         
         # Возвращаемся к списку
         tariffs = await get_all_tariffs(session)
