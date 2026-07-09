@@ -1,4 +1,3 @@
-# bot/main.py
 import asyncio
 import logging
 from cachetools import TTLCache
@@ -12,42 +11,34 @@ from bot.middlewares import UserContextMiddleware
 from cryptography.fernet import Fernet
 from services.amnezia_client import close_http_session
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# 🔥 FIX P2: Throttling Middleware для защиты от спама кнопками
-
-
-# 🔥 FIX: Используем TTLCache. O(1) сложность, автоматическая очистка протухших ключей.
 class ThrottlingMiddleware:
     def __init__(self, limit: float = 0.5):
         self.limit = limit
-        # Кэш сам удалит ключи, которые старше limit * 3 секунд
         self._last_call = TTLCache(maxsize=10000, ttl=limit * 3)
 
     async def __call__(self, handler, event, data):
         user_id = event.from_user.id if event.from_user else None
-        callback_data = event.data if hasattr(event, 'data') else None
-        
-        if not user_id or not callback_data:
+        if hasattr(event, 'data'):
+            action_key = event.data
+        elif hasattr(event, 'text'):
+            action_key = f"msg:{event.text or ''}"
+        else:
+            action_key = None
+        if not user_id or not action_key:
             return await handler(event, data)
-        
-        key = f"{user_id}:{callback_data}"
-        
+        key = f"{user_id}:{action_key}"
         if key in self._last_call:
             if hasattr(event, 'answer'):
                 try:
-                    await event.answer("⏳ Слишком часто! Подождите секунду.", show_alert=False)
+                    await event.answer("⏳ Слишком часто!", show_alert=False)
                 except Exception:
                     pass
-            return  # Прерываем обработку
-        
+            return
         self._last_call[key] = asyncio.get_running_loop().time()
         return await handler(event, data)
-
 
 async def setup_bot() -> tuple[Bot, Dispatcher]:
     settings = get_settings()
@@ -57,10 +48,8 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
-    
-    # 🔥 FIX P2: Антиспам на инлайн-кнопки
+    dp.message.middleware(ThrottlingMiddleware(limit=1.0))      # 🔥 P1: Защита от макросов
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.5))
-    
     dp.message.middleware(ChatActionMiddleware())
 
     from bot.handlers.start import router as start_router
@@ -74,44 +63,37 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     from bot.handlers.admin.tariffs import router as admin_tariffs_router
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
 
-    dp.include_router(start_router)
-    dp.include_router(profile_router)
-    dp.include_router(connection_router)
-    dp.include_router(support_router)
-    dp.include_router(payment_router)
-    dp.include_router(admin_dashboard_router)
-    dp.include_router(admin_users_router)
-    dp.include_router(admin_servers_router)
-    dp.include_router(admin_tariffs_router)
-    dp.include_router(admin_broadcast_router)
+    for r in [start_router, profile_router, connection_router, support_router, payment_router,
+              admin_dashboard_router, admin_users_router, admin_servers_router,
+              admin_tariffs_router, admin_broadcast_router]:
+        dp.include_router(r)
 
-    logger.info("Все роутеры успешно зарегистрированы")
+    logger.info("Все роутеры зарегистрированы")
     return bot, dp
-
 
 async def main():
     try:
         settings = get_settings()
         if not settings.DB_ENCRYPTION_KEY:
-            logger.critical("❌ КРИТИЧЕСКАЯ ОШИБКА: Переменная DB_ENCRYPTION_KEY пуста или отсутствует в .env!")
+            logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
-        except (ValueError, Exception) as e:
-            logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА: DB_ENCRYPTION_KEY невалиден: {e}")
+        except Exception as e:
+            logger.critical(f"❌ DB_ENCRYPTION_KEY невалиден: {e}")
             return
 
-        logger.info("Инициализация базы данных...")
+        logger.info("Инициализация БД...")
         await init_db()
-        logger.info("База данных успешно инициализирована")
+        logger.info("БД инициализирована")
 
         bot, dp = await setup_bot()
         await start_background_worker(bot)
 
-        logger.info("Запуск polling процесса...")
+        logger.info("Запуск polling...")
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:
         await close_db()
         await close_http_session()
