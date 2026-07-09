@@ -1,6 +1,6 @@
 # database/connection.py
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import text
+from sqlalchemy import text, event
 from database.models import Base
 from config.settings import get_settings
 from contextlib import asynccontextmanager
@@ -13,17 +13,30 @@ async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
     db_url = f"sqlite+aiosqlite:///{settings.DB_PATH}"
-    _engine = create_async_engine(db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30})
+    
+    _engine = create_async_engine(
+        db_url,
+        echo=False,
+        connect_args={"check_same_thread": False, "timeout": 30},
+        pool_pre_ping=True
+    )
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
 
+    # 🔥 FIX P0: Принудительно включаем проверку внешних ключей для SQLite
+    @event.listens_for(_engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA cache_size=-64000")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+
     async with _engine.begin() as conn:
-        await conn.execute(text("PRAGMA journal_mode=WAL"))
-        await conn.execute(text("PRAGMA synchronous=NORMAL"))
-        await conn.execute(text("PRAGMA cache_size=-64000"))
-        await conn.execute(text("PRAGMA busy_timeout=30000"))
         await conn.run_sync(Base.metadata.create_all)
     
-    logging.info(f"Database initialized at {settings.DB_PATH} (WAL mode enabled)")
+    logging.info(f"Database initialized at {settings.DB_PATH} (WAL + FK enabled)")
     return _engine, _sessionmaker
 
 async def get_session() -> AsyncSession:
