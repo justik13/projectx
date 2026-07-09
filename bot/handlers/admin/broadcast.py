@@ -7,6 +7,7 @@ from bot.keyboards import get_broadcast_confirm_keyboard, get_back_button
 from bot.states import AdminStates
 from config.settings import get_settings
 import logging
+import asyncio
 
 router = Router()
 
@@ -86,6 +87,7 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext):
                     parse_mode="HTML"
                 )
                 success_count += 1
+                await asyncio.sleep(0.05)  # Защита от Telegram Flood Wait
             except Exception as e:
                 fail_count += 1
                 logging.warning(f"Failed to send broadcast to {user.telegram_id}: {e}")
@@ -134,6 +136,7 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext):
                     parse_mode="HTML"
                 )
                 success_count += 1
+                await asyncio.sleep(0.05)  # Защита от Telegram Flood Wait
             except Exception as e:
                 fail_count += 1
                 logging.warning(f"Failed to send broadcast to {user.telegram_id}: {e}")
