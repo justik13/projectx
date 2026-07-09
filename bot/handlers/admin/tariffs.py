@@ -83,8 +83,10 @@ async def process_add_tariff(message: Message, state: FSMContext):
     if step == "days":
         try:
             days = int(message.text.strip())
+            if days < 1:
+                raise ValueError("Дни не могут быть меньше 1")
         except ValueError:
-            await message.answer("⚠️ Введите число. Попробуйте ещё раз:")
+            await message.answer("⚠️ Введите число больше 0. Попробуйте ещё раз:")
             return
         await state.update_data(duration_days=days, step="price_rub")
         await message.answer(
@@ -283,10 +285,10 @@ async def process_edit_tariff_days(message: Message, state: FSMContext):
     
     try:
         days = int(message.text.strip())
-        if days < 0:
-            raise ValueError("Дни не могут быть отрицательными")
+        if days < 1:
+            raise ValueError("Дни не могут быть меньше 1")
     except ValueError:
-        await message.answer("⚠️ Введите положительное число. Попробуйте ещё раз:")
+        await message.answer("⚠️ Введите число больше 0. Попробуйте ещё раз:")
         return
     
     data = await state.get_data()
