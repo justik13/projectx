@@ -348,25 +348,18 @@ async def toggle_ban_user(callback: CallbackQuery):
         # Если пользователь банится - отключаем его профили на серверах
         if new_status:
             profiles = await get_user_profiles(session, user.id)
-            from database.repositories.servers_repo import get_active_servers
-            
-            active_servers = await get_active_servers(session)
-            active_server_ids = [s.id for s in active_servers]
-            
-            # Получаем все активные серверы для подключения
-            for server in active_servers:
-                try:
-                    client = AmneziaClient(server.api_url, server.api_key)
-                    for profile in profiles:
-                        if profile.server_id in active_server_ids:
-                            await client.update_client(
-                                client_id=profile.peer_id,
-                                status="disabled"
-                            )
-                            # Обновляем статус профиля в БД
-                            await update_profile(session, profile, is_active=False)
-                except Exception as e:
-                    logging.error(f"Failed to disable profile {profile.id} on server {server.id}: {e}")
+            for profile in profiles:
+                server = await get_server_by_id(session, profile.server_id)
+                if server and server.is_active:
+                    try:
+                        client = AmneziaClient(server.api_url, server.api_key)
+                        await client.update_client(
+                            client_id=profile.peer_id,
+                            status="disabled"
+                        )
+                        await update_profile(session, profile, is_active=False)
+                    except Exception as e:
+                        logging.error(f"Failed to disable profile {profile.id} on server {server.id}: {e}")
         else:
             # Если пользователь разбанен - включаем его профили на серверах
             profiles = await get_user_profiles(session, user.id)
