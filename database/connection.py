@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 from database.models import Base
 from config.settings import get_settings
 import logging
@@ -17,9 +17,13 @@ async def init_db():
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     
     async with _engine.begin() as conn:
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
+        await conn.execute(text("PRAGMA synchronous=NORMAL"))
+        await conn.execute(text("PRAGMA cache_size=-64000"))
+        await conn.execute(text("PRAGMA busy_timeout=30000"))
         await conn.run_sync(Base.metadata.create_all)
     
-    logging.info(f"Database initialized at {settings.DB_PATH}")
+    logging.info(f"Database initialized at {settings.DB_PATH} (WAL mode enabled)")
     return _engine, _sessionmaker
 
 async def get_session() -> AsyncSession:
