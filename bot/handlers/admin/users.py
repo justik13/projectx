@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from database.connection import get_session
 from database.repositories.users_repo import (
     get_user_by_telegram_id, get_users_paginated, 
-    get_users_count, update_user
+    get_users_count, update_user, get_user_referrals
 )
 from database.repositories.profiles_repo import get_user_profiles, update_profile
 from services.subscription import SubscriptionService
