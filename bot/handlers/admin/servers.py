@@ -6,6 +6,7 @@ from database.repositories.servers_repo import (
     get_all_servers, get_server_by_id, create_server, 
     update_server, delete_server
 )
+from database.repositories.profiles_repo import update_profile
 from bot.keyboards import (
     get_admin_servers_keyboard, get_admin_server_card_keyboard, 
     get_back_button
