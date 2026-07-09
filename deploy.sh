@@ -57,6 +57,10 @@ install_dependencies() {
         logrotate \
         > /dev/null 2>&1
     
+    log "Создание системного пользователя projectx..."
+    useradd -r -s /bin/false projectx || true
+    success "Создан системный пользователь projectx"
+    
     success "Системные зависимости установлены"
 }
 
@@ -167,8 +171,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=projectx
+Group=projectx
 WorkingDirectory=$PROJECT_DIR
 Environment="PATH=$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EnvironmentFile=$PROJECT_DIR/.env
@@ -314,6 +318,9 @@ main() {
     setup_env
     setup_venv
     init_database
+    chown -R projectx:projectx "$PROJECT_DIR"
+    chmod 600 "$PROJECT_DIR/.env"
+    log "Права на файлы обновлены для пользователя projectx"
     setup_systemd
     setup_backup
     setup_monitoring
