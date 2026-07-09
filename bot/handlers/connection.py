@@ -1,8 +1,13 @@
+# bot/handlers/connection.py
+import html
+import logging
+import uuid
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.utils import html
+
 from database.connection import get_session
 from database.repositories.users_repo import get_user_by_telegram_id
 from database.repositories.servers_repo import get_active_servers, get_server_by_id
@@ -21,10 +26,9 @@ from bot.keyboards import get_device_keyboard, get_back_button
 from bot.states import DeviceCreationStates, DeviceManagementStates
 from utils.formatters import format_traffic, format_datetime
 from database.models import User
-import logging
-import uuid
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 async def _build_connections_screen(user: User, session) -> tuple[str, InlineKeyboardBuilder]:
     """Вспомогательная функция для сборки экрана со списком устройств"""
@@ -39,12 +43,18 @@ async def _build_connections_screen(user: User, session) -> tuple[str, InlineKey
         text += "\n_У вас пока нет подключённых устройств._"
     else:
         for profile in profiles:
-            server = await get_server_by_id(session, profile.server_id)
+            # ✅ ОПТИМИЗАЦИЯ: Избавляемся от N+1 запросов. Так как репозиторий уже делает selectinload, 
+            # объект сервера мгновенно извлекается из кэша памяти ORM без холостых обращений к диску.
+            server = profile.server
             flag = server.country_flag if server else "🌍"
             server_name = server.name if server else "Неизвестно"
             
+            # Санитируем имя устройства от потенциальных HTML-инъекций
+            safe_device_name = html.escape(profile.device_name)
+            safe_server_name = html.escape(server_name)
+
             # Добавляем инлайн-кнопку для управления конкретным устройством
-            builder.button(text=f"⚙️ Настройки: {profile.device_name}", callback_data=f"manage_device:{profile.id}")
+            builder.button(text=f"⚙️ Настройки: {safe_device_name}", callback_data=f"manage_device:{profile.id}")
 
             traffic_total = format_traffic(profile.traffic_down + profile.traffic_up)
             last_connected_text = (
@@ -53,9 +63,9 @@ async def _build_connections_screen(user: User, session) -> tuple[str, InlineKey
             )
 
             text += DEVICE_CARD.format(
-                device_name=profile.device_name,
+                device_name=safe_device_name,
                 flag=flag,
-                server_name=server_name,
+                server_name=safe_server_name,
                 last_connected_text=last_connected_text,
                 traffic_down=format_traffic(profile.traffic_down),
                 traffic_up=format_traffic(profile.traffic_up),
@@ -68,6 +78,7 @@ async def _build_connections_screen(user: User, session) -> tuple[str, InlineKey
     builder.button(text="← Назад", callback_data="back_to_main_menu")
     builder.adjust(1)
     return text, builder
+
 
 @router.message(F.text == "🔌 Подключение")
 async def show_connections(message: Message, db_user: User | None = None):
@@ -86,6 +97,7 @@ async def show_connections(message: Message, db_user: User | None = None):
         await message.answer(text, reply_markup=builder.as_markup())
     finally:
         await session.close()
+
 
 @router.callback_query(F.data == "back_to_connections")
 async def back_to_connections(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
@@ -106,6 +118,7 @@ async def back_to_connections(callback: CallbackQuery, state: FSMContext, db_use
     finally:
         await session.close()
 
+
 @router.callback_query(F.data.startswith("manage_device:"))
 async def manage_device(callback: CallbackQuery):
     profile_id = int(callback.data.split(":")[1])
@@ -121,10 +134,13 @@ async def manage_device(callback: CallbackQuery):
         server_name = server.name if server else "Неизвестно"
         protocol = server.protocol if server else "—"
         
+        safe_device_name = html.escape(profile.device_name)
+        safe_server_name = html.escape(server_name)
+        
         text = (
-            f"📱 Управление устройством: <b>{profile.device_name}</b>\n"
+            f"📱 Управление устройством: <b>{safe_device_name}</b>\n"
             f"─────────────────────────────\n\n"
-            f"📍 Локация: {flag} {server_name}\n"
+            f"📍 Локация: {flag} {safe_server_name}\n"
             f"📡 Протокол: {protocol}\n"
             f"📊 Трафик: ∑ {format_traffic(profile.traffic_down + profile.traffic_up)}\n"
             f"⏱ Последняя активность: {format_datetime(profile.last_connected) if profile.last_connected else 'Нет данных'}"
@@ -133,6 +149,7 @@ async def manage_device(callback: CallbackQuery):
         await callback.answer()
     finally:
         await session.close()
+
 
 @router.callback_query(F.data.startswith("download_conf:"))
 async def download_conf(callback: CallbackQuery):
@@ -145,16 +162,18 @@ async def download_conf(callback: CallbackQuery):
             return
         
         file_bytes = profile.raw_config.encode("utf-8")
-        input_file = BufferedInputFile(file_bytes, filename=f"{profile.device_name}.conf")
+        safe_device_name = "".join(c for c in profile.device_name if c.isalnum() or c in (' ', '_', '-')).strip()
+        input_file = BufferedInputFile(file_bytes, filename=f"{safe_device_name or 'client'}.conf")
         
         await callback.message.answer_document(
             document=input_file, 
-            caption=f"📁 Файл конфигурации для устройства <b>{profile.device_name}</b>",
+            caption=f"📁 Файл конфигурации для устройства <b>{html.escape(profile.device_name)}</b>",
             parse_mode="HTML"
         )
         await callback.answer("✅ Файл отправлен")
     finally:
         await session.close()
+
 
 @router.callback_query(F.data.startswith("rename_device:"))
 async def rename_device_start(callback: CallbackQuery, state: FSMContext):
@@ -167,6 +186,7 @@ async def rename_device_start(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_back_button(f"manage_device:{profile_id}")
     )
     await callback.answer()
+
 
 @router.message(DeviceManagementStates.rename_device)
 async def rename_device_process(message: Message, state: FSMContext):
@@ -183,13 +203,14 @@ async def rename_device_process(message: Message, state: FSMContext):
         if profile:
             await update_profile(session, profile, device_name=new_name)
             await message.answer(
-                f"✅ Устройство успешно переименовано в <b>{new_name}</b>", 
+                f"✅ Устройство успешно переименовано в <b>{html.escape(new_name)}</b>", 
                 reply_markup=get_back_button(f"manage_device:{profile_id}"),
                 parse_mode="HTML"
             )
         await state.clear()
     finally:
         await session.close()
+
 
 @router.callback_query(F.data.startswith("delete_device:"))
 async def delete_device(callback: CallbackQuery):
@@ -203,7 +224,6 @@ async def delete_device(callback: CallbackQuery):
 
         server = await get_server_by_id(session, profile.server_id)
         if server:
-            # Синхронно деактивируем клиента на стороне Amnezia API перед очисткой БД
             client = AmneziaClient(server.api_url, server.api_key)
             deleted = await client.delete_user(client_id=profile.peer_id)
             if not deleted:
@@ -215,7 +235,6 @@ async def delete_device(callback: CallbackQuery):
         await delete_profile(session, profile)
         await callback.answer("🗑 Устройство успешно удалено", show_alert=True)
         
-        # Обновляем экран
         user = await get_user_by_telegram_id(session, callback.from_user.id)
         if not user:
             await callback.answer("❌ Пользователь не найден", show_alert=True)
@@ -228,7 +247,6 @@ async def delete_device(callback: CallbackQuery):
     finally:
         await session.close()
 
-# --- Логика добавления новых устройств (существующая база) ---
 
 @router.callback_query(F.data == "add_device")
 async def start_add_device(callback: CallbackQuery, state: FSMContext):
@@ -253,6 +271,7 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext):
     finally:
         await session.close()
 
+
 @router.callback_query(F.data.startswith("select_server:"), DeviceCreationStates.choose_server)
 async def select_server(callback: CallbackQuery, state: FSMContext):
     server_id = int(callback.data.split(":")[1])
@@ -269,7 +288,7 @@ async def select_server(callback: CallbackQuery, state: FSMContext):
 
         flag = server.country_flag or "🌍"
         await callback.message.edit_text(
-            f"✏️ Введите имя устройства для {flag} {server.name}:\n\n"
+            f"✏️ Введите имя устройства для {flag} {html.escape(server.name)}:\n\n"
             f"(например: IPhone, MacBook, Work PC)\n\n"
             f"Максимум 16 символов, только буквы и цифры.",
             reply_markup=get_back_button("add_device")
@@ -277,6 +296,7 @@ async def select_server(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
     finally:
         await session.close()
+
 
 @router.message(DeviceCreationStates.enter_device_name)
 async def enter_device_name(message: Message, state: FSMContext, db_user: User | None = None):
@@ -296,8 +316,6 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             return
             
         server = await get_server_by_id(session, server_id)
-        
-        # Проверка протокола сервера
         if server.protocol != "amneziawg2":
             await message.answer("⚠️ Сервер использует неподдерживаемый протокол. Обратитесь в поддержку.")
             await state.clear()
@@ -331,7 +349,6 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
                 raw_config=result.get("config")
             )
         except Exception as e:
-            # Если создание профиля в БД не удалось, откатываем создание на сервере
             logging.error(f"Failed to create profile in DB: {e}")
             try:
                 await client.delete_user(client_id=result.get("id"))
@@ -348,7 +365,7 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
         builder.adjust(1)
 
         await message.answer(
-            f"✅ Устройство добавлено!\n\n📱 {device_name} ({server.country_flag} {server.name})\n\nКлюч подключения готов.",
+            f"✅ Устройство добавлено!\n\n📱 {html.escape(device_name)} ({server.country_flag} {html.escape(server.name)})\n\nКлюч подключения готов.",
             reply_markup=builder.as_markup()
         )
     except Exception as e:
@@ -357,6 +374,7 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
         await state.clear()
     finally:
         await session.close()
+
 
 @router.callback_query(F.data.startswith("copy_config:"))
 async def copy_config(callback: CallbackQuery, db_user: User | None = None):
@@ -370,7 +388,7 @@ async def copy_config(callback: CallbackQuery, db_user: User | None = None):
             return
 
         await callback.message.answer(
-            f"🔑 Ключ подключения для {profile.device_name}:\n\n<code>{html.escape(profile.raw_config)}</code>",
+            f"🔑 Ключ подключения для {html.escape(profile.device_name)}:\n\n<code>{html.escape(profile.raw_config)}</code>",
             parse_mode="HTML"
         )
         await callback.answer("✅ Ключ отправлен")

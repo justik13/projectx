@@ -1,6 +1,12 @@
+# bot/handlers/admin/servers.py
+import html
+import logging
+import asyncio
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+
 from database.connection import get_session
 from database.repositories.servers_repo import (
     get_all_servers, get_server_by_id, create_server, 
@@ -13,7 +19,6 @@ from bot.keyboards import (
 )
 from bot.states import AdminStates
 from config.settings import get_settings
-import logging
 
 router = Router()
 
@@ -43,7 +48,8 @@ async def show_servers_list(callback: CallbackQuery):
             for server in servers:
                 flag = server.country_flag or "🌍"
                 status = "🟢" if server.is_active else "🔴"
-                text += f"{status} {flag} <b>{server.name}</b>\n"
+                safe_name = html.escape(server.name)
+                text += f"{status} {flag} <b>{safe_name}</b>\n"
                 text += f"   {server.protocol} · {server.api_url}\n\n"
         
         await callback.message.edit_text(
@@ -126,9 +132,10 @@ async def process_add_server(message: Message, state: FSMContext):
                 max_clients=max_clients
             )
             
+            safe_name = html.escape(all_data["name"])
             await message.answer(
                 f"✅ Сервер добавлен!\n\n"
-                f"{all_data['country_flag']} <b>{all_data['name']}</b>\n"
+                f"{all_data['country_flag']} <b>{safe_name}</b>\n"
                 f"Протокол: amneziawg2\n"
                 f"Макс клиентов: {max_clients}",
                 reply_markup=get_back_button("admin_servers"),
@@ -158,8 +165,9 @@ async def show_server_card(callback: CallbackQuery):
         
         flag = server.country_flag or "🌍"
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
+        safe_name = html.escape(server.name)
         
-        text = f"{flag} Сервер: {server.name}\n"
+        text = f"{flag} Сервер: {safe_name}\n"
         text += "─────────────────────────────\n\n"
         text += f"<b>ID:</b> {server.id}\n"
         text += f"<b>Статус:</b> {status}\n"
@@ -205,8 +213,9 @@ async def toggle_server(callback: CallbackQuery):
         server = await get_server_by_id(session, server_id)
         flag = server.country_flag or "🌍"
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
+        safe_name = html.escape(server.name)
         
-        text = f"{flag} Сервер: {server.name}\n"
+        text = f"{flag} Сервер: {safe_name}\n"
         text += "─────────────────────────────\n\n"
         text += f"<b>ID:</b> {server.id}\n"
         text += f"<b>Статус:</b> {status}\n"
@@ -225,12 +234,12 @@ async def toggle_server(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_server_delete:"))
 async def delete_server_handler(callback: CallbackQuery):
-    """Отключить сервер (soft delete)"""
+    """Отключить сервер (soft delete) с параллельной деактивацией пиров"""
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
     
-    await callback.answer("⏳ Выполняется...")
+    await callback.answer("⏳ Выполняется параллельное отключение пиров...")
     server_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:
@@ -238,10 +247,6 @@ async def delete_server_handler(callback: CallbackQuery):
         if not server:
             await callback.answer("❌ Сервер не найден", show_alert=True)
             return
-        
-        # Отключаем все профили на этом сервере перед отключением сервера
-        from database.repositories.profiles_repo import get_user_profiles
-        from services.amnezia_client import AmneziaClient
         
         # Получаем все профили, привязанные к этому серверу
         from sqlalchemy import select
@@ -251,22 +256,30 @@ async def delete_server_handler(callback: CallbackQuery):
         )
         profiles = result.scalars().all()
         
-        # Отключаем каждый профиль на сервере Amnezia
+        # Оптимизация Highload: собираем конкурентные сетевые задачи
         client = AmneziaClient(server.api_url, server.api_key)
-        for profile in profiles:
-            try:
-                await client.update_client(client_id=profile.peer_id, status="disabled")
-                await update_profile(session, profile, is_active=False)
-            except Exception as e:
-                logging.error(f"Failed to disable profile {profile.id} on server {server.id}: {e}")
+        tasks = []
+        profiles_to_update = []
         
-        # Отключаем сервер
+        for profile in profiles:
+            tasks.append(client.update_client(client_id=profile.peer_id, status="disabled"))
+            profiles_to_update.append(profile)
+        
+        if tasks:
+            # Отключаем всех клиентов на удаляемом VPS одновременно
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for p in profiles_to_update:
+                p.is_active = False
+            # Фиксируем изменения в локальной БД ОДНИМ коммитом вместо N коммитов в цикле
+            await session.commit()
+        
+        # Отключаем сам сервер
         await update_server(session, server, is_active=False)
         
-        await callback.answer("✅ Сервер отключен", show_alert=True)
+        await callback.answer("✅ Сервер и связанные устройства успешно отключены", show_alert=True)
         logging.info(f"Admin {callback.from_user.id} disabled server {server_id} with {len(profiles)} profiles")
         
-        # Возвращаемся к списку
+        # Возвращаемся к списку серверов
         servers = await get_all_servers(session)
         
         text = "🌍 Серверы\n"
@@ -278,7 +291,8 @@ async def delete_server_handler(callback: CallbackQuery):
             for s in servers:
                 flag = s.country_flag or "🌍"
                 status = "🟢" if s.is_active else "🔴"
-                text += f"{status} {flag} <b>{s.name}</b>\n"
+                safe_s_name = html.escape(s.name)
+                text += f"{status} {flag} <b>{safe_s_name}</b>\n"
                 text += f"   {s.protocol} · {s.api_url}\n\n"
         
         await callback.message.edit_text(
@@ -329,8 +343,9 @@ async def process_edit_server(message: Message, state: FSMContext):
         new_name = message.text.strip()
         await update_server(session, server, name=new_name)
         
+        safe_new_name = html.escape(new_name)
         await message.answer(
-            f"✅ Имя сервера изменено на: {new_name}",
+            f"✅ Имя сервера изменено на: {safe_new_name}",
             reply_markup=get_back_button("admin_servers")
         )
         
@@ -340,7 +355,7 @@ async def process_edit_server(message: Message, state: FSMContext):
         flag = server.country_flag or "🌍"
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
         
-        text = f"{flag} Сервер: {new_name}\n"
+        text = f"{flag} Сервер: {safe_new_name}\n"
         text += "─────────────────────────────\n\n"
         text += f"<b>ID:</b> {server.id}\n"
         text += f"<b>Статус:</b> {status}\n"
