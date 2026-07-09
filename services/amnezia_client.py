@@ -168,14 +168,31 @@ class AmneziaClient:
         result = await self._request("GET", "/healthz")
         return result is not None
 
-    async def get_all_clients(self, skip: int = 0, limit: int = 1000) -> Optional[List[Dict]]:
-        """Получить список всех клиентов с сервера"""
-        result = await self._request("GET", "/clients", params={"skip": skip, "limit": limit})
-        if result is None:
-            # Возвращаем None, чтобы фоновый воркер зафиксировал сетевой сбой
-            # и не производил ложную очистку профилей в БД.
-            return None
+    async def get_all_clients(self, skip: int = 0, limit: int = 100) -> Optional[List[Dict]]:
+        """Получить список всех клиентов с сервера (с учетом лимита API)"""
+        all_clients = []
+        current_skip = skip
+    
+        while True:
+            result = await self._request(
+                "GET", "/clients", 
+                params={"skip": current_skip, "limit": min(limit, 100)}
+            )
+        
+            if result is None:
+                # Сетевой сбой — возвращаем None, чтобы воркер не удалил профили ложно
+                return None if not all_clients else all_clients
             
-        if "clients" in result:
-            return result["clients"]
-        return []
+            clients = result.get("clients", [])
+            if not clients:
+                break
+            
+            all_clients.extend(clients)
+        
+            # Если получили меньше, чем запрашивали — значит это последняя страница
+            if len(clients) < min(limit, 100):
+                break
+            
+            current_skip += len(clients)
+    
+        return all_clients
