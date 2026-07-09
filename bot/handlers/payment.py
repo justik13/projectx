@@ -1,4 +1,6 @@
 # bot/handlers/payment.py
+import logging
+from aiogram.exceptions import TelegramBadRequest
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, PreCheckoutQuery, LabeledPrice
 from aiogram.fsm.context import FSMContext
@@ -238,7 +240,13 @@ async def back_to_payment(callback: CallbackQuery, state: FSMContext):
             price_rub=tariff.price_rub,
             price_stars=tariff.price_stars
         )
-        await callback.message.edit_text(text, reply_markup=get_payment_method_keyboard(tariff.id))
+        
+        # ✅ Защита от TelegramBadRequest: message is not modified
+        try:
+            await callback.message.edit_text(text, reply_markup=get_payment_method_keyboard(tariff.id))
+        except TelegramBadRequest:
+            pass  # Сообщение уже идентично, игнорируем
+            
         await callback.answer()
     finally:
         await session.close()
