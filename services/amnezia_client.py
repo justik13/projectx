@@ -1,7 +1,7 @@
 import aiohttp
 import asyncio
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -150,3 +150,10 @@ class AmneziaClient:
         """Проверить доступность API"""
         result = await self._request("GET", "/healthz")
         return result is not None
+
+    async def get_all_clients(self, skip: int = 0, limit: int = 1000) -> Optional[List[Dict]]:
+        """Получить список всех клиентов с сервера"""
+        result = await self._request("GET", "/clients", params={"skip": skip, "limit": limit})
+        if result and "clients" in result:
+            return result["clients"]
+        return []
