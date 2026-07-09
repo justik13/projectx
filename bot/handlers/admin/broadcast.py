@@ -8,6 +8,7 @@ from bot.states import AdminStates
 from config.settings import get_settings
 import logging
 import asyncio
+from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenRequest
 
 router = Router()
 
@@ -87,7 +88,25 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext):
                     parse_mode="HTML"
                 )
                 success_count += 1
-                await asyncio.sleep(0.05)  # Защита от Telegram Flood Wait
+                await asyncio.sleep(0.04)
+            except TelegramRetryAfter as e:
+                fail_count += 1
+                logging.warning(f"Flood wait for user {user.telegram_id}: sleeping {e.retry_after + 1}s")
+                await asyncio.sleep(e.retry_after + 1)
+                # Повторная попытка после ожидания
+                try:
+                    await callback.bot.send_message(
+                        user.telegram_id,
+                        broadcast_text,
+                        parse_mode="HTML"
+                    )
+                    success_count += 1
+                    fail_count -= 1
+                except Exception:
+                    pass
+            except TelegramForbiddenRequest:
+                fail_count += 1
+                logging.info(f"User {user.telegram_id} blocked the bot")
             except Exception as e:
                 fail_count += 1
                 logging.warning(f"Failed to send broadcast to {user.telegram_id}: {e}")
@@ -136,7 +155,25 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext):
                     parse_mode="HTML"
                 )
                 success_count += 1
-                await asyncio.sleep(0.05)  # Защита от Telegram Flood Wait
+                await asyncio.sleep(0.04)
+            except TelegramRetryAfter as e:
+                fail_count += 1
+                logging.warning(f"Flood wait for user {user.telegram_id}: sleeping {e.retry_after + 1}s")
+                await asyncio.sleep(e.retry_after + 1)
+                # Повторная попытка после ожидания
+                try:
+                    await callback.bot.send_message(
+                        user.telegram_id,
+                        broadcast_text,
+                        parse_mode="HTML"
+                    )
+                    success_count += 1
+                    fail_count -= 1
+                except Exception:
+                    pass
+            except TelegramForbiddenRequest:
+                fail_count += 1
+                logging.info(f"User {user.telegram_id} blocked the bot")
             except Exception as e:
                 fail_count += 1
                 logging.warning(f"Failed to send broadcast to {user.telegram_id}: {e}")
