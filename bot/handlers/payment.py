@@ -1,5 +1,5 @@
 import logging
-from aiogram.exceptions import TelegramBadRequest, TelegramError
+from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, PreCheckoutQuery, LabeledPrice
 from aiogram.fsm.context import FSMContext
@@ -74,7 +74,7 @@ async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | 
                 prices=prices, provider_token="",
                 payload=f"stars_payment:{payment.id}", currency="XTR",
                 start_parameter="network-access-stars")
-        except TelegramError as e:
+        except TelegramAPIError as e:
             logger.error(f"Failed to send invoice: {e}")
             await callback.message.answer("❌ Ошибка платежной системы Telegram. Попробуйте позже.",
                                            reply_markup=get_back_button("back_to_main_menu"))
