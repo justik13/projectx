@@ -91,7 +91,7 @@ async def _build_users_list_text(users, page: int, total_pages: int, total: int)
         return text
     
     for user in users:
-        status = "🟢" if user.subscription_end and user.subscription_end > datetime.utcnow() else "🔴"
+        status = "🟢" if user.subscription_end and user.subscription_end > datetime.now(timezone.utc) else "🔴"
         ban = "🚫" if user.is_banned else ""
         username = f"@{user.username}" if user.username else "—"
         days = format_days_left(user.subscription_end)
