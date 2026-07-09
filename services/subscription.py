@@ -1,3 +1,6 @@
+# services/subscription.py
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.repositories.users_repo import get_user_by_telegram_id, create_user, update_user
 from database.repositories.payments_repo import create_payment, get_payment_by_id, get_user_payments
@@ -17,7 +20,8 @@ class SubscriptionService:
             return False
         if not user.subscription_end:
             return False
-        return user.subscription_end > datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        return user.subscription_end > now
 
     @staticmethod
     async def process_onboarding(
@@ -54,26 +58,21 @@ class SubscriptionService:
     ) -> Optional[User]:
         """
         Продлить подписку пользователя на указанное количество дней.
-        Если подписки нет — создаёт новую от текущей даты.
-        Если days >= 36500 — даёт "вечную" подписку (на 100 лет).
         """
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user:
             logging.warning(f"extend_subscription: user {telegram_id} not found")
             return None
         
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         
-        # Если подписка ещё активна — продлеваем от её окончания
-        # Если истекла или её нет — продлеваем от текущего момента
         if user.subscription_end and user.subscription_end > now:
             current_end = user.subscription_end
         else:
             current_end = now
         
-        # "Вечная" подписка
         if days >= 36500:
-            new_end = datetime(2100, 1, 1, tzinfo=timezone.utc)
+            new_end = datetime(2100, 1, 1)
         else:
             new_end = current_end + timedelta(days=days)
         
@@ -92,10 +91,7 @@ class SubscriptionService:
         payment_id: int
     ) -> bool:
         """
-        Обработать успешный платёж:
-        1. Пометить платёж как оплаченный
-        2. Продлить подписку пользователю
-        3. Начислить бонус рефереру (при первой оплате)
+        Обработать успешный платёж с гарантированным eager loading отношений
         """
         payment = await get_payment_by_id(session, payment_id)
         if not payment:
@@ -106,13 +102,22 @@ class SubscriptionService:
             logging.info(f"Payment {payment_id} already completed")
             return True
         
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        
         # Помечаем как оплаченный
         payment.status = 'completed'
-        payment.paid_at = datetime.now(timezone.utc)
+        payment.paid_at = now
         await session.commit()
-        await session.refresh(payment)
         
-        # Получаем связанные данные
+        # ✅ Исправлено: Перевыкачиваем платеж с жестким принудительным selectinload.
+        # Это полностью исключает возникновение MissingGreenlet при вызове payment.user или payment.tariff
+        result = await session.execute(
+            select(Payment)
+            .options(selectinload(Payment.user), selectinload(Payment.tariff))
+            .where(Payment.id == payment_id)
+        )
+        payment = result.scalar_one()
+        
         tariff = payment.tariff
         user = payment.user
         
@@ -137,14 +142,12 @@ class SubscriptionService:
             if referrer:
                 bonus_days = get_settings().REFERRAL_BONUS_DAYS
                 
-                # Продлеваем подписку рефереру
                 await SubscriptionService.extend_subscription(
                     session, 
                     referrer.telegram_id, 
                     bonus_days
                 )
                 
-                # Увеличиваем счётчик бонусных дней
                 new_referral_days = (referrer.referral_days or 0) + bonus_days
                 await update_user(
                     session, 
@@ -157,11 +160,10 @@ class SubscriptionService:
                     f"referrer {referrer.telegram_id} got +{bonus_days} days"
                 )
         
-        # Обновляем дату последнего платежа
         await update_user(
             session, 
             user, 
-            last_payment_at=datetime.now(timezone.utc)
+            last_payment_at=now
         )
         
         await session.commit()

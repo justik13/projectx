@@ -61,7 +61,8 @@ async def subscription_expiry_checker_loop():
                 
                 server_profiles = defaultdict(list)
                 servers_map = {}
-                now = datetime.now(timezone.utc)
+                # ✅ Исправлено: Сравнение как naive UTC для совместимости с SQLite
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
                 
                 # Маппим данные в легковесные словари для сетевой обработки
                 for user in users:
@@ -170,16 +171,17 @@ async def traffic_sync_loop():
                             t_down = stats.get("totalDownload", profile.traffic_down)
                             t_up = stats.get("totalUpload", profile.traffic_up)
                             
-                            # Безопасный парсинг времени последнего подключения (защита от ValueError и float-строк)
+                            # Безопасный парсинг времени последнего подключения
                             last_conn_raw = api_data.get("updatedAt")
                             last_connected = profile.last_connected
                             if last_conn_raw:
                                 try:
-                                    last_connected = datetime.fromtimestamp(int(float(str(last_conn_raw))), tz=timezone.utc)
+                                    # ✅ Исправлено: приведение даты последнего коннекта на Amnezia API к naive UTC
+                                    last_connected = datetime.fromtimestamp(int(float(str(last_conn_raw))), tz=timezone.utc).replace(tzinfo=None)
                                 except (ValueError, TypeError):
                                     pass
                                     
-                            # Если что-то изменилось — обновляем поля (SQLAlchemy сама зафиксирует dirty-состояние)
+                            # Если что-то изменилось — обновляем поля
                             if (profile.traffic_down != t_down or 
                                 profile.traffic_up != t_up or 
                                 profile.last_connected != last_connected):

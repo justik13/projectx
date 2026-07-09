@@ -1,3 +1,4 @@
+# bot/handlers/admin/users.py
 import html
 import logging
 import math
@@ -97,10 +98,11 @@ async def _build_users_list_text(users, page: int, total_pages: int, total: int)
         text += "_Пользователей пока нет_"
         return text
     
+    # ✅ Исправлено: naive UTC для SQLite
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     for user in users:
-        status = "🟢" if user.subscription_end and user.subscription_end > datetime.now(timezone.utc) else "🔴"
+        status = "🟢" if user.subscription_end and user.subscription_end > now else "🔴"
         ban = "🚫" if user.is_banned else ""
-        # Защита от HTML-инъекций в юзернеймах
         username = f"@{html.escape(user.username)}" if user.username else "—"
         days = format_days_left(user.subscription_end)
         
@@ -197,19 +199,19 @@ async def _show_user_card_edit(message, user, session):
             parse_mode="HTML"
         )
     except TelegramBadRequest:
-        # Падаем в резервную отправку, если сообщение не изменилось
         pass
 
 
 async def _build_user_card_text(user, session) -> str:
-    has_access = user.subscription_end and user.subscription_end > datetime.now(timezone.utc)
+    # ✅ Исправлено: naive UTC для SQLite
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    has_access = user.subscription_end and user.subscription_end > now
     status = "🟢 Активен" if has_access else "🔴 Неактивен"
     ban = "🚫 ЗАБАНЕН" if user.is_banned else "✅ Не забанен"
     
     profiles = await get_user_profiles(session, user.id)
     devices_count = len(profiles)
     
-    # Полное санитирование (экранирование) динамических строк от XSS/HTML-инъекций
     safe_username = html.escape(user.username) if user.username else '—'
     safe_first_name = html.escape(user.first_name) if user.first_name else '—'
     
@@ -273,7 +275,6 @@ async def extend_subscription(callback: CallbackQuery):
             f"Admin {callback.from_user.id} extended user {telegram_id} by {days} days"
         )
         
-        # Возвращаемся к карточке
         await _show_user_card_edit(callback.message, user, session)
     finally:
         await session.close()
@@ -346,7 +347,6 @@ async def toggle_ban_user(callback: CallbackQuery):
     
     telegram_id = int(callback.data.split(":")[1])
 
-    # Защита от бана администраторов
     settings = get_settings()
     if telegram_id in settings.ADMIN_IDS:
         await callback.answer("⛔️ Нельзя банить администраторов", show_alert=True)
@@ -362,11 +362,10 @@ async def toggle_ban_user(callback: CallbackQuery):
         new_status = not user.is_banned
         await update_user(session, user, is_banned=new_status)
         
-        # Защита от утечки бесплатного доступа: проверяем валидность подписки
-        now = datetime.now(timezone.utc)
+        # ✅ Исправлено: naive UTC для SQLite
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         has_access = user.subscription_end and user.subscription_end > now
         
-        # Если баним - всегда disabled. Если разбаниваем - active только при живой подписке.
         target_api_status = "disabled" if new_status else ("active" if has_access else "disabled")
         target_db_status = False if new_status else (True if has_access else False)
         
@@ -378,12 +377,10 @@ async def toggle_ban_user(callback: CallbackQuery):
             server = await get_server_by_id(session, profile.server_id)
             if server and server.is_active:
                 client = AmneziaClient(server.api_url, server.api_key)
-                # Собираем конкурентные корутины во избежание дедлоков UI
                 tasks.append(client.update_client(client_id=profile.peer_id, status=target_api_status))
                 profiles_to_update.append(profile)
 
         if tasks:
-            # Выполняем запросы ко всем VPS параллельно (Highload оптимизация)
             await asyncio.gather(*tasks, return_exceptions=True)
             for p in profiles_to_update:
                 p.is_active = target_db_status
@@ -397,7 +394,6 @@ async def toggle_ban_user(callback: CallbackQuery):
         await callback.answer(alert_text, show_alert=True)
         logging.info(f"Admin {callback.from_user.id} {action} user {telegram_id}")
         
-        # Обновляем карточку
         user = await get_user_by_telegram_id(session, telegram_id)
         await _show_user_card_edit(callback.message, user, session)
     finally:
@@ -428,7 +424,6 @@ async def show_user_devices(callback: CallbackQuery):
             text += "_Устройств нет_"
         else:
             for p in profiles:
-                # Санитирование названий устройств от HTML-инъекций
                 safe_device_name = html.escape(p.device_name)
                 text += f"📱 <b>{safe_device_name}</b>\n"
                 text += f"    Peer: <code>{p.peer_id[:16]}...</code>\n"

@@ -1,6 +1,10 @@
+# bot/handlers/admin/tariffs.py
+import logging
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
+
 from database.connection import get_session
 from database.repositories.tariffs_repo import (
     get_all_tariffs, get_tariff_by_id, create_tariff, 
@@ -12,9 +16,9 @@ from bot.keyboards import (
 )
 from bot.states import AdminStates
 from config.settings import get_settings
-import logging
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def is_admin(telegram_id: int) -> bool:
@@ -44,11 +48,14 @@ async def show_tariffs_list(callback: CallbackQuery):
                 text += f"{status} <b>{tariff.duration_days} дней</b>\n"
                 text += f"   {tariff.price_rub} ₽ / {tariff.price_stars} ⭐\n\n"
         
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_admin_tariffs_keyboard(),
-            parse_mode="HTML"
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_admin_tariffs_keyboard(),
+                parse_mode="HTML"
+            )
+        except TelegramBadRequest:
+            pass
         await callback.answer()
     finally:
         await session.close()
@@ -96,8 +103,11 @@ async def process_add_tariff(message: Message, state: FSMContext):
     elif step == "price_rub":
         try:
             price_rub = int(message.text.strip())
+            # ✅ Исправлено: Добавлена валидация на отрицательную стоимость в рублях
+            if price_rub < 0:
+                raise ValueError("Цена не может быть отрицательной")
         except ValueError:
-            await message.answer("⚠️ Введите число. Попробуйте ещё раз:")
+            await message.answer("⚠️ Введите положительное число. Попробуйте ещё раз:")
             return
         await state.update_data(price_rub=price_rub, step="price_stars")
         await message.answer(
@@ -107,8 +117,11 @@ async def process_add_tariff(message: Message, state: FSMContext):
     elif step == "price_stars":
         try:
             price_stars = int(message.text.strip())
+            # ✅ Исправлено: Защита P0. Telegram API требует, чтобы инвойс в Stars всегда был строго > 0
+            if price_stars <= 0:
+                raise ValueError("Цена в Stars должна быть строго больше нуля")
         except ValueError:
-            await message.answer("⚠️ Введите число. Попробуйте ещё раз:")
+            await message.answer("⚠️ Введите число больше 0 (Telegram Stars требует положительную сумму). Попробуйте ещё раз:")
             return
         
         all_data = await state.get_data()
@@ -160,11 +173,14 @@ async def show_tariff_card(callback: CallbackQuery):
         text += f"<b>Цена ⭐:</b> {tariff.price_stars}\n"
         text += f"<b>Статус:</b> {status}\n"
         
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
-            parse_mode="HTML"
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
+                parse_mode="HTML"
+            )
+        except TelegramBadRequest:
+            pass
         await callback.answer()
     finally:
         await session.close()
@@ -205,11 +221,14 @@ async def toggle_tariff(callback: CallbackQuery):
         text += f"<b>Цена ⭐:</b> {tariff.price_stars}\n"
         text += f"<b>Статус:</b> {status}\n"
         
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
-            parse_mode="HTML"
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
+                parse_mode="HTML"
+            )
+        except TelegramBadRequest:
+            pass
     finally:
         await session.close()
 
@@ -249,11 +268,14 @@ async def delete_tariff_handler(callback: CallbackQuery):
                 text += f"{status} <b>{t.duration_days} дней</b>\n"
                 text += f"   {t.price_rub} ₽ / {t.price_stars} ⭐\n\n"
         
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_admin_tariffs_keyboard(),
-            parse_mode="HTML"
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_admin_tariffs_keyboard(),
+                parse_mode="HTML"
+            )
+        except TelegramBadRequest:
+            pass
     finally:
         await session.close()
 
@@ -399,10 +421,11 @@ async def process_edit_tariff_stars(message: Message, state: FSMContext):
     
     try:
         price_stars = int(message.text.strip())
-        if price_stars < 0:
-            raise ValueError("Цена не может быть отрицательной")
+        # ✅ Исправлено: Защита P0. Не даем выставить Stars <= 0
+        if price_stars <= 0:
+            raise ValueError("Цена в Stars должна быть строго больше нуля")
     except ValueError:
-        await message.answer("⚠️ Введите положительное число. Попробуйте ещё раз:")
+        await message.answer("⚠️ Введите число больше 0 (Telegram Stars требует положительную сумму):")
         return
     
     data = await state.get_data()

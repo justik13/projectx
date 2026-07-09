@@ -1,3 +1,4 @@
+# database/repositories/users_repo.py
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import User
@@ -41,16 +42,15 @@ async def extend_subscription(
     Продлить подписку пользователя (низкоуровневая функция).
     Для высокоуровневой работы используйте SubscriptionService.extend_subscription
     """
-    from datetime import datetime, timedelta
-    
-    now = datetime.now(timezone.utc)
+    # ✅ Исправлено: naive UTC для SQLite
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     if user.subscription_end and user.subscription_end > now:
         current_end = user.subscription_end
     else:
         current_end = now
     
     if days >= 36500:
-        new_end = datetime(2100, 1, 1, tzinfo=timezone.utc)
+        new_end = datetime(2100, 1, 1)
     else:
         new_end = current_end + timedelta(days=days)
     
@@ -71,12 +71,16 @@ async def get_user_count(session: AsyncSession) -> int:
     return result.scalar_one()
 
 async def get_active_subscriptions_count(session: AsyncSession) -> int:
-    stmt = select(func.count(User.id)).where(User.subscription_end > datetime.now(timezone.utc))
+    # ✅ Исправлено: naive UTC для SQLite
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    stmt = select(func.count(User.id)).where(User.subscription_end > now_naive)
     result = await session.execute(stmt)
     return result.scalar_one()
 
 async def get_new_users_count_24h(session: AsyncSession) -> int:
-    stmt = select(func.count(User.id)).where(User.created_at > datetime.now(timezone.utc) - timedelta(hours=24))
+    # ✅ Исправлено: naive UTC для SQLite
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    stmt = select(func.count(User.id)).where(User.created_at > now_naive - timedelta(hours=24))
     result = await session.execute(stmt)
     return result.scalar_one()
 
@@ -91,9 +95,11 @@ async def get_users_paginated(session: AsyncSession, page: int = 1, per_page: in
 
 async def get_active_users(session: AsyncSession) -> list[User]:
     """Получить пользователей с активной подпиской, которые не забанены"""
+    # ✅ Исправлено: naive UTC для SQLite
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
     result = await session.execute(
         select(User).where(
-            User.subscription_end > datetime.now(timezone.utc),
+            User.subscription_end > now_naive,
             User.is_banned == False
         )
     )

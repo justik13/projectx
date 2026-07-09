@@ -1,3 +1,4 @@
+# utils/formatters.py
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -30,7 +31,11 @@ def format_days_left(dt: Optional[datetime]) -> str:
     if dt is None:
         return "—"
     
-    now = datetime.now(timezone.utc)
+    # ✅ Исправлено: приведение к naive UTC для корректного сравнения с SQLite датами
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+        
     if dt < now:
         return "—"
     
