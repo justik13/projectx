@@ -190,28 +190,25 @@ async def confirm_payment_sbp(callback: CallbackQuery, state: FSMContext, db_use
             amount=tariff.price_rub, currency="rub"
         )
         
-        # Информируем пользователя
-        await callback.message.edit_text(
-            "⏳ <b>Заявка принята!</b>\n\nАдминистратор проверяет ваше поступление. "
-            "Обычно это занимает от 5 до 15 минут. Вы получите уведомление об активации доступа.",
-            reply_markup=get_back_button("back_to_main_menu"),
-            parse_mode="HTML"
-        )
+        # СБП-заглушка: сразу активируем подписку
+        success = await SubscriptionService.handle_successful_payment(session, payment.id)
         
-        # Отправка уведомления администраторам о ручной проверке
-        settings = get_settings()
-        admin_text = (
-            f"🔔 <b>Новый платёж СБП (Требуется проверка)!</b>\n"
-            f"👤 Пользователь: ID {user.telegram_id} (@{user.username or '—'})\n"
-            f"💰 Сумма: {tariff.price_rub} ₽\n"
-            f"⏱ Тариф: {tariff.duration_days} дней\n\n"
-            f"Для подтверждения используйте ID платежа: <code>{payment.id}</code> через админ-панель."
-        )
-        for admin_id in settings.ADMIN_IDS:
-            try:
-                await callback.bot.send_message(chat_id=admin_id, text=admin_text, parse_mode="HTML")
-            except Exception:
-                pass
+        if success:
+            valid_until = user.subscription_end.strftime("%d.%m.%Y %H:%M") if user.subscription_end else "—"
+            await callback.message.edit_text(
+                f"✅ <b>Оплата прошла успешно!</b>\n"
+                f"─────────────────────────────\n"
+                f"Вам продлён доступ на {tariff.duration_days} дней.\n"
+                f"Действует до: {valid_until}",
+                reply_markup=get_back_button("back_to_main_menu"),
+                parse_mode="HTML"
+            )
+        else:
+            await callback.message.edit_text(
+                "⚠️ Возникла задержка при зачислении. Пожалуйста, напишите в поддержку.",
+                reply_markup=get_back_button("back_to_main_menu"),
+                parse_mode="HTML"
+            )
                 
         await state.clear()
         await callback.answer()
