@@ -2,7 +2,6 @@ import aiohttp
 import asyncio
 import logging
 from typing import Optional, Dict, List
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -53,23 +52,31 @@ class AmneziaClient:
                     if response.status == 204:
                         return {}
                     elif 200 <= response.status < 300:
-                        data = await response.json()
-                        return data
+                        try:
+                            return await response.json()
+                        except aiohttp.ContentTypeError:
+                            logger.error(f"API returned non-JSON response on 2xx status from {url}")
+                            return None
                     else:
                         error_text = await response.text()
-                        logger.warning(f"API error {response.status}: {error_text}")
+                        logger.warning(f"API error {response.status} (attempt {attempt+1}): {error_text}")
+                        
+                        # Если это первая попытка и ошибка на стороне сервера (5xx), пробуем снова
+                        if attempt == 0 and response.status >= 500:
+                            await asyncio.sleep(1)
+                            continue
                         return None
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.warning(f"Network error during request to {url} (attempt {attempt+1}): {e}")
                 if attempt == 0:
-                    # Пересоздаём сессию при первой неудаче
-                    await close_http_session()
                     await asyncio.sleep(1)
                 else:
                     return None
             except Exception as e:
                 logger.error(f"Unexpected error during request to {url}: {e}", exc_info=True)
                 return None
+
+        return None
 
     async def create_user(
         self, 
@@ -89,7 +96,7 @@ class AmneziaClient:
         if result and "client" in result:
             client = result["client"]
             logger.info(f"Created client: id={client.get('id')}, name={client_name}")
-            return client  # {"id": "...", "config": "...", "protocol": "..."}
+            return client
         else:
             logger.error(f"Failed to create client with name {client_name}")
             return None
@@ -137,7 +144,7 @@ class AmneziaClient:
         """Получить метрики сервера (CPU, RAM, диск)"""
         result = await self._request("GET", "/server/load")
         if result:
-            logger.info("Retrieved server stats")
+            logger.debug("Retrieved server stats")
             return {
                 "cpu": result.get("cpu", {}).get("usage", 0),
                 "memory": result.get("memory", {}).get("usage", 0),
@@ -164,6 +171,11 @@ class AmneziaClient:
     async def get_all_clients(self, skip: int = 0, limit: int = 1000) -> Optional[List[Dict]]:
         """Получить список всех клиентов с сервера"""
         result = await self._request("GET", "/clients", params={"skip": skip, "limit": limit})
-        if result and "clients" in result:
+        if result is None:
+            # Возвращаем None, чтобы фоновый воркер зафиксировал сетевой сбой
+            # и не производил ложную очистку профилей в БД.
+            return None
+            
+        if "clients" in result:
             return result["clients"]
         return []

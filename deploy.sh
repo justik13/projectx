@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# ProjectX Bot — Deploy Script
+# ProjectX Bot — Deploy Script (Production Ready)
 # Автоматическая установка и настройка бота на VPS (Ubuntu/Debian)
 # ═══════════════════════════════════════════════════════════════
 
@@ -13,7 +13,10 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 PROJECT_NAME="projectx-bot"
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Исходная директория запуска
+START_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Целевая безопасная директория для production-изоляции
+PROJECT_DIR="/opt/projectx-bot"
 VENV_DIR="$PROJECT_DIR/venv"
 SERVICE_NAME="projectx-bot"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
@@ -58,24 +61,43 @@ install_dependencies() {
         > /dev/null 2>&1
     
     log "Создание системного пользователя projectx..."
-    useradd -r -s /bin/false projectx || true
-    success "Создан системный пользователь projectx"
+    if ! id "projectx" &>/dev/null; then
+        useradd -r -s /bin/false projectx
+        success "Создан системный пользователь projectx"
+    else
+        warn "Системный пользователь projectx уже существует"
+    fi
     
     success "Системные зависимости установлены"
 }
 
+migrate_to_opt() {
+    if [ "$START_DIR" != "$PROJECT_DIR" ]; then
+        log "Изоляция кодовой базы: перенос проекта в безопасную директорию $PROJECT_DIR..."
+        mkdir -p "$PROJECT_DIR"
+        # Копируем структуру проекта (включая скрытые файлы вроде .env, если есть)
+        cp -r "$START_DIR"/. "$PROJECT_DIR/"
+        success "Проект успешно перенесен в $PROJECT_DIR"
+    fi
+    cd "$PROJECT_DIR"
+}
+
 setup_env() {
     log "Настройка .env файла..."
-    
     if [ -f "$PROJECT_DIR/.env" ]; then
         warn "Файл .env уже существует"
-        read -p "Перезаписать его? (y/N): " overwrite
+        read -p "Перезаписать его новым конфигуратором? (y/N): " overwrite
         if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
             success "Используется существующий .env"
             return
         fi
     fi
     
+    log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
+    # Генерируем валидный url-safe base64 Fernet-совместимый ключ
+    DB_ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '\r\n')
+    success "Ключ шифрования успешно сгенерирован"
+
     echo ""
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
     echo -e "${YELLOW}  Настройка конфигурации бота${NC}"
@@ -87,12 +109,12 @@ setup_env() {
     [ -z "$BOT_TOKEN" ] && error "BOT_TOKEN не может быть пустым"
     
     echo ""
-    echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (узнать: @userinfobot)"
-    read -p "Введите ADMIN_IDS (через запятую): " ADMIN_IDS
+    echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
+    read -p "Введите ADMIN_IDS: " ADMIN_IDS
     [ -z "$ADMIN_IDS" ] && error "ADMIN_IDS не может быть пустым"
     
     echo ""
-    echo -e "${BLUE}[3/4]${NC} Username поддержки (без @)"
+    echo -e "${BLUE}[3/4]${NC} Username поддержки (без знака @)"
     read -p "Введите SUPPORT_USERNAME [support]: " SUPPORT_USERNAME
     SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
     
@@ -103,7 +125,7 @@ setup_env() {
     
     read -p "Лимит устройств по умолчанию [3]: " DEFAULT_DEVICE_LIMIT
     DEFAULT_DEVICE_LIMIT=${DEFAULT_DEVICE_LIMIT:-3}
-    
+
     cat > "$PROJECT_DIR/.env" << EOF
 # ProjectX Bot Configuration
 # Создано автоматически: $(date)
@@ -113,6 +135,8 @@ ADMIN_IDS=$ADMIN_IDS
 SUPPORT_USERNAME=$SUPPORT_USERNAME
 REFERRAL_BONUS_DAYS=$REFERRAL_BONUS_DAYS
 DEFAULT_DEVICE_LIMIT=$DEFAULT_DEVICE_LIMIT
+DB_ENCRYPTION_KEY=$DB_ENCRYPTION_KEY
+DB_PATH=./bot_data.db
 EOF
     
     chmod 600 "$PROJECT_DIR/.env"
@@ -135,7 +159,7 @@ setup_venv() {
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
     
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-        log "Установка зависимостей..."
+        log "Установка зависимостей проекта..."
         pip install -r "$PROJECT_DIR/requirements.txt" > /dev/null 2>&1
         success "Python зависимости установлены"
     else
@@ -144,7 +168,7 @@ setup_venv() {
 }
 
 init_database() {
-    log "Инициализация базы данных..."
+    log "Инициализация асинхронной базы данных SQLite..."
     cd "$PROJECT_DIR"
     source "$VENV_DIR/bin/activate"
     
@@ -154,15 +178,15 @@ from database.connection import init_db
 asyncio.run(init_db())
 " 2>&1 | tee -a "$LOG_FILE"
     
-    success "База данных готова"
+    success "База данных успешно инициализирована"
 }
 
 setup_systemd() {
-    log "Настройка systemd сервиса..."
+    log "Настройка и изоляция systemd сервиса..."
     
     systemctl is-active --quiet "$SERVICE_NAME" && systemctl stop "$SERVICE_NAME"
     
-    # ВАЖНО: убрали ProtectHome и ProtectSystem чтобы бот мог работать из /root
+    # Сервис изолирован в /opt/projectx-bot, ProtectHome и ProtectSystem активны для максимального hardening'а безопасности
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
@@ -185,6 +209,8 @@ SyslogIdentifier=$SERVICE_NAME
 
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
@@ -192,11 +218,11 @@ EOF
     
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
-    success "Systemd сервис настроен и включён в автозапуск"
+    success "Systemd сервис успешно настроен и добавлен в автозапуск"
 }
 
 setup_backup() {
-    log "Настройка автобэкапа базы данных..."
+    log "Настройка регламентного автобэкапа базы данных..."
     
     mkdir -p "$BACKUP_DIR"
     
@@ -211,7 +237,7 @@ if [ -f "\$DB_FILE" ]; then
     sqlite3 "\$DB_FILE" ".backup '\$BACKUP_FILE'"
     gzip "\$BACKUP_FILE"
     find "\$BACKUP_DIR" -name "bot_data_*.db.gz" -mtime +30 -delete
-    echo "[\$(date)] Backup: \${BACKUP_FILE}.gz"
+    echo "[\$(date)] Backup completed: \${BACKUP_FILE}.gz"
 fi
 EOF
     
@@ -222,11 +248,11 @@ EOF
     (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
     
     /usr/local/bin/projectx-backup.sh || true
-    success "Автобэкап настроен (ежедневно в 3:00)"
+    success "Автобэкап успешно настроен (ежедневно в 3:00, ротация 30 дней)"
 }
 
 setup_monitoring() {
-    log "Настройка автовосстановления..."
+    log "Настройка пятиминутного автовосстановления (Healthcheck)..."
     
     cat > /usr/local/bin/projectx-healthcheck.sh << EOF
 #!/bin/bash
@@ -243,7 +269,7 @@ if ! systemctl is-active --quiet "\$SERVICE_NAME"; then
             -d "chat_id=\$ADMIN_IDS" \
             -d "text=⚠️ Бот упал и был перезапущен автоматически (\$(date))" > /dev/null
     fi
-    echo "[\$(date)] Bot restarted" >> /var/log/projectx-healthcheck.log
+    echo "[\$(date)] Bot crashed, self-healing triggered." >> /var/log/projectx-healthcheck.log
 fi
 EOF
     
@@ -253,11 +279,11 @@ EOF
     crontab -l 2>/dev/null | grep -v "projectx-healthcheck" | crontab -
     (crontab -l 2>/dev/null; echo "$CRON_HEALTH") | crontab -
     
-    success "Мониторинг настроен (каждые 5 минут)"
+    success "Мониторинг доступности настроен (проверка каждые 5 минут)"
 }
 
 setup_logrotate() {
-    log "Настройка ротации логов..."
+    log "Настройка ротации лог-файлов..."
     
     cat > /etc/logrotate.d/projectx << EOF
 /var/log/projectx-*.log {
@@ -271,29 +297,29 @@ setup_logrotate() {
 }
 EOF
     
-    success "Ротация логов настроена"
+    success "Ротация системных логов настроена"
 }
 
 start_bot() {
-    log "Запуск бота..."
+    log "Запуск службы бота..."
     systemctl start "$SERVICE_NAME"
     sleep 3
     
     if systemctl is-active --quiet "$SERVICE_NAME"; then
-        success "Бот успешно запущен!"
+        success "Бот успешно запущен в фоновом режиме!"
         echo ""
         echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
         echo -e "${GREEN}  ProjectX Bot успешно развёрнут!${NC}"
         echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
         echo ""
-        echo -e "📁 Проект:     ${BLUE}$PROJECT_DIR${NC}"
-        echo -e "🔧 Статус:     ${BLUE}systemctl status $SERVICE_NAME${NC}"
-        echo -e "📋 Логи:       ${BLUE}journalctl -u $SERVICE_NAME -f${NC}"
-        echo -e "🔄 Перезапуск: ${BLUE}systemctl restart $SERVICE_NAME${NC}"
-        echo -e "💾 Бэкапы:     ${BLUE}$BACKUP_DIR${NC}"
+        echo -e "📁 Директория:  ${BLUE}$PROJECT_DIR${NC}"
+        echo -e "🔧 Статус:      ${BLUE}systemctl status $SERVICE_NAME${NC}"
+        echo -e "📋 Логи:        ${BLUE}journalctl -u $SERVICE_NAME -f${NC}"
+        echo -e "🔄 Перезапуск:  ${BLUE}systemctl restart $SERVICE_NAME${NC}"
+        echo -e "💾 Бэкапы:      ${BLUE}$BACKUP_DIR${NC}"
         echo ""
     else
-        error "Бот не запустился. Логи: journalctl -u $SERVICE_NAME -n 50"
+        error "Бот не смог запуститься. Изучите системные логи: journalctl -u $SERVICE_NAME -n 50"
     fi
 }
 
@@ -305,7 +331,7 @@ show_status() {
 main() {
     echo ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  🚀 ProjectX Bot — Автоматический деплой${NC}"
+    echo -e "${GREEN}  🚀 ProjectX Bot — Автоматический деплой (Production)${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
     
@@ -315,12 +341,16 @@ main() {
     check_root
     check_os
     install_dependencies
+    migrate_to_opt
     setup_env
     setup_venv
     init_database
+    
+    # Рекурсивно выдаем права пользователю projectx на изолированную директорию
     chown -R projectx:projectx "$PROJECT_DIR"
     chmod 600 "$PROJECT_DIR/.env"
-    log "Права на файлы обновлены для пользователя projectx"
+    log "Конфиденциальные права на файлы обновлены для пользователя projectx"
+    
     setup_systemd
     setup_backup
     setup_monitoring
@@ -334,16 +364,12 @@ main() {
 
 case "${1:-}" in
     --uninstall)
-        echo "Удаление ProjectX Bot..."
-        systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-        systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-        rm -f "$SERVICE_FILE"
-        systemctl daemon-reload
-        crontab -l 2>/dev/null | grep -v "projectx-" | crontab -
-        rm -f /usr/local/bin/projectx-backup.sh
-        rm -f /usr/local/bin/projectx-healthcheck.sh
-        rm -f /etc/logrotate.d/projectx
-        success "ProjectX Bot удалён"
+        echo "Перенаправление на деинсталляцию..."
+        if [ -f "./uninstall.sh" ]; then
+            bash ./uninstall.sh
+        else
+            error "Файл uninstall.sh не найден в текущей директории."
+        fi
         ;;
     --status)
         show_status
@@ -369,17 +395,18 @@ case "${1:-}" in
     --help|-h)
         echo "Использование: $0 [опция]"
         echo ""
-        echo "Без опций — полная установка и запуск"
+        echo "Без опций — полная автоматическая установка бота"
         echo ""
         echo "Опции:"
-        echo "  --uninstall    Полное удаление"
-        echo "  --status       Статус"
-        echo "  --logs         Логи в реальном времени"
-        echo "  --restart      Перезапуск"
-        echo "  --stop         Остановка"
-        echo "  --start        Запуск"
-        echo "  --backup       Бэкап БД вручную"
+        echo "  --uninstall    Полное удаление системы"
+        echo "  --status       Текущий статус systemd процесса"
+        echo "  --logs         Просмотр логов в реальном времени"
+        echo "  --restart      Перезапуск службы бота"
+        echo "  --stop         Остановка службы бота"
+        echo "  --start        Запуск службы бота"
+        echo "  --backup       Принудительный ручной бэкап БД"
         echo "  --help         Справка"
+        echo ""
         ;;
     *)
         main

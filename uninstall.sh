@@ -27,160 +27,154 @@ error() {
 
 # Проверка запуска от root
 if [[ $EUID -ne 0 ]]; then
-   error "Скрипт должен быть запущен с правами root"
+   error "Скрипт деинсталляции должен быть запущен с правами root (sudo)."
 fi
 
 # Остановка и отключение systemd сервиса projectx-bot
-log "Остановка и отключение сервиса projectx-bot..."
+log "Остановка и отключение фонового сервиса projectx-bot..."
 if systemctl is-active --quiet projectx-bot; then
     systemctl stop projectx-bot
     systemctl disable projectx-bot
-    success "Сервис projectx-bot остановлен и отключен"
+    success "Сервис projectx-bot успешно остановлен и отключен"
 else
-    log "Сервис projectx-bot не запущен"
+    log "Сервис projectx-bot не был запущен на момент удаления"
 fi
 
-# Определение папки проекта
-log "Определение директории проекта..."
+# Определение папки проекта из конфигурации systemd
+log "Сканирование рабочей директории проекта..."
 PROJECT_DIR=$(systemctl show -p WorkingDirectory projectx-bot 2>/dev/null | cut -d'=' -f2)
-if [[ -z "$PROJECT_DIR" ]]; then
-    PROJECT_DIR="$PWD"
-    warn "Не удалось получить рабочую директорию из systemd, используется текущая: $PROJECT_DIR"
+if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "[not set]" ]]; then
+    PROJECT_DIR="/opt/projectx-bot"
+    warn "Не удалось получить путь из systemd, используется директория по умолчанию: $PROJECT_DIR"
 fi
 
-success "Директория проекта: $PROJECT_DIR"
+success "Целевая директория для удаления: $PROJECT_DIR"
 
 # Показ интерактивного меню
 echo -e "\n========================================================"
-echo -e "     🗑  ProjectX Bot - Удаление"
+echo -e "     🗑  ProjectX Bot — Панель Деинсталляции"
 echo -e "========================================================"
-echo -e "1) Полное удаление (удалить ВСЁ: код, БД, .env, бэкапы, пользователь)"
-echo -e "2) Удаление с сохранением данных (сохранить БД, .env, бэкапы в архив)"
-echo -e "3) Отмена (выйти без изменений)"
+echo -e "1) Полное очищение (удалить ВСЁ: код, БД, ключи .env, бэкапы, юзера)"
+echo -e "2) Удаление с сохранением данных (БД, .env и бэкапы будут упакованы в архив)"
+echo -e "3) Отмена операции (выход без изменений)"
 echo -e "========================================================"
 read -p "Выберите вариант [1-3]: " choice
 
 case $choice in
     1)
         echo ""
-        read -p "Вы уверены, что хотите УДАЛИТЬ ВСЕ данные? (yes/no): " confirm
+        read -p "⚠️ ВНИМАНИЕ! Это действие сотрет все подписки и базы данных безвозвратно. Вы уверены? (yes/no): " confirm
         if [[ "$confirm" != "yes" ]]; then
-            success "Удаление отменено"
+            success "Деинсталляция отменена пользователем"
             exit 0
         fi
 
-        # Полное удаление
-        log "Выполняется полное удаление..."
+        log "Выполняется тотальное удаление данных..."
         
         # Удаление папки проекта
         if [[ -d "$PROJECT_DIR" ]]; then
             rm -rf "$PROJECT_DIR"
-            success "Директория проекта удалена: $PROJECT_DIR"
+            success "Директория проекта полностью удалена: $PROJECT_DIR"
         else
-            warn "Директория проекта не существует: $PROJECT_DIR"
+            warn "Директория проекта не найдена по указанному пути"
         fi
 
         # Удаление бэкапов
         BACKUP_DIR="/root/backups/projectx"
         if [[ -d "$BACKUP_DIR" ]]; then
             rm -rf "$BACKUP_DIR"
-            success "Директория бэкапов удалена: $BACKUP_DIR"
+            success "Директория системных бэкапов удалена: $BACKUP_DIR"
         else
-            warn "Директория бэкапов не существует: $BACKUP_DIR"
+            warn "Директория бэкапов отсутствовала на сервере"
         fi
 
         # Удаление пользователя projectx
         if id "projectx" &>/dev/null; then
-            userdel -r projectx
-            success "Пользователь projectx удален"
+            userdel -r projectx 2>/dev/null || userdel projectx
+            success "Системный пользователь projectx удален из ОС"
         else
-            warn "Пользователь projectx не существует"
+            warn "Пользователь projectx не был найден в системе"
         fi
         ;;
     2)
-        # Сохранение данных
-        log "Выполняется сохранение данных..."
+        log "Выполняется резервное архивирование перед деструктивными действиями..."
         
         # Создание директории бэкапа
         TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-        BACKUP_DIR="/root/projectx-backup-$TIMESTAMP"
-        mkdir -p "$BACKUP_DIR"
-        success "Создана директория бэкапа: $BACKUP_DIR"
+        SAFE_BACKUP_DIR="/root/projectx-backup-$TIMESTAMP"
+        mkdir -p "$SAFE_BACKUP_DIR"
+        success "Создана папка безопасного сохранения: $SAFE_BACKUP_DIR"
 
-        # Копирование файлов базы данных
+        # Копирование файлов базы данных (включая WAL журналы для сохранения консистентности)
         DB_FILES=("$PROJECT_DIR/bot_data.db" "$PROJECT_DIR/bot_data.db-wal" "$PROJECT_DIR/bot_data.db-shm")
         for db_file in "${DB_FILES[@]}"; do
             if [[ -f "$db_file" ]]; then
-                cp "$db_file" "$BACKUP_DIR/"
-                success "Скопирован файл базы данных: $db_file"
-            else
-                warn "Файл базы данных не найден: $db_file"
+                cp "$db_file" "$SAFE_BACKUP_DIR/"
+                success "Зарезервирован компонент БД: $(basename "$db_file")"
             fi
         done
 
         # Копирование .env файла
         ENV_FILE="$PROJECT_DIR/.env"
         if [[ -f "$ENV_FILE" ]]; then
-            cp "$ENV_FILE" "$BACKUP_DIR/"
-            success "Скопирован файл конфигурации: $ENV_FILE"
+            cp "$ENV_FILE" "$SAFE_BACKUP_DIR/"
+            success "Зарезервирован файл конфигурации: .env"
         else
-            warn "Файл конфигурации не найден: $ENV_FILE"
+            warn "Файл конфигурации .env отсутствовал"
         fi
 
-        # Копирование содержимого /root/backups/projectx/
+        # Перенос старых регламентных бэкапов
         SOURCE_BACKUP="/root/backups/projectx"
         if [[ -d "$SOURCE_BACKUP" ]]; then
-            cp -r "$SOURCE_BACKUP"/* "$BACKUP_DIR/"
-            success "Скопированы бэкапы из $SOURCE_BACKUP"
-        else
-            warn "Директория бэкапов не существует: $SOURCE_BACKUP"
+            cp -r "$SOURCE_BACKUP"/* "$SAFE_BACKUP_DIR/" 2>/dev/null || true
+            success "Все накопленные бэкапы перенесены в безопасную зону"
         fi
 
-        success "Данные успешно сохранены в: $BACKUP_DIR"
+        # Теперь, когда данные спасены, безопасно удаляем рабочую директорию
+        rm -rf "$PROJECT_DIR"
+        success "Рабочая директория $PROJECT_DIR очищена. Данные сохранены в $SAFE_BACKUP_DIR"
         ;;
     3)
-        success "Удаление отменено"
+        success "Процесс отменен. Никаких изменений не внесено."
         exit 0
         ;;
     *)
-        error "Неверный выбор. Выход."
+        error "Выбран некорректный пункт меню. Выход."
         ;;
 esac
 
-# Общие действия для обоих вариантов
-log "Выполняются общие действия по удалению..."
+# Общие действия по очистке системных триггеров
+log "Очистка зависимостей операционной системы..."
 
 # Удаление systemd сервиса
 SERVICE_FILE="/etc/systemd/system/projectx-bot.service"
 if [[ -f "$SERVICE_FILE" ]]; then
     rm -f "$SERVICE_FILE"
-    success "Удален файл сервиса: $SERVICE_FILE"
-else
-    warn "Файл сервиса не найден: $SERVICE_FILE"
+    success "Конфиг службы systemd удален: $SERVICE_FILE"
 fi
 
-# Перезагрузка systemd
+# Перезагрузка системных демонов
 systemctl daemon-reload
-success "Перезагружены systemd сервисы"
+success "Конфигурация Systemd успешно обновлена"
 
-# Удаление cron задач
+# Удаление cron задач мониторинга и резервирования
 if crontab -l >/dev/null 2>&1; then
-    crontab -l | grep -v "projectx-" > /tmp/crontab.tmp
-    crontab /tmp/crontab.tmp
+    crontab -l | grep -v "projectx-" > /tmp/crontab.tmp || true
+    if [ -s /tmp/crontab.tmp ]; then
+        crontab /tmp/crontab.tmp
+    else
+        crontab -r || true
+    fi
     rm -f /tmp/crontab.tmp
-    success "Удалены cron задачи, связанные с projectx"
-else
-    warn "Crontab не существует или пуст"
+    success "Регламентные задачи Cron очищены"
 fi
 
-# Удаление скриптов
+# Удаление исполняемых скриптов автоматизации
 SCRIPTS=("/usr/local/bin/projectx-backup.sh" "/usr/local/bin/projectx-healthcheck.sh")
 for script in "${SCRIPTS[@]}"; do
     if [[ -f "$script" ]]; then
         rm -f "$script"
-        success "Удален скрипт: $script"
-    else
-        warn "Скрипт не найден: $script"
+        success "Удален скрипт автоматизации: $script"
     fi
 done
 
@@ -188,25 +182,15 @@ done
 LOGROTATE_FILE="/etc/logrotate.d/projectx"
 if [[ -f "$LOGROTATE_FILE" ]]; then
     rm -f "$LOGROTATE_FILE"
-    success "Удален logrotate конфиг: $LOGROTATE_FILE"
-else
-    warn "Logrotate конфиг не найден: $LOGROTATE_FILE"
+    success "Конфигурация logrotate удалена"
 fi
 
-# Удаление лог файлов
+# Полное удаление лог-файлов
 rm -f /var/log/projectx-*.log 2>/dev/null
-success "Лог файлы удалены (если существовали)"
+success "Временные лог-файлы очищены"
 
-success "Процесс удаления завершен успешно!"
 echo ""
-echo "Итоговый отчет:"
-echo "- Сервис projectx-bot остановлен и отключен"
-echo "- Файл сервиса удален: $SERVICE_FILE"
-echo "- Systemd перезагружен"
-echo "- Cron задачи очищены"
-echo "- Скрипты удалены: ${SCRIPTS[*]}"
-echo "- Logrotate конфиг удален: $LOGROTATE_FILE"
-echo "- Лог файлы удалены"
+success "✨ Процесс деинсталляции ProjectX Bot полностью завершён!"
 if [[ "$choice" == "2" ]]; then
-    echo "- Данные сохранены в: $BACKUP_DIR"
+    echo -e "${YELLOW}Архив ваших критических данных находится по адресу: ${SAFE_BACKUP_DIR}${NC}"
 fi

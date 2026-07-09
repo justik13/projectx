@@ -8,7 +8,7 @@ from bot.states import AdminStates
 from config.settings import get_settings
 import logging
 import asyncio
-from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenRequest
+from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenRequest, TelegramBadRequest
 
 router = Router()
 
@@ -36,27 +36,41 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AdminStates.entering_broadcast_message)
 async def process_broadcast_message(message: Message, state: FSMContext):
-    """Обработать введённое сообщение для рассылки"""
+    """Обработать введённое сообщение для рассылки с валидацией HTML"""
     if not is_admin(message.from_user.id):
         await state.clear()
         return
     
     broadcast_text = message.text
     
-    # Сохраняем текст в состоянии
-    await state.update_data(broadcast_text=broadcast_text)
-    
     # Показываем предпросмотр и подтверждение
     preview = f"📢 Предпросмотр рассылки:\n"
     preview += "─────────────────────────────\n\n"
     preview += broadcast_text
     
-    await message.answer(
-        preview,
-        reply_markup=get_broadcast_confirm_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.set_state(AdminStates.confirming_broadcast)
+    try:
+        # Пробная отправка админу. Если HTML сломан — Telegram API выбросит исключение здесь
+        await message.answer(
+            preview,
+            reply_markup=get_broadcast_confirm_keyboard(),
+            parse_mode="HTML"
+        )
+        # Если отправка успешна — сохраняем валидный текст в состояние
+        await state.update_data(broadcast_text=broadcast_text)
+        await state.set_state(AdminStates.confirming_broadcast)
+        
+    except TelegramBadRequest as e:
+        if "can't parse entities" in str(e).lower():
+            await message.answer(
+                "❌ <b>Ошибка HTML-разметки!</b>\n\n"
+                "Бот не может распарсить ваше сообщение. Проверьте синтаксис:\n"
+                "• Убедитесь, что все теги (<code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;code&gt;</code>) закрыты корректно.\n"
+                "• Если вы используете знаки `<` или `>`, экранируйте их как `&lt;` и `&gt;`.\n\n"
+                "Введите текст сообщения заново:",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(f"❌ Ошибка Telegram API при валидации: {e}\n\nВведите текст заново:")
 
 
 @router.callback_query(F.data == "broadcast_send_all", AdminStates.confirming_broadcast)
@@ -74,56 +88,63 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
     
+    # 1. БЫСТРО получаем ID пользователей и сразу закрываем сессию БД (Защита от Database Lock)
     session = await get_session()
     try:
         users = await get_all_users(session)
-        success_count = 0
-        fail_count = 0
-        
-        for user in users:
+        user_ids = [user.telegram_id for user in users]  # Сохраняем только ID в RAM
+        total_count = len(user_ids)
+    finally:
+        await session.close()  # Сессия закрыта, база полностью свободна для воркеров и оплат
+
+    # 2. Долгий цикл отправки (БД больше не удерживается)
+    success_count = 0
+    fail_count = 0
+    
+    await callback.message.edit_text(f"⏳ Начинаю рассылку для {total_count} пользователей...")
+    
+    for uid in user_ids:
+        try:
+            await callback.bot.send_message(
+                uid,
+                broadcast_text,
+                parse_mode="HTML"
+            )
+            success_count += 1
+            await asyncio.sleep(0.04)
+        except TelegramRetryAfter as e:
+            fail_count += 1
+            logging.warning(f"Flood wait for user {uid}: sleeping {e.retry_after + 1}s")
+            await asyncio.sleep(e.retry_after + 1)
+            # Повторная попытка после ожидания
             try:
                 await callback.bot.send_message(
-                    user.telegram_id,
+                    uid,
                     broadcast_text,
                     parse_mode="HTML"
                 )
                 success_count += 1
-                await asyncio.sleep(0.04)
-            except TelegramRetryAfter as e:
-                fail_count += 1
-                logging.warning(f"Flood wait for user {user.telegram_id}: sleeping {e.retry_after + 1}s")
-                await asyncio.sleep(e.retry_after + 1)
-                # Повторная попытка после ожидания
-                try:
-                    await callback.bot.send_message(
-                        user.telegram_id,
-                        broadcast_text,
-                        parse_mode="HTML"
-                    )
-                    success_count += 1
-                    fail_count -= 1
-                except Exception:
-                    pass
-            except TelegramForbiddenRequest:
-                fail_count += 1
-                logging.info(f"User {user.telegram_id} blocked the bot")
-            except Exception as e:
-                fail_count += 1
-                logging.warning(f"Failed to send broadcast to {user.telegram_id}: {e}")
-        
-        await callback.message.edit_text(
-            f"✅ Рассылка завершена!\n\n"
-            f"📤 Отправлено: {success_count}\n"
-            f"❌ Ошибок: {fail_count}\n"
-            f"👥 Всего: {len(users)}",
-            reply_markup=get_back_button("admin_menu")
-        )
-        
-        logging.info(f"Admin {callback.from_user.id} broadcast to all: success={success_count}, fail={fail_count}")
-        await state.clear()
-        await callback.answer()
-    finally:
-        await session.close()
+                fail_count -= 1
+            except Exception:
+                pass
+        except TelegramForbiddenRequest:
+            fail_count += 1
+            logging.info(f"User {uid} blocked the bot")
+        except Exception as e:
+            fail_count += 1
+            logging.warning(f"Failed to send broadcast to {uid}: {e}")
+    
+    await callback.message.edit_text(
+        f"✅ Рассылка завершена!\n\n"
+        f"📤 Отправлено: {success_count}\n"
+        f"❌ Ошибок: {fail_count}\n"
+        f"👥 Всего: {total_count}",
+        reply_markup=get_back_button("admin_menu")
+    )
+    
+    logging.info(f"Admin {callback.from_user.id} broadcast to all: success={success_count}, fail={fail_count}")
+    await state.clear()
+    await callback.answer()
 
 
 @router.callback_query(F.data == "broadcast_send_active", AdminStates.confirming_broadcast)
@@ -141,53 +162,60 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
     
+    # 1. БЫСТРО получаем ID активных пользователей и сразу закрываем сессию БД
     session = await get_session()
     try:
         users = await get_active_users(session)
-        success_count = 0
-        fail_count = 0
+        user_ids = [user.telegram_id for user in users]  # Сохраняем только ID в RAM
+        total_count = len(user_ids)
+    finally:
+        await session.close()  # Сессия закрыта, база полностью свободна для воркеров и оплат
         
-        for user in users:
+    # 2. Долгий цикл отправки (БД больше не удерживается)
+    success_count = 0
+    fail_count = 0
+    
+    await callback.message.edit_text(f"⏳ Начинаю рассылку для {total_count} активных пользователей...")
+    
+    for uid in user_ids:
+        try:
+            await callback.bot.send_message(
+                uid,
+                broadcast_text,
+                parse_mode="HTML"
+            )
+            success_count += 1
+            await asyncio.sleep(0.04)
+        except TelegramRetryAfter as e:
+            fail_count += 1
+            logging.warning(f"Flood wait for user {uid}: sleeping {e.retry_after + 1}s")
+            await asyncio.sleep(e.retry_after + 1)
+            # Повторная попытка после ожидания
             try:
                 await callback.bot.send_message(
-                    user.telegram_id,
+                    uid,
                     broadcast_text,
                     parse_mode="HTML"
                 )
                 success_count += 1
-                await asyncio.sleep(0.04)
-            except TelegramRetryAfter as e:
-                fail_count += 1
-                logging.warning(f"Flood wait for user {user.telegram_id}: sleeping {e.retry_after + 1}s")
-                await asyncio.sleep(e.retry_after + 1)
-                # Повторная попытка после ожидания
-                try:
-                    await callback.bot.send_message(
-                        user.telegram_id,
-                        broadcast_text,
-                        parse_mode="HTML"
-                    )
-                    success_count += 1
-                    fail_count -= 1
-                except Exception:
-                    pass
-            except TelegramForbiddenRequest:
-                fail_count += 1
-                logging.info(f"User {user.telegram_id} blocked the bot")
-            except Exception as e:
-                fail_count += 1
-                logging.warning(f"Failed to send broadcast to {user.telegram_id}: {e}")
-        
-        await callback.message.edit_text(
-            f"✅ Рассылка завершена!\n\n"
-            f"📤 Отправлено: {success_count}\n"
-            f"❌ Ошибок: {fail_count}\n"
-            f"👥 Активных: {len(users)}",
-            reply_markup=get_back_button("admin_menu")
-        )
-        
-        logging.info(f"Admin {callback.from_user.id} broadcast to active: success={success_count}, fail={fail_count}")
-        await state.clear()
-        await callback.answer()
-    finally:
-        await session.close()
+                fail_count -= 1
+            except Exception:
+                pass
+        except TelegramForbiddenRequest:
+            fail_count += 1
+            logging.info(f"User {uid} blocked the bot")
+        except Exception as e:
+            fail_count += 1
+            logging.warning(f"Failed to send broadcast to {uid}: {e}")
+    
+    await callback.message.edit_text(
+        f"✅ Рассылка завершена!\n\n"
+        f"📤 Отправлено: {success_count}\n"
+        f"❌ Ошибок: {fail_count}\n"
+        f"👥 Активных: {total_count}",
+        reply_markup=get_back_button("admin_menu")
+    )
+    
+    logging.info(f"Admin {callback.from_user.id} broadcast to active: success={success_count}, fail={fail_count}")
+    await state.clear()
+    await callback.answer()

@@ -1,18 +1,23 @@
+# bot/handlers/profile.py
+import html
+import logging
+from datetime import datetime, timezone
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
+
 from database.connection import get_session
 from database.repositories.users_repo import get_user_by_telegram_id, get_user_referrals
 from database.repositories.profiles_repo import get_user_profiles, get_user_profiles_count
 from services.subscription import SubscriptionService
-from bot.texts import PROFILE_TEXT, REFERRAL_TEXT, REFERRALS_LIST_HEADER, REFERRAL_ITEM
+from bot.texts import PROFILE_TEXT, REFERRAL_TEXT
 from bot.keyboards import get_profile_keyboard, get_referral_keyboard, get_back_button
 from utils.formatters import format_traffic, format_datetime, format_days_left
 from config.settings import get_settings
 from database.models import User
-from datetime import datetime, timezone
-import logging
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 @router.message(F.text == "👤 Профиль")
@@ -37,9 +42,14 @@ async def show_profile(message: Message, db_user: User | None = None):
         days_left = format_days_left(user.subscription_end)
         total_traffic_str = format_traffic(total_traffic)
 
+        # Защита от HTML-инъекций и фикс реферального счетчика
+        safe_name = html.escape(user.first_name or "Пользователь")
+        safe_username = html.escape(user.username or "—")
+        referrals_count = len(await get_user_referrals(session, user.telegram_id))
+
         text = PROFILE_TEXT.format(
-            name=user.first_name or "Пользователь",
-            username=user.username or "—",
+            name=safe_name,
+            username=safe_username,
             telegram_id=user.telegram_id,
             status_emoji=status_emoji,
             status_text=status_text,
@@ -48,14 +58,14 @@ async def show_profile(message: Message, db_user: User | None = None):
             devices_count=profiles_count,
             device_limit=user.device_limit,
             total_traffic=total_traffic_str,
-            referrals_count=len(await get_user_referrals(session, user.telegram_id)) if user.referral_days > 0 else 0,
+            referrals_count=referrals_count,
             referral_days=user.referral_days
         )
 
         await message.answer(
             text,
             reply_markup=get_profile_keyboard(),
-            parse_mode=None
+            parse_mode="HTML"  # Исправлено: PROFILE_TEXT содержит HTML-теги оформления (<b>)
         )
     finally:
         await session.close()
@@ -75,7 +85,8 @@ async def show_referral(callback: CallbackQuery, db_user: User | None = None):
         bot_info = await callback.bot.get_me()
         referral_link = f"https://t.me/{bot_info.username}?start=ref_{user.telegram_id}"
 
-        invited_count = user.referral_days // settings.REFERRAL_BONUS_DAYS if user.referral_days > 0 else 0
+        # Исправлено: Считаем реальное количество рефералов из базы вместо хрупкого деления дней
+        invited_count = len(await get_user_referrals(session, user.telegram_id))
 
         text = REFERRAL_TEXT.format(
             bonus_days=settings.REFERRAL_BONUS_DAYS,
@@ -86,7 +97,8 @@ async def show_referral(callback: CallbackQuery, db_user: User | None = None):
 
         await callback.message.edit_text(
             text,
-            reply_markup=get_referral_keyboard()
+            reply_markup=get_referral_keyboard(),
+            parse_mode="HTML"
         )
         await callback.answer()
     finally:
@@ -113,15 +125,17 @@ async def show_referrals_list(callback: CallbackQuery, db_user: User | None = No
             text += "─────────────────────────────\n\n"
             
             for referral in referrals:
-                username = f"@{referral.username}" if referral.username else f"ID: {referral.telegram_id}"
+                # Санитируем юзернеймы приглашенных для безопасности разметки
+                safe_user_string = f"@{html.escape(referral.username)}" if referral.username else f"ID: {referral.telegram_id}"
                 bonus_days = settings.REFERRAL_BONUS_DAYS
-                text += f"• {username} — {bonus_days} бонусных дней\n"
+                text += f"• {safe_user_string} — {bonus_days} бонусных дней\n"
             
             text += f"\nВсего приглашено: {len(referrals)} пользователей"
 
         await callback.message.edit_text(
             text,
-            reply_markup=get_back_button("referral")
+            reply_markup=get_back_button("referral"),
+            parse_mode="HTML"
         )
         await callback.answer()
     finally:
@@ -146,9 +160,14 @@ async def back_to_profile_or_main(callback: CallbackQuery, db_user: User | None 
             status_emoji = "🟢" if has_access else "🔴"
             status_text = "Активен" if has_access else "Неактивен"
 
+            # Защита от HTML-инъекций и фикс математики рефералов
+            safe_name = html.escape(user.first_name or "Пользователь")
+            safe_username = html.escape(user.username or "—")
+            referrals_count = len(await get_user_referrals(session, user.telegram_id))
+
             text = PROFILE_TEXT.format(
-                name=user.first_name or "Пользователь",
-                username=user.username or "—",
+                name=safe_name,
+                username=safe_username,
                 telegram_id=user.telegram_id,
                 status_emoji=status_emoji,
                 status_text=status_text,
@@ -157,20 +176,25 @@ async def back_to_profile_or_main(callback: CallbackQuery, db_user: User | None 
                 devices_count=profiles_count,
                 device_limit=user.device_limit,
                 total_traffic=format_traffic(total_traffic),
-                referrals_count=user.referral_days // get_settings().REFERRAL_BONUS_DAYS if user.referral_days > 0 else 0,
+                referrals_count=referrals_count,
                 referral_days=user.referral_days
             )
 
             await callback.message.edit_text(
                 text,
-                reply_markup=get_profile_keyboard()
+                reply_markup=get_profile_keyboard(),
+                parse_mode="HTML"  # Исправлено: PROFILE_TEXT содержит HTML-теги оформления
             )
             await callback.answer()
         finally:
             await session.close()
     else:
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.answer()
+
 
 @router.callback_query(F.data == "back_to_main_menu")
 async def back_to_main_menu(callback: CallbackQuery):

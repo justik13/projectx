@@ -61,14 +61,18 @@ async def main():
     try:
         settings = get_settings()
         
-        # Проверка ключа шифрования
-        if settings.DB_ENCRYPTION_KEY:
-            try:
-                Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
-            except (ValueError, Exception) as e:
-                logger.critical(f"❌ DB_ENCRYPTION_KEY is invalid: {e}")
-                logger.critical("Generate a valid key with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'")
-                return
+        # Обязательная проверка наличия и валидности ключа шифрования (Защита P0)
+        if not settings.DB_ENCRYPTION_KEY:
+            logger.critical("❌ КРИТИЧЕСКАЯ ОШИБКА: Переменная DB_ENCRYPTION_KEY пуста или отсутствует в .env!")
+            logger.critical("Запуск бота заблокирован во избежание сохранения awg-конфигов и API-ключей в незашифрованном виде (plaintext).")
+            return
+
+        try:
+            Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
+        except (ValueError, Exception) as e:
+            logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА: DB_ENCRYPTION_KEY невалиден: {e}")
+            logger.critical("Сгенерируйте валидный Fernet ключ с помощью команды: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'")
+            return
 
         logger.info("Инициализация базы данных...")
         await init_db()

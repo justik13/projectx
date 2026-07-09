@@ -1,6 +1,14 @@
+import html
+import logging
+import math
+import asyncio
+from datetime import datetime, timezone
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
+
 from database.connection import get_session
 from database.repositories.users_repo import (
     get_user_by_telegram_id, get_users_paginated, 
@@ -16,13 +24,10 @@ from bot.keyboards import (
 from bot.states import AdminStates
 from utils.formatters import format_datetime, format_days_left
 from config.settings import get_settings
-from datetime import datetime, timedelta, timezone
-import logging
-import math
-
 from services.amnezia_client import AmneziaClient
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 USERS_PER_PAGE = 10
 
@@ -49,7 +54,8 @@ async def show_users_list(callback: CallbackQuery):
         
         await callback.message.edit_text(
             text,
-            reply_markup=get_admin_users_keyboard(page=1, total_pages=total_pages)
+            reply_markup=get_admin_users_keyboard(page=1, total_pages=total_pages),
+            parse_mode="HTML"
         )
         await callback.answer()
     finally:
@@ -74,7 +80,8 @@ async def users_pagination(callback: CallbackQuery):
         
         await callback.message.edit_text(
             text,
-            reply_markup=get_admin_users_keyboard(page=page, total_pages=total_pages)
+            reply_markup=get_admin_users_keyboard(page=page, total_pages=total_pages),
+            parse_mode="HTML"
         )
         await callback.answer()
     finally:
@@ -93,11 +100,12 @@ async def _build_users_list_text(users, page: int, total_pages: int, total: int)
     for user in users:
         status = "🟢" if user.subscription_end and user.subscription_end > datetime.now(timezone.utc) else "🔴"
         ban = "🚫" if user.is_banned else ""
-        username = f"@{user.username}" if user.username else "—"
+        # Защита от HTML-инъекций в юзернеймах
+        username = f"@{html.escape(user.username)}" if user.username else "—"
         days = format_days_left(user.subscription_end)
         
         text += f"{status}{ban} <b>{user.telegram_id}</b> {username}\n"
-        text += f"   Осталось: {days}\n\n"
+        text += f"    Осталось: {days}\n\n"
     
     return text
 
@@ -182,11 +190,15 @@ async def _show_user_card(message: Message, user, session):
 async def _show_user_card_edit(message, user, session):
     """Показать карточку пользователя (редактирование)"""
     text = await _build_user_card_text(user, session)
-    await message.edit_text(
-        text,
-        reply_markup=get_admin_user_card_keyboard(user.telegram_id),
-        parse_mode="HTML"
-    )
+    try:
+        await message.edit_text(
+            text,
+            reply_markup=get_admin_user_card_keyboard(user.telegram_id),
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest:
+        # Падаем в резервную отправку, если сообщение не изменилось
+        pass
 
 
 async def _build_user_card_text(user, session) -> str:
@@ -197,11 +209,15 @@ async def _build_user_card_text(user, session) -> str:
     profiles = await get_user_profiles(session, user.id)
     devices_count = len(profiles)
     
+    # Полное санитирование (экранирование) динамических строк от XSS/HTML-инъекций
+    safe_username = html.escape(user.username) if user.username else '—'
+    safe_first_name = html.escape(user.first_name) if user.first_name else '—'
+    
     text = f"👤 Карточка пользователя\n"
     text += "─────────────────────────────\n\n"
     text += f"<b>ID:</b> {user.telegram_id}\n"
-    text += f"<b>Username:</b> @{user.username or '—'}\n"
-    text += f"<b>Имя:</b> {user.first_name or '—'}\n\n"
+    text += f"<b>Username:</b> @{safe_username}\n"
+    text += f"<b>Имя:</b> {safe_first_name}\n\n"
     text += f"<b>Статус:</b> {status}\n"
     text += f"<b>Бан:</b> {ban}\n"
     text += f"<b>Действует до:</b> {format_datetime(user.subscription_end)}\n"
@@ -323,7 +339,7 @@ async def process_custom_days(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_user_ban:"))
 async def toggle_ban_user(callback: CallbackQuery):
-    """Забанить/разбанить пользователя"""
+    """Забанить/разбанить пользователя с параллельным обновлением серверов и валидацией подписки"""
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
@@ -346,43 +362,40 @@ async def toggle_ban_user(callback: CallbackQuery):
         new_status = not user.is_banned
         await update_user(session, user, is_banned=new_status)
         
-        # Если пользователь банится - отключаем его профили на серверах
-        if new_status:
-            profiles = await get_user_profiles(session, user.id)
-            for profile in profiles:
-                server = await get_server_by_id(session, profile.server_id)
-                if server and server.is_active:
-                    try:
-                        client = AmneziaClient(server.api_url, server.api_key)
-                        await client.update_client(
-                            client_id=profile.peer_id,
-                            status="disabled"
-                        )
-                        await update_profile(session, profile, is_active=False)
-                    except Exception as e:
-                        logging.error(f"Failed to disable profile {profile.id} on server {server.id}: {e}")
-        else:
-            # Если пользователь разбанен - включаем его профили на серверах
-            profiles = await get_user_profiles(session, user.id)
-            for profile in profiles:
-                server = await get_server_by_id(session, profile.server_id)
-                if server:
-                    try:
-                        client = AmneziaClient(server.api_url, server.api_key)
-                        await client.update_client(
-                            client_id=profile.peer_id,
-                            status="active"
-                        )
-                        await update_profile(session, profile, is_active=True)
-                    except Exception as e:
-                        logging.error(f"Failed to enable profile {profile.id} on server {server.id}: {e}")
+        # Защита от утечки бесплатного доступа: проверяем валидность подписки
+        now = datetime.now(timezone.utc)
+        has_access = user.subscription_end and user.subscription_end > now
+        
+        # Если баним - всегда disabled. Если разбаниваем - active только при живой подписке.
+        target_api_status = "disabled" if new_status else ("active" if has_access else "disabled")
+        target_db_status = False if new_status else (True if has_access else False)
+        
+        profiles = await get_user_profiles(session, user.id)
+        tasks = []
+        profiles_to_update = []
+        
+        for profile in profiles:
+            server = await get_server_by_id(session, profile.server_id)
+            if server and server.is_active:
+                client = AmneziaClient(server.api_url, server.api_key)
+                # Собираем конкурентные корутины во избежание дедлоков UI
+                tasks.append(client.update_client(client_id=profile.peer_id, status=target_api_status))
+                profiles_to_update.append(profile)
+
+        if tasks:
+            # Выполняем запросы ко всем VPS параллельно (Highload оптимизация)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for p in profiles_to_update:
+                p.is_active = target_db_status
+            await session.commit()
 
         action = "забанен" if new_status else "разбанен"
-        await callback.answer(f"✅ Пользователь {action}", show_alert=True)
-        
-        logging.info(
-            f"Admin {callback.from_user.id} {action} user {telegram_id}"
-        )
+        alert_text = f"✅ Пользователь {action}"
+        if not new_status and not has_access:
+            alert_text += " (подписка истекла, устройства оставлены отключенными)"
+            
+        await callback.answer(alert_text, show_alert=True)
+        logging.info(f"Admin {callback.from_user.id} {action} user {telegram_id}")
         
         # Обновляем карточку
         user = await get_user_by_telegram_id(session, telegram_id)
@@ -415,9 +428,11 @@ async def show_user_devices(callback: CallbackQuery):
             text += "_Устройств нет_"
         else:
             for p in profiles:
-                text += f"📱 <b>{p.device_name}</b>\n"
-                text += f"   Peer: <code>{p.peer_id[:16]}...</code>\n"
-                text += f"   Трафик: ↓{p.traffic_down} ↑{p.traffic_up}\n\n"
+                # Санитирование названий устройств от HTML-инъекций
+                safe_device_name = html.escape(p.device_name)
+                text += f"📱 <b>{safe_device_name}</b>\n"
+                text += f"    Peer: <code>{p.peer_id[:16]}...</code>\n"
+                text += f"    Трафик: ↓{p.traffic_down} ↑{p.traffic_up}\n\n"
         
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         builder = InlineKeyboardBuilder()
