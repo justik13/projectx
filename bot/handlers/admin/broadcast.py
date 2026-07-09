@@ -8,7 +8,8 @@ from bot.states import AdminStates
 from config.settings import get_settings
 import logging
 import asyncio
-from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenRequest, TelegramBadRequest
+# ✅ ИСПРАВЛЕНО: TelegramForbiddenError вместо TelegramForbiddenRequest
+from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, TelegramBadRequest
 
 router = Router()
 
@@ -127,7 +128,8 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext):
                 fail_count -= 1
             except Exception:
                 pass
-        except TelegramForbiddenRequest:
+        # ✅ ИСПРАВЛЕНО: TelegramForbiddenError
+        except TelegramForbiddenError:
             fail_count += 1
             logging.info(f"User {uid} blocked the bot")
         except Exception as e:
@@ -201,7 +203,8 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext):
                 fail_count -= 1
             except Exception:
                 pass
-        except TelegramForbiddenRequest:
+        # ✅ ИСПРАВЛЕНО: TelegramForbiddenError
+        except TelegramForbiddenError:
             fail_count += 1
             logging.info(f"User {uid} blocked the bot")
         except Exception as e:
