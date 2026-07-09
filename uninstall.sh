@@ -194,13 +194,8 @@ else
 fi
 
 # Удаление лог файлов
-LOG_FILES="/var/log/projectx-*.log"
-if [[ -f /var/log/projectx-*.log ]]; then
-    rm -f /var/log/projectx-*.log
-    success "Удалены лог файлы"
-else
-    warn "Лог файлы не найдены"
-fi
+rm -f /var/log/projectx-*.log 2>/dev/null
+success "Лог файлы удалены (если существовали)"
 
 success "Процесс удаления завершен успешно!"
 echo ""
