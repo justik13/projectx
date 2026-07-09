@@ -212,7 +212,11 @@ async def delete_device(callback: CallbackQuery):
         await callback.answer("🗑 Устройство успешно удалено", show_alert=True)
         
         # Обновляем экран
-        text, builder = await _build_connections_screen(callback.from_user.id, session)
+        user = await get_user_by_telegram_id(session, callback.from_user.id)
+        if not user:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+        text, builder = await _build_connections_screen(user, session)
         await callback.message.edit_text(text, reply_markup=builder.as_markup())
     except Exception as e:
         logging.error(f"Error deleting device: {e}")
