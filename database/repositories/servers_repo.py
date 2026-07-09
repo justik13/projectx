@@ -54,8 +54,6 @@ async def get_total_free_ips(session: AsyncSession) -> int:
     total_capacity = result.scalar() or 0
     
     # Вычитаем количество созданных профилей на активных серверах
-    from sqlalchemy import select
-    
     active_server_ids = select(Server.id).where(Server.is_active == True).scalar_subquery()
     stmt = select(func.count(VPNProfile.id)).where(VPNProfile.server_id.in_(active_server_ids))
     result = await session.execute(stmt)
