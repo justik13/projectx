@@ -21,53 +21,40 @@ async def subscription_expiry_checker_loop():
     while True:
         try:
             logger.info("Запуск проверки истечения подписок...")
-            
-            # Получаем список пользователей
             session = await get_session()
-            users = await get_all_users(session)
-            await session.close()
-            
-            for user in users:
-                # Получаем данные пользователя и его профили
-                session = await get_session()
-                has_access = user.subscription_end and user.subscription_end > datetime.now(timezone.utc) and not user.is_banned
-                profiles = await get_user_profiles(session, user.id)
+            try:
+                users = await get_all_users(session)
+                
+                for user in users:
+                    has_access = user.subscription_end and user.subscription_end > datetime.now(timezone.utc) and not user.is_banned
+                    profiles = await get_user_profiles(session, user.id)
+                    
+                    for profile in profiles:
+                        server = await get_server_by_id(session, profile.server_id)
+                        if not server:
+                            continue
+                        
+                        client = AmneziaClient(server.api_url, server.api_key)
+                        
+                        # Сценарий 1: Подписка закончилась, но профиль всё еще активен на VPS
+                        if not has_access and profile.is_active:
+                            logger.info(f"Блокировка устройства {profile.device_name} для пользователя {user.telegram_id}")
+                            success = await client.update_client(client_id=profile.peer_id, status="disabled")
+                            if success:
+                                await update_profile(session, profile, is_active=False)
+                        
+                        # Сценарий 2: Подписка активна (продлена), но профиль был выключен
+                        elif has_access and not profile.is_active:
+                            logger.info(f"Активация устройства {profile.device_name} для пользователя {user.telegram_id}")
+                            success = await client.update_client(client_id=profile.peer_id, status="active")
+                            if success:
+                                await update_profile(session, profile, is_active=True)
+            finally:
                 await session.close()
                 
-                for profile in profiles:
-                    # Получаем информацию о сервере
-                    session = await get_session()
-                    server = await get_server_by_id(session, profile.server_id)
-                    await session.close()
-                    
-                    if not server:
-                        continue
-                        
-                    client = AmneziaClient(server.api_url, server.api_key)
-                    
-                    # Сценарий 1: Подписка закончилась, но профиль всё еще активен на VPS
-                    if not has_access and profile.is_active:
-                        logger.info(f"Блокировка устройства {profile.device_name} для пользователя {user.telegram_id}")
-                        success = await client.update_client(client_id=profile.peer_id, status="disabled")
-                        if success:
-                            # Обновляем статус в БД
-                            session = await get_session()
-                            await update_profile(session, profile, is_active=False)
-                            await session.close()
-                            
-                    # Сценарий 2: Подписка активна (продлена), но профиль был выключен
-                    elif has_access and not profile.is_active:
-                        logger.info(f"Активация устройства {profile.device_name} для пользователя {user.telegram_id}")
-                        success = await client.update_client(client_id=profile.peer_id, status="active")
-                        if success:
-                            # Обновляем статус в БД
-                            session = await get_session()
-                            await update_profile(session, profile, is_active=True)
-                            await session.close()
-            
         except Exception as e:
             logger.error(f"Ошибка в цикле проверки подписок: {e}", exc_info=True)
-            
+        
         await asyncio.sleep(1800)  # Проверка каждые 30 минут
 
 
