@@ -30,8 +30,8 @@ async def show_profile(message: Message, db_user: User | None = None):
 
     session = await get_session()
     try:
-        profiles_count = await get_user_profiles_count(session, user.id)
         profiles = await get_user_profiles(session, user.id)
+        profiles_count = len(profiles)
         total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
 
         has_access = await SubscriptionService.check_access(session, user.telegram_id)
@@ -153,8 +153,8 @@ async def back_to_profile_or_main(callback: CallbackQuery, db_user: User | None 
 
         session = await get_session()
         try:
-            profiles_count = await get_user_profiles_count(session, user.id)
             profiles = await get_user_profiles(session, user.id)
+            profiles_count = len(profiles)
             total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
             has_access = await SubscriptionService.check_access(session, user.telegram_id)
             status_emoji = "🟢" if has_access else "🔴"

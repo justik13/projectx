@@ -1,4 +1,6 @@
 # bot/handlers/admin/users.py
+from sqlalchemy import select, update
+from database.models import Server, VPNProfile
 import html
 import logging
 import math
@@ -13,8 +15,7 @@ from database.repositories.users_repo import (
     get_user_by_telegram_id, get_users_paginated,
     get_user_count, update_user, get_user_referrals
 )
-from database.repositories.profiles_repo import get_user_profiles, update_profile
-from database.repositories.servers_repo import get_server_by_id
+from database.repositories.profiles_repo import get_user_profiles
 from services.subscription import SubscriptionService
 from bot.keyboards import (
     get_admin_users_keyboard, get_admin_user_card_keyboard,
@@ -233,7 +234,7 @@ async def process_custom_days(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_user_ban:"))
 async def toggle_ban_user(callback: CallbackQuery):
-    """Забанить/разбанить пользователя с ОПТИМИЗИРОВАННЫМ обновлением серверов"""
+    """Забанить/разбанить пользователя (БЕЗ удержания сессии во время сети)"""
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
@@ -242,6 +243,8 @@ async def toggle_ban_user(callback: CallbackQuery):
     if telegram_id in settings.ADMIN_IDS:
         await callback.answer("⛔️ Нельзя банить администраторов", show_alert=True)
         return
+
+    # --- ЭТАП 1: ЧТЕНИЕ ИЗ БД ---
     session = await get_session()
     try:
         user = await get_user_by_telegram_id(session, telegram_id)
@@ -258,8 +261,6 @@ async def toggle_ban_user(callback: CallbackQuery):
         target_db_status = False if new_status else (True if has_access else False)
         
         profiles = await get_user_profiles(session, user.id)
-        
-        # 🔥 ИСПРАВЛЕНИЕ N+1: Загружаем все нужные серверы ОДНИМ запросом
         server_ids = {p.server_id for p in profiles}
         if server_ids:
             stmt = select(Server).where(Server.id.in_(server_ids))
@@ -267,29 +268,51 @@ async def toggle_ban_user(callback: CallbackQuery):
             servers_map = {s.id: s for s in res.scalars().all()}
         else:
             servers_map = {}
-
-        tasks = []
-        profiles_to_update = []
+        
+        # Сохраняем нужные данные в RAM перед закрытием сессии
+        tasks_info = []
+        profile_ids_to_update = []
         for profile in profiles:
             server = servers_map.get(profile.server_id)
             if server and server.is_active:
-                client = AmneziaClient(server.api_url, server.api_key)
-                tasks.append(client.update_client(client_id=profile.peer_id, status=target_api_status))
-                profiles_to_update.append(profile)
-        
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-            for p in profiles_to_update:
-                p.is_active = target_db_status
+                tasks_info.append({
+                    'api_url': server.api_url,
+                    'api_key': server.api_key,
+                    'peer_id': profile.peer_id
+                })
+                profile_ids_to_update.append(profile.id)
+    finally:
+        await session.close()  # 🔓 БАЗА СВОБОДНА!
+
+    # --- ЭТАП 2: СЕТЬ (Без удержания БД) ---
+    async def _update_peer(info, status):
+        client = AmneziaClient(info['api_url'], info['api_key'])
+        return await client.update_client(client_id=info['peer_id'], status=status)
+    
+    if tasks_info:
+        tasks = [_update_peer(info, target_api_status) for info in tasks_info]
+        await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # --- ЭТАП 3: ЗАПИСЬ В БД ---
+    if profile_ids_to_update:
+        session = await get_session()
+        try:
+            await session.execute(
+                update(VPNProfile).where(VPNProfile.id.in_(profile_ids_to_update)).values(is_active=target_db_status)
+            )
             await session.commit()
-        
-        action = "забанен" if new_status else "разбанен"
-        alert_text = f"✅ Пользователь {action}"
-        if not new_status and not has_access:
-            alert_text += " (подписка истекла, устройства оставлены отключенными)"
-        await callback.answer(alert_text, show_alert=True)
-        logging.info(f"Admin {callback.from_user.id} {action} user {telegram_id}")
-        
+        finally:
+            await session.close()
+
+    action = "забанен" if new_status else "разбанен"
+    alert_text = f"✅ Пользователь {action}"
+    if not new_status and not has_access:
+        alert_text += " (подписка истекла, устройства оставлены отключенными)"
+    await callback.answer(alert_text, show_alert=True)
+    logging.info(f"Admin {callback.from_user.id} {action} user {telegram_id}")
+    
+    session = await get_session()
+    try:
         user = await get_user_by_telegram_id(session, telegram_id)
         await _show_user_card_edit(callback.message, user, session)
     finally:
