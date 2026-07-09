@@ -43,23 +43,33 @@ class AmneziaClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Optional[Dict]:
         url = f"{self.api_url}{path}"
-        session = await get_http_session()
-        try:
-            async with session.request(
-                method, url, headers=self._headers, **kwargs
-            ) as response:
-                if response.status == 204:
-                    return {}
-                elif 200 <= response.status < 300:
-                    data = await response.json()
-                    return data
+        
+        for attempt in range(2):  # 1 повторная попытка
+            session = await get_http_session()
+            try:
+                async with session.request(
+                    method, url, headers=self._headers, **kwargs
+                ) as response:
+                    if response.status == 204:
+                        return {}
+                    elif 200 <= response.status < 300:
+                        data = await response.json()
+                        return data
+                    else:
+                        error_text = await response.text()
+                        logger.warning(f"API error {response.status}: {error_text}")
+                        return None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(f"Network error during request to {url} (attempt {attempt+1}): {e}")
+                if attempt == 0:
+                    # Пересоздаём сессию при первой неудаче
+                    await close_http_session()
+                    await asyncio.sleep(1)
                 else:
-                    error_text = await response.text()
-                    logger.warning(f"API error {response.status}: {error_text}")
                     return None
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.error(f"Network error during request to {url}: {e}")
-            return None
+            except Exception as e:
+                logger.error(f"Unexpected error during request to {url}: {e}", exc_info=True)
+                return None
 
     async def create_user(
         self, 
