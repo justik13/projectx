@@ -13,7 +13,7 @@ async def init_db():
     settings = get_settings()
     db_url = f"sqlite+aiosqlite:///{settings.DB_PATH}"
     
-    _engine = create_async_engine(db_url, echo=False)
+    _engine = create_async_engine(db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30})
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     
     async with _engine.begin() as conn:

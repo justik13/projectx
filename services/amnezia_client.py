@@ -4,8 +4,34 @@ import aiohttp
 import asyncio
 import logging
 from typing import Optional, Dict
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+# Глобальная сессия для HTTP-запросов
+_http_session: Optional[aiohttp.ClientSession] = None
+
+
+async def get_http_session() -> aiohttp.ClientSession:
+    global _http_session
+    if _http_session is None:
+        connector = aiohttp.TCPConnector(limit=100, limit_per_host=20)
+        timeout = aiohttp.ClientTimeout(total=15)
+        _http_session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout
+        )
+    return _http_session
+
+
+async def close_http_session():
+    global _http_session
+    if _http_session:
+        await _http_session.close()
+        _http_session = None
+
+
+PROTOCOL = "amneziawg2"
 
 
 class AmneziaClient:
@@ -19,20 +45,20 @@ class AmneziaClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Optional[Dict]:
         url = f"{self.api_url}{path}"
+        session = await get_http_session()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.request(
-                    method, url, headers=self._headers, **kwargs
-                ) as response:
-                    if response.status == 204:
-                        return {}
-                    elif 200 <= response.status < 300:
-                        data = await response.json()
-                        return data
-                    else:
-                        error_text = await response.text()
-                        logger.warning(f"API error {response.status}: {error_text}")
-                        return None
+            async with session.request(
+                method, url, headers=self._headers, **kwargs
+            ) as response:
+                if response.status == 204:
+                    return {}
+                elif 200 <= response.status < 300:
+                    data = await response.json()
+                    return data
+                else:
+                    error_text = await response.text()
+                    logger.warning(f"API error {response.status}: {error_text}")
+                    return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Network error during request to {url}: {e}")
             return None
@@ -40,7 +66,6 @@ class AmneziaClient:
     async def create_user(
         self, 
         client_name: str, 
-        protocol: str = "amneziawg2",
         expires_at: Optional[int] = None
     ) -> Optional[Dict]:
         """
@@ -49,7 +74,7 @@ class AmneziaClient:
         """
         data = {
             "clientName": client_name,
-            "protocol": protocol,
+            "protocol": PROTOCOL,
             "expiresAt": expires_at  # None = бессрочно
         }
         result = await self._request("POST", "/clients", json=data)
@@ -61,11 +86,11 @@ class AmneziaClient:
             logger.error(f"Failed to create client with name {client_name}")
             return None
 
-    async def delete_user(self, client_id: str, protocol: str = "amneziawg2") -> bool:
+    async def delete_user(self, client_id: str) -> bool:
         """Удалить клиента (DELETE с JSON body)"""
         data = {
             "clientId": client_id,
-            "protocol": protocol
+            "protocol": PROTOCOL
         }
         result = await self._request("DELETE", "/clients", json=data)
         if result is not None:
@@ -78,7 +103,6 @@ class AmneziaClient:
     async def update_client(
         self,
         client_id: str,
-        protocol: str = "amneziawg2",
         status: Optional[str] = None,
         expires_at: Optional[int] = None
     ) -> bool:
@@ -88,7 +112,7 @@ class AmneziaClient:
         """
         data = {
             "clientId": client_id,
-            "protocol": protocol
+            "protocol": PROTOCOL
         }
         if status is not None:
             data["status"] = status
@@ -100,34 +124,6 @@ class AmneziaClient:
             logger.info(f"Updated client {client_id}: status={status}")
             return True
         return False
-
-    async def get_client_config(self, client_id: str, protocol: str = "amneziawg2") -> Optional[str]:
-        """
-        Получить конфиг клиента.
-        NOTE: В текущей версии API нет отдельного эндпоинта для получения конфига.
-        Конфиг возвращается только при создании клиента.
-        Эта функция ищет клиента в списке и возвращает его данные.
-        """
-        # Получаем список всех клиентов
-        result = await self._request("GET", "/clients", params={"skip": 0, "limit": 1000})
-        if not result:
-            logger.error(f"Failed to get clients list")
-            return None
-        
-        # Ищем нужного клиента
-        clients = result.get("clients", [])
-        for client in clients:
-            if client.get("id") == client_id and client.get("protocol") == protocol:
-                # В списке клиентов может не быть поля config, только статистика
-                # Поэтому эта функция возвращает None, если config не сохранён в БД
-                logger.warning(
-                    f"Config for client {client_id} not available via API. "
-                    f"Use raw_config stored in DB."
-                )
-                return None
-        
-        logger.error(f"Client {client_id} not found in list")
-        return None
 
     async def get_server_stats(self) -> Optional[Dict]:
         """Получить метрики сервера (CPU, RAM, диск)"""

@@ -10,6 +10,7 @@ from database.connection import init_db, close_db, get_session
 from services.background_worker import start_background_worker
 from bot.middlewares import UserContextMiddleware
 from cryptography.fernet import Fernet
+from services.amnezia_client import close_http_session
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,6 +86,7 @@ async def main():
         logger.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
     finally:
         await close_db()
+        await close_http_session()
         logger.info("Работа бота завершена")
 
 
