@@ -63,60 +63,46 @@ async def traffic_sync_loop():
     while True:
         try:
             logger.info("Запуск синхронизации метрик трафика...")
-            
-            # Получаем список активных серверов
             session = await get_session()
-            servers = await get_active_servers(session)
-            await session.close()
-            
-            for server in servers:
-                client = AmneziaClient(server.api_url, server.api_key)
-                # Запрашиваем полный список клиентов с сервера
-                result = await client._request("GET", "/clients", params={"skip": 0, "limit": 1000})
+            try:
+                servers = await get_active_servers(session)
                 
-                if not result or "clients" not in result:
-                    continue
+                for server in servers:
+                    client = AmneziaClient(server.api_url, server.api_key)
+                    # Используем новый публичный метод
+                    api_clients_list = await client.get_all_clients()
+                    if not api_clients_list:
+                        continue
+                        
+                    api_clients = {c["id"]: c for c in api_clients_list}
+                    all_users = await get_all_users(session)
                     
-                api_clients = {c["id"]: c for c in result["clients"]}
-                
-                # Получаем список пользователей
-                session = await get_session()
-                all_users = await get_all_users(session)
+                    for user in all_users:
+                        profiles = await get_user_profiles(session, user.id)
+                        for profile in profiles:
+                            if profile.server_id == server.id and profile.peer_id in api_clients:
+                                api_data = api_clients[profile.peer_id]
+                                stats = api_data.get("traffics", {})
+                                traffic_down = stats.get("totalDownload", profile.traffic_down)
+                                traffic_up = stats.get("totalUpload", profile.traffic_up)
+                                
+                                last_conn_raw = api_data.get("updatedAt")
+                                last_connected = profile.last_connected
+                                if last_conn_raw:
+                                    try:
+                                        last_connected = datetime.fromtimestamp(int(last_conn_raw), tz=timezone.utc)
+                                    except (ValueError, TypeError):
+                                        pass
+                                
+                                await update_profile(
+                                    session, profile,
+                                    traffic_down=traffic_down,
+                                    traffic_up=traffic_up,
+                                    last_connected=last_connected
+                                )
+            finally:
                 await session.close()
                 
-                for user in all_users:
-                    # Получаем профили пользователя
-                    session = await get_session()
-                    profiles = await get_user_profiles(session, user.id)
-                    await session.close()
-                    
-                    for profile in profiles:
-                        if profile.server_id == server.id and profile.peer_id in api_clients:
-                            api_data = api_clients[profile.peer_id]
-                            
-                            # Извлекаем статистику (структура зависит от метрик amneziawg/wireguard внутри API)
-                            stats = api_data.get("traffics", {})
-                            traffic_down = stats.get("totalDownload", profile.traffic_down)
-                            traffic_up = stats.get("totalUpload", profile.traffic_up)
-                            
-                            # Парсим дату последней активности, если она доступна
-                            last_conn_raw = api_data.get("updatedAt")
-                            last_connected = profile.last_connected
-                            if last_conn_raw:
-                                try:
-                                    last_connected = datetime.fromtimestamp(int(last_conn_raw), tz=timezone.utc)
-                                except ValueError:
-                                    pass
-                                    
-                            # Сохраняем обновленные данные в БД
-                            session = await get_session()
-                            await update_profile(
-                                session, profile, 
-                                traffic_down=traffic_down, 
-                                traffic_up=traffic_up,
-                                last_connected=last_connected
-                            )
-                            await session.close()
         except Exception as e:
             logger.error(f"Ошибка в цикле синхронизации трафика: {e}", exc_info=True)
             
