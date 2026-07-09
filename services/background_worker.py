@@ -1,6 +1,9 @@
 # services/background_worker.py
 import asyncio
 import logging
+import html
+from aiogram import Bot
+from config.settings import get_settings
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from sqlalchemy import select, or_, update
@@ -11,18 +14,15 @@ from database.models import User, VPNProfile, Server
 
 logger = logging.getLogger("BackgroundWorker")
 
-async def start_background_worker():
+async def start_background_worker(bot: Bot):
     """Запуск бесконечных циклов фоновых задач синхронизации"""
-    asyncio.create_task(subscription_expiry_checker_loop())
+    asyncio.create_task(subscription_expiry_checker_loop(bot))
     asyncio.create_task(traffic_sync_loop())
     asyncio.create_task(cleanup_dangling_peers_loop())
     logger.info("Фоновые воркеры успешно запущены.")
 
-
-# ====================================================================
-# 1. ПРОВЕРКА ИСТЕЧЕНИЯ ПОДПИСОК + Circuit Breaker
-# ====================================================================
-async def subscription_expiry_checker_loop():
+async def subscription_expiry_checker_loop(bot: Bot):
+    settings = get_settings()
     while True:
         try:
             logger.info("Запуск проверки истечения подписок...")
@@ -134,8 +134,24 @@ async def subscription_expiry_checker_loop():
                     )
                     res = await session.execute(check_stmt)
                     critical_fails = res.all()
+                    
                     for p_id, s_id in critical_fails:
-                        logger.critical(f"⚠️ Circuit Breaker: Profile {p_id} on server {s_id} failed to sync 3+ times!")
+                        server_name = servers_data.get(s_id, {}).get('name', f"ID {s_id}")
+                        logger.critical(f"⚠️ Circuit Breaker: Profile {p_id} on server {server_name} failed to sync 3+ times!")
+                        
+                        # 🚨 Отправляем алерт админам в Telegram
+                        for admin_id in settings.ADMIN_IDS:
+                            try:
+                                await bot.send_message(
+                                    admin_id,
+                                    f"🚨 <b>Circuit Breaker Triggered</b>\n\n"
+                                    f"Сервер <b>{html.escape(server_name)}</b> недоступен.\n"
+                                    f"Не удалось отключить профиль <code>{p_id}</code> 3+ раза подряд.\n"
+                                    f"Проверьте ноду!",
+                                    parse_mode="HTML"
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to send alert to admin {admin_id}: {e}")
                 finally:
                     await session.close()
 

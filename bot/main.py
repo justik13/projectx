@@ -1,6 +1,7 @@
 # bot/main.py
 import asyncio
 import logging
+from cachetools import TTLCache
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.chat_action import ChatActionMiddleware
@@ -18,10 +19,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 🔥 FIX P2: Throttling Middleware для защиты от спама кнопками
+
+
+# 🔥 FIX: Используем TTLCache. O(1) сложность, автоматическая очистка протухших ключей.
 class ThrottlingMiddleware:
     def __init__(self, limit: float = 0.5):
         self.limit = limit
-        self._last_call = {}
+        # Кэш сам удалит ключи, которые старше limit * 3 секунд
+        self._last_call = TTLCache(maxsize=10000, ttl=limit * 3)
 
     async def __call__(self, handler, event, data):
         user_id = event.from_user.id if event.from_user else None
@@ -31,22 +36,16 @@ class ThrottlingMiddleware:
             return await handler(event, data)
         
         key = f"{user_id}:{callback_data}"
-        now = asyncio.get_running_loop().time()
         
-        last_time = self._last_call.get(key, 0)
-        if now - last_time < self.limit:
+        if key in self._last_call:
             if hasattr(event, 'answer'):
                 try:
                     await event.answer("⏳ Слишком часто! Подождите секунду.", show_alert=False)
                 except Exception:
                     pass
-            return
+            return  # Прерываем обработку
         
-        self._last_call[key] = now
-        
-        if len(self._last_call) > 10000:
-            self._last_call = {k: v for k, v in self._last_call.items() if now - v < self.limit * 2}
-        
+        self._last_call[key] = asyncio.get_running_loop().time()
         return await handler(event, data)
 
 
@@ -107,7 +106,7 @@ async def main():
         logger.info("База данных успешно инициализирована")
 
         bot, dp = await setup_bot()
-        await start_background_worker()
+        await start_background_worker(bot)
 
         logger.info("Запуск polling процесса...")
         await dp.start_polling(bot)
