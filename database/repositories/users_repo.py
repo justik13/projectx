@@ -90,9 +90,12 @@ async def get_users_paginated(session: AsyncSession, page: int = 1, per_page: in
 
 
 async def get_active_users(session: AsyncSession) -> list[User]:
-    """Получить пользователей с активной подпиской"""
+    """Получить пользователей с активной подпиской, которые не забанены"""
     result = await session.execute(
-        select(User).where(User.subscription_end > datetime.now(timezone.utc))
+        select(User).where(
+            User.subscription_end > datetime.now(timezone.utc),
+            User.is_banned == False
+        )
     )
     return result.scalars().all()
 
