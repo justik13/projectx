@@ -237,11 +237,32 @@ async def delete_server_handler(callback: CallbackQuery):
             await callback.answer("❌ Сервер не найден", show_alert=True)
             return
         
-        # Отключаем сервер вместо удаления
+        # Отключаем все профили на этом сервере перед отключением сервера
+        from database.repositories.profiles_repo import get_user_profiles
+        from services.amnezia_client import AmneziaClient
+        
+        # Получаем все профили, привязанные к этому серверу
+        from sqlalchemy import select
+        from database.models import VPNProfile
+        result = await session.execute(
+            select(VPNProfile).where(VPNProfile.server_id == server.id)
+        )
+        profiles = result.scalars().all()
+        
+        # Отключаем каждый профиль на сервере Amnezia
+        client = AmneziaClient(server.api_url, server.api_key)
+        for profile in profiles:
+            try:
+                await client.update_client(client_id=profile.peer_id, status="disabled")
+                await update_profile(session, profile, is_active=False)
+            except Exception as e:
+                logging.error(f"Failed to disable profile {profile.id} on server {server.id}: {e}")
+        
+        # Отключаем сервер
         await update_server(session, server, is_active=False)
         
         await callback.answer("✅ Сервер отключен", show_alert=True)
-        logging.info(f"Admin {callback.from_user.id} disabled server {server_id}")
+        logging.info(f"Admin {callback.from_user.id} disabled server {server_id} with {len(profiles)} profiles")
         
         # Возвращаемся к списку
         servers = await get_all_servers(session)
