@@ -1,7 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from database.connection import get_session
-from database.repositories.users_repo import get_user_by_telegram_id, count_users, count_active_subscriptions, count_new_users_24h
+from database.repositories.users_repo import get_user_by_telegram_id, get_user_count, get_active_subscriptions_count, get_new_users_count_24h
 from database.repositories.servers_repo import get_active_servers, get_total_free_ips
 from bot.keyboards import get_admin_menu
 from config.settings import get_settings
@@ -23,9 +23,9 @@ async def show_admin(message: Message):
     session = await get_session()
     try:
         # Получаем статистику
-        total_users = await count_users(session)
-        active_subs = await count_active_subscriptions(session)
-        new_users_24h = await count_new_users_24h(session)
+        total_users = await get_user_count(session)
+        active_subs = await get_active_subscriptions_count(session)
+        new_users_24h = await get_new_users_count_24h(session)
         free_ips = await get_total_free_ips(session)
         
         text = f"""🛠 Админ-панель
@@ -59,9 +59,9 @@ async def back_to_admin(callback: CallbackQuery):
     
     session = await get_session()
     try:
-        total_users = await count_users(session)
-        active_subs = await count_active_subscriptions(session)
-        new_users_24h = await count_new_users_24h(session)
+        total_users = await get_user_count(session)
+        active_subs = await get_active_subscriptions_count(session)
+        new_users_24h = await get_new_users_count_24h(session)
         free_ips = await get_total_free_ips(session)
         
         text = f"""🛠 Админ-панель
