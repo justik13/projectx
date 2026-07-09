@@ -1,5 +1,3 @@
-﻿# services/amnezia_client.py
-
 import aiohttp
 import asyncio
 import logging
