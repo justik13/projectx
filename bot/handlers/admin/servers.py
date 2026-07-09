@@ -100,13 +100,7 @@ async def process_add_server(message: Message, state: FSMContext):
             reply_markup=get_back_button("admin_servers")
         )
     elif step == "api_key":
-        await state.update_data(api_key=message.text.strip(), step="protocol")
-        await message.answer(
-            "📡 Введите протокол (amneziawg2, wireguard, openvpn):",
-            reply_markup=get_back_button("admin_servers")
-        )
-    elif step == "protocol":
-        await state.update_data(protocol=message.text.strip(), step="max_clients")
+        await state.update_data(api_key=message.text.strip(), step="max_clients")
         await message.answer(
             "👥 Введите максимальное количество клиентов (число):",
             reply_markup=get_back_button("admin_servers")
@@ -127,14 +121,14 @@ async def process_add_server(message: Message, state: FSMContext):
                 country_flag=all_data["country_flag"],
                 api_url=all_data["api_url"],
                 api_key=all_data["api_key"],
-                protocol=all_data["protocol"],
+                protocol="amneziawg2",
                 max_clients=max_clients
             )
             
             await message.answer(
                 f"✅ Сервер добавлен!\n\n"
                 f"{all_data['country_flag']} <b>{all_data['name']}</b>\n"
-                f"Протокол: {all_data['protocol']}\n"
+                f"Протокол: amneziawg2\n"
                 f"Макс клиентов: {max_clients}",
                 reply_markup=get_back_button("admin_servers"),
                 parse_mode="HTML"

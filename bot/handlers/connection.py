@@ -2,6 +2,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils import html
 from database.connection import get_session
 from database.repositories.users_repo import get_user_by_telegram_id
 from database.repositories.servers_repo import get_active_servers, get_server_by_id
@@ -25,9 +26,8 @@ import uuid
 
 router = Router()
 
-async def _build_connections_screen(user_id: int, session) -> tuple[str, InlineKeyboardBuilder]:
+async def _build_connections_screen(user: User, session) -> tuple[str, InlineKeyboardBuilder]:
     """Вспомогательная функция для сборки экрана со списком устройств"""
-    user = await get_user_by_telegram_id(session, user_id)
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
 
@@ -82,7 +82,7 @@ async def show_connections(message: Message, db_user: User | None = None):
             await message.answer(ERROR_NO_SUBSCRIPTION)
             return
 
-        text, builder = await _build_connections_screen(user.id, session)
+        text, builder = await _build_connections_screen(user, session)
         await message.answer(text, reply_markup=builder.as_markup())
     finally:
         await session.close()
@@ -97,7 +97,7 @@ async def back_to_connections(callback: CallbackQuery, state: FSMContext, db_use
 
     session = await get_session()
     try:
-        text, builder = await _build_connections_screen(user.id, session)
+        text, builder = await _build_connections_screen(user, session)
         await callback.message.edit_text(text, reply_markup=builder.as_markup())
         await callback.answer()
     except Exception as e:
@@ -203,7 +203,7 @@ async def delete_device(callback: CallbackQuery):
         if server:
             # Синхронно деактивируем клиента на стороне Amnezia API перед очисткой БД
             client = AmneziaClient(server.api_url, server.api_key)
-            deleted = await client.delete_user(client_id=profile.peer_id, protocol=server.protocol)
+            deleted = await client.delete_user(client_id=profile.peer_id)
             if not deleted:
                 await callback.answer("❌ Сервер недоступен. Попробуйте удалить устройство позже.", show_alert=True)
                 return
@@ -320,7 +320,7 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             # Если создание профиля в БД не удалось, откатываем создание на сервере
             logging.error(f"Failed to create profile in DB: {e}")
             try:
-                await client.delete_user(client_id=result.get("id"), protocol=server.protocol)
+                await client.delete_user(client_id=result.get("id"))
             except Exception as rollback_error:
                 logging.error(f"Failed to rollback user creation on server: {rollback_error}")
             await message.answer("❌ Произошла ошибка при создании устройства. Попробуйте еще раз.")
@@ -356,7 +356,7 @@ async def copy_config(callback: CallbackQuery, db_user: User | None = None):
             return
 
         await callback.message.answer(
-            f"🔑 Ключ подключения для {profile.device_name}:\n\n<code>{profile.raw_config}</code>",
+            f"🔑 Ключ подключения для {profile.device_name}:\n\n<code>{html.escape(profile.raw_config)}</code>",
             parse_mode="HTML"
         )
         await callback.answer("✅ Ключ отправлен")
