@@ -7,6 +7,7 @@ from database.repositories.users_repo import (
     get_users_count, update_user, get_user_referrals
 )
 from database.repositories.profiles_repo import get_user_profiles, update_profile
+from database.repositories.servers_repo import get_server_by_id
 from services.subscription import SubscriptionService
 from bot.keyboards import (
     get_admin_users_keyboard, get_admin_user_card_keyboard,
@@ -366,7 +367,22 @@ async def toggle_ban_user(callback: CallbackQuery):
                             await update_profile(session, profile, is_active=False)
                 except Exception as e:
                     logging.error(f"Failed to disable profile {profile.id} on server {server.id}: {e}")
-        
+        else:
+            # Если пользователь разбанен - включаем его профили на серверах
+            profiles = await get_user_profiles(session, user.id)
+            for profile in profiles:
+                server = await get_server_by_id(session, profile.server_id)
+                if server:
+                    try:
+                        client = AmneziaClient(server.api_url, server.api_key)
+                        await client.update_client(
+                            client_id=profile.peer_id,
+                            status="active"
+                        )
+                        await update_profile(session, profile, is_active=True)
+                    except Exception as e:
+                        logging.error(f"Failed to enable profile {profile.id} on server {server.id}: {e}")
+
         action = "забанен" if new_status else "разбанен"
         await callback.answer(f"✅ Пользователь {action}", show_alert=True)
         
