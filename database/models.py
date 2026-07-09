@@ -14,14 +14,14 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tos_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
-    subscription_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    subscription_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     device_limit: Mapped[int] = mapped_column(Integer, default=3)
     referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     referral_days: Mapped[int] = mapped_column(Integer, default=0)
-    last_payment_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_payment_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
     # Relationships
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
@@ -38,10 +38,10 @@ class VPNProfile(Base):
     raw_config: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
     traffic_down: Mapped[int] = mapped_column(BigInteger, default=0)
     traffic_up: Mapped[int] = mapped_column(BigInteger, default=0)
-    last_connected: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_connected: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_ip: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
     # Relationships
     user = relationship("User", back_populates="profiles")
@@ -59,7 +59,7 @@ class Server(Base):
     protocol: Mapped[str] = mapped_column(String(50), default="amneziawg2")
     max_clients: Mapped[int] = mapped_column(Integer, default=50)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class Tariff(Base):
     __tablename__ = "tariffs"
@@ -70,7 +70,7 @@ class Tariff(Base):
     price_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class Payment(Base):
     __tablename__ = "payments"
@@ -81,8 +81,8 @@ class Payment(Base):
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     user = relationship("User", back_populates="payments")
