@@ -56,8 +56,12 @@ async def extend_subscription(
     
     return await update_user(session, user, subscription_end=new_end)
 
-async def get_all_users(session: AsyncSession, limit: int = 100, offset: int = 0) -> List[User]:
-    stmt = select(User).order_by(User.created_at.desc()).limit(limit).offset(offset)
+async def get_all_users(session: AsyncSession, limit: int | None = None, offset: int = 0) -> List[User]:
+    stmt = select(User).order_by(User.created_at.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    if offset > 0:
+        stmt = stmt.offset(offset)
     result = await session.execute(stmt)
     return result.scalars().all()
 
