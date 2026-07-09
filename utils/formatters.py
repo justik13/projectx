@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 def format_traffic(bytes_value: int) -> str:
@@ -30,7 +30,7 @@ def format_days_left(dt: Optional[datetime]) -> str:
     if dt is None:
         return "—"
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if dt < now:
         return "—"
     

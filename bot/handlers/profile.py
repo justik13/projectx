@@ -9,6 +9,7 @@ from bot.keyboards import get_profile_keyboard, get_referral_keyboard, get_back_
 from utils.formatters import format_traffic, format_datetime, format_days_left
 from config.settings import get_settings
 from database.models import User
+from datetime import datetime, timezone
 import logging
 
 router = Router()
@@ -47,7 +48,7 @@ async def show_profile(message: Message, db_user: User | None = None):
             devices_count=profiles_count,
             device_limit=user.device_limit,
             total_traffic=total_traffic_str,
-            referrals_count=user.referral_days // get_settings().REFERRAL_BONUS_DAYS if user.referral_days > 0 else 0,
+            referrals_count=len(await get_user_referrals(session, user.telegram_id)) if user.referral_days > 0 else 0,
             referral_days=user.referral_days
         )
 

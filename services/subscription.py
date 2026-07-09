@@ -3,7 +3,7 @@ from database.repositories.users_repo import get_user_by_telegram_id, create_use
 from database.repositories.payments_repo import create_payment, get_payment_by_id
 from database.models import User, Payment
 from config.settings import get_settings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import logging
 
@@ -17,7 +17,7 @@ class SubscriptionService:
             return False
         if not user.subscription_end:
             return False
-        return user.subscription_end > datetime.utcnow()
+        return user.subscription_end > datetime.now(timezone.utc)
 
     @staticmethod
     async def process_onboarding(
@@ -62,7 +62,7 @@ class SubscriptionService:
             logging.warning(f"extend_subscription: user {telegram_id} not found")
             return None
         
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         
         # Если подписка ещё активна — продлеваем от её окончания
         # Если истекла или её нет — продлеваем от текущего момента
@@ -73,7 +73,7 @@ class SubscriptionService:
         
         # "Вечная" подписка
         if days >= 36500:
-            new_end = datetime(2100, 1, 1)
+            new_end = datetime(2100, 1, 1, tzinfo=timezone.utc)
         else:
             new_end = current_end + timedelta(days=days)
         
@@ -108,7 +108,7 @@ class SubscriptionService:
         
         # Помечаем как оплаченный
         payment.status = 'completed'
-        payment.paid_at = datetime.utcnow()
+        payment.paid_at = datetime.now(timezone.utc)
         await session.commit()
         await session.refresh(payment)
         
@@ -159,7 +159,7 @@ class SubscriptionService:
         await update_user(
             session, 
             user, 
-            last_payment_at=datetime.utcnow()
+            last_payment_at=datetime.now(timezone.utc)
         )
         
         await session.commit()

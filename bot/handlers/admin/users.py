@@ -6,7 +6,7 @@ from database.repositories.users_repo import (
     get_user_by_telegram_id, get_users_paginated, 
     get_users_count, update_user
 )
-from database.repositories.profiles_repo import get_user_profiles
+from database.repositories.profiles_repo import get_user_profiles, update_profile
 from services.subscription import SubscriptionService
 from bot.keyboards import (
     get_admin_users_keyboard, get_admin_user_card_keyboard,
@@ -15,9 +15,11 @@ from bot.keyboards import (
 from bot.states import AdminStates
 from utils.formatters import format_datetime, format_days_left
 from config.settings import get_settings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import math
+
+from services.amnezia_client import AmneziaClient
 
 router = Router()
 
@@ -186,7 +188,7 @@ async def _show_user_card_edit(message, user, session):
 
 
 async def _build_user_card_text(user, session) -> str:
-    has_access = user.subscription_end and user.subscription_end > datetime.utcnow()
+    has_access = user.subscription_end and user.subscription_end > datetime.now(timezone.utc)
     status = "🟢 Активен" if has_access else "🔴 Неактивен"
     ban = "🚫 ЗАБАНЕН" if user.is_banned else "✅ Не забанен"
     
@@ -203,7 +205,7 @@ async def _build_user_card_text(user, session) -> str:
     text += f"<b>Действует до:</b> {format_datetime(user.subscription_end)}\n"
     text += f"<b>Осталось:</b> {format_days_left(user.subscription_end)}\n\n"
     text += f"<b>Устройств:</b> {devices_count}/{user.device_limit}\n"
-    text += f"<b>Рефералов:</b> {user.referral_days // 3 if user.referral_days > 0 else 0}\n"
+    text += f"<b>Рефералов:</b> {len(await get_user_referrals(session, user.telegram_id)) if user.referral_days > 0 else 0}\n"
     text += f"<b>Бонусных дней:</b> +{user.referral_days}\n\n"
     text += f"<b>Регистрация:</b> {format_datetime(user.created_at)}"
     
@@ -334,6 +336,29 @@ async def toggle_ban_user(callback: CallbackQuery):
         
         new_status = not user.is_banned
         await update_user(session, user, is_banned=new_status)
+        
+        # Если пользователь банится - отключаем его профили на серверах
+        if new_status:
+            profiles = await get_user_profiles(session, user.id)
+            from database.repositories.servers_repo import get_active_servers
+            
+            active_servers = await get_active_servers(session)
+            active_server_ids = [s.id for s in active_servers]
+            
+            # Получаем все активные серверы для подключения
+            for server in active_servers:
+                try:
+                    client = AmneziaClient(server.api_url, server.api_key)
+                    for profile in profiles:
+                        if profile.server_id in active_server_ids:
+                            await client.update_client(
+                                client_id=profile.peer_id,
+                                status="disabled"
+                            )
+                            # Обновляем статус профиля в БД
+                            await update_profile(session, profile, is_active=False)
+                except Exception as e:
+                    logging.error(f"Failed to disable profile {profile.id} on server {server.id}: {e}")
         
         action = "забанен" if new_status else "разбанен"
         await callback.answer(f"✅ Пользователь {action}", show_alert=True)

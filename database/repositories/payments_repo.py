@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import Payment
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 async def create_payment(session: AsyncSession, user_id: int, tariff_id: int, amount: int, currency: str) -> Payment:
@@ -18,7 +18,7 @@ async def create_payment(session: AsyncSession, user_id: int, tariff_id: int, am
 
 async def mark_payment_as_paid(session: AsyncSession, payment: Payment) -> Payment:
     payment.status = 'paid'
-    payment.paid_at = datetime.utcnow()
+    payment.paid_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(payment)
     return payment

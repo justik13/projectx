@@ -1,7 +1,7 @@
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from database.models import Server
+from database.models import Server, VPNProfile
 from typing import Optional, List
 
 async def get_all_servers(session: AsyncSession) -> List[Server]:
@@ -54,7 +54,11 @@ async def get_total_free_ips(session: AsyncSession) -> int:
     total_capacity = result.scalar() or 0
     
     # Вычитаем количество созданных профилей на активных серверах
-    from database.repositories.profiles_repo import get_all_profiles_count
-    used_profiles = await get_all_profiles_count(session)
+    from sqlalchemy import select
+    
+    active_server_ids = select(Server.id).where(Server.is_active == True)
+    stmt = select(func.count(VPNProfile.id)).where(VPNProfile.server_id.in_(active_server_ids))
+    result = await session.execute(stmt)
+    used_profiles = result.scalar() or 0
     
     return max(0, total_capacity - used_profiles)
