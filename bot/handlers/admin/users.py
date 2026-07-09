@@ -329,6 +329,13 @@ async def toggle_ban_user(callback: CallbackQuery):
         return
     
     telegram_id = int(callback.data.split(":")[1])
+    
+    # Защита от бана администраторов
+    settings = get_settings()
+    if telegram_id in settings.ADMIN_IDS:
+        await callback.answer("⛔️ Нельзя банить администраторов", show_alert=True)
+        return
+    
     session = await get_session()
     try:
         user = await get_user_by_telegram_id(session, telegram_id)
