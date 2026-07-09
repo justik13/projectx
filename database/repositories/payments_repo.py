@@ -17,7 +17,7 @@ async def create_payment(session: AsyncSession, user_id: int, tariff_id: int, am
     return payment
 
 async def mark_payment_as_paid(session: AsyncSession, payment: Payment) -> Payment:
-    payment.status = 'paid'
+    payment.status = 'completed'
     payment.paid_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(payment)
