@@ -130,7 +130,7 @@ class SubscriptionService:
         # Реферальная система: бонус за ПЕРВУЮ оплату
         payments = await get_user_payments(session, user.id)
         completed_payments = [p for p in payments if p.status == 'completed']
-        is_first_payment = len(completed_payments) == 0
+        is_first_payment = len(completed_payments) == 1
         
         if is_first_payment and user.referred_by:
             referrer = await get_user_by_telegram_id(session, user.referred_by)
