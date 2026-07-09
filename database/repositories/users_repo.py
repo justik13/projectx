@@ -76,12 +76,6 @@ async def get_new_users_count_24h(session: AsyncSession) -> int:
     result = await session.execute(stmt)
     return result.scalar_one()
 
-async def count_users(session: AsyncSession) -> int:
-    """Посчитать общее количество пользователей"""
-    result = await session.execute(select(func.count()).select_from(User))
-    return result.scalar() or 0
-
-
 async def get_users_paginated(session: AsyncSession, page: int = 1, per_page: int = 10) -> list[User]:
     """Получить пользователей с пагинацией"""
     offset = (page - 1) * per_page
@@ -89,12 +83,6 @@ async def get_users_paginated(session: AsyncSession, page: int = 1, per_page: in
         select(User).order_by(User.created_at.desc()).offset(offset).limit(per_page)
     )
     return result.scalars().all()
-
-
-async def get_users_count(session: AsyncSession) -> int:
-    """Получить общее количество пользователей"""
-    result = await session.execute(select(func.count()).select_from(User))
-    return result.scalar() or 0
 
 
 async def get_active_users(session: AsyncSession) -> list[User]:
