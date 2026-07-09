@@ -289,6 +289,12 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             
         server = await get_server_by_id(session, server_id)
         
+        # Проверка протокола сервера
+        if server.protocol != "amneziawg2":
+            await message.answer("⚠️ Сервер использует неподдерживаемый протокол. Обратитесь в поддержку.")
+            await state.clear()
+            return
+
         profiles_count = await get_user_profiles_count(session, user.id)
         if profiles_count >= user.device_limit:
             await message.answer(ERROR_DEVICE_LIMIT_REACHED.format(limit=user.device_limit))
@@ -300,7 +306,7 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
         client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
         
         client = AmneziaClient(server.api_url, server.api_key)
-        result = await client.create_user(client_name=client_name, protocol=server.protocol, expires_at=None)
+        result = await client.create_user(client_name=client_name, expires_at=None)
 
         if not result or not result.get("id") or not result.get("config"):
             await message.answer(ERROR_SERVER_UNAVAILABLE)
