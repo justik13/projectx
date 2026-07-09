@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from database.connection import get_session
 from database.repositories.users_repo import (
     get_user_by_telegram_id, get_users_paginated, 
-    get_users_count, update_user, get_user_referrals
+    get_user_count, update_user, get_user_referrals
 )
 from database.repositories.profiles_repo import get_user_profiles, update_profile
 from database.repositories.servers_repo import get_server_by_id
@@ -41,7 +41,7 @@ async def show_users_list(callback: CallbackQuery):
     
     session = await get_session()
     try:
-        total_users = await get_users_count(session)
+        total_users = await get_user_count(session)
         total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
         users = await get_users_paginated(session, page=1, per_page=USERS_PER_PAGE)
         
@@ -66,7 +66,7 @@ async def users_pagination(callback: CallbackQuery):
     page = int(callback.data.split(":")[1])
     session = await get_session()
     try:
-        total_users = await get_users_count(session)
+        total_users = await get_user_count(session)
         total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
         users = await get_users_paginated(session, page=page, per_page=USERS_PER_PAGE)
         
