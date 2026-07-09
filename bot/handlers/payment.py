@@ -150,17 +150,14 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext):
         tariff = await get_tariff_by_id(session, tariff_id)
         text = (
             f"💳 Оплата через СБП\n"
-            f"─────────────────────────────\n\n"
+            f"─────────────────────────────\n"
             f"К оплате: {tariff.price_rub} ₽\n\n"
-            f"📱 Переведите {tariff.price_rub} ₽ на карту:\n"
-            f"<code>2200 7007 1234 5678</code>\n"
-            f"Получатель: Иван И.\n\n"
-            f"После оплаты нажмите кнопку ниже — администратор мгновенно проверит платёж и выдаст доступ."
+            f"Нажмите кнопку ниже для оплаты — доступ будет активирован мгновенно."
         )
         
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         builder = InlineKeyboardBuilder()
-        builder.button(text="✅ Я оплатил", callback_data=f"confirm_payment_sbp:{tariff.id}")
+        builder.button(text="💎 Оплатить", callback_data=f"confirm_payment_sbp:{tariff.id}")
         builder.button(text="← Назад", callback_data=f"select_tariff:{tariff.id}")
         builder.adjust(1)
         
