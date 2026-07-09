@@ -8,6 +8,10 @@ from database.repositories.users_repo import get_all_users
 from database.repositories.profiles_repo import get_user_profiles, update_profile
 from database.repositories.servers_repo import get_server_by_id, get_active_servers
 from services.amnezia_client import AmneziaClient, close_http_session
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from database.models import User, VPNProfile
+from collections import defaultdict
 
 logger = logging.getLogger("BackgroundWorker")
 
@@ -26,29 +30,34 @@ async def subscription_expiry_checker_loop():
                 logger.info("Запуск проверки истечения подписок...")
                 session = await get_session()
                 try:
-                    users = await get_all_users(session)
+                    # ОДИН запрос вместо N+1
+                    result = await session.execute(
+                        select(User).options(
+                            selectinload(User.profiles).selectinload(VPNProfile.server)
+                        )
+                    )
+                    users = result.scalars().all()
+                    
+                    server_profiles = defaultdict(list)
+                    now = datetime.now(timezone.utc)
                     
                     for user in users:
-                        has_access = user.subscription_end and user.subscription_end > datetime.now(timezone.utc) and not user.is_banned
-                        profiles = await get_user_profiles(session, user.id)
-                        
-                        for profile in profiles:
-                            server = await get_server_by_id(session, profile.server_id)
-                            if not server:
-                                continue
-                            
-                            client = AmneziaClient(server.api_url, server.api_key)
-                            
-                            # Сценарий 1: Подписка закончилась, но профиль всё еще активен на VPS
+                        has_access = user.subscription_end and user.subscription_end > now and not user.is_banned
+                        for profile in user.profiles:
+                            if profile.server and profile.server.is_active:
+                                server_profiles[profile.server.id].append((profile, has_access, user.telegram_id))
+                    
+                    for server_id, items in server_profiles.items():
+                        server = items[0][0].server
+                        client = AmneziaClient(server.api_url, server.api_key)
+                        for profile, has_access, tg_id in items:
                             if not has_access and profile.is_active:
-                                logger.info(f"Блокировка устройства {profile.device_name} для пользователя {user.telegram_id}")
+                                logger.info(f"Блокировка устройства {profile.device_name} для пользователя {tg_id}")
                                 success = await client.update_client(client_id=profile.peer_id, status="disabled")
                                 if success:
                                     await update_profile(session, profile, is_active=False)
-                            
-                            # Сценарий 2: Подписка активна (продлена), но профиль был выключен
                             elif has_access and not profile.is_active:
-                                logger.info(f"Активация устройства {profile.device_name} для пользователя {user.telegram_id}")
+                                logger.info(f"Активация устройства {profile.device_name} для пользователя {tg_id}")
                                 success = await client.update_client(client_id=profile.peer_id, status="active")
                                 if success:
                                     await update_profile(session, profile, is_active=True)
@@ -70,41 +79,49 @@ async def traffic_sync_loop():
                 logger.info("Запуск синхронизации метрик трафика...")
                 session = await get_session()
                 try:
-                    servers = await get_active_servers(session)
+                    # ОДИН запрос на все активные профили
+                    result = await session.execute(
+                        select(VPNProfile)
+                        .options(selectinload(VPNProfile.server))
+                        .where(VPNProfile.is_active == True)
+                    )
+                    all_profiles = result.scalars().all()
                     
-                    for server in servers:
+                    by_server = defaultdict(list)
+                    for p in all_profiles:
+                        if p.server and p.server.is_active:
+                            by_server[p.server.id].append(p)
+                    
+                    for server_id, profiles in by_server.items():
+                        server = profiles[0].server
                         client = AmneziaClient(server.api_url, server.api_key)
-                        # Используем новый публичный метод
                         api_clients_list = await client.get_all_clients()
                         if not api_clients_list:
                             continue
-                            
-                        api_clients = {c["id"]: c for c in api_clients_list}
-                        all_users = await get_all_users(session)
                         
-                        for user in all_users:
-                            profiles = await get_user_profiles(session, user.id)
-                            for profile in profiles:
-                                if profile.server_id == server.id and profile.peer_id in api_clients:
-                                    api_data = api_clients[profile.peer_id]
-                                    stats = api_data.get("traffics", {})
-                                    traffic_down = stats.get("totalDownload", profile.traffic_down)
-                                    traffic_up = stats.get("totalUpload", profile.traffic_up)
-                                    
-                                    last_conn_raw = api_data.get("updatedAt")
-                                    last_connected = profile.last_connected
-                                    if last_conn_raw:
-                                        try:
-                                            last_connected = datetime.fromtimestamp(int(last_conn_raw), tz=timezone.utc)
-                                        except (ValueError, TypeError):
-                                            pass
-                                    
-                                    await update_profile(
-                                        session, profile,
-                                        traffic_down=traffic_down,
-                                        traffic_up=traffic_up,
-                                        last_connected=last_connected
-                                    )
+                        api_clients = {c["id"]: c for c in api_clients_list}
+                        
+                        for profile in profiles:
+                            if profile.peer_id in api_clients:
+                                api_data = api_clients[profile.peer_id]
+                                stats = api_data.get("traffics", {})
+                                traffic_down = stats.get("totalDownload", profile.traffic_down)
+                                traffic_up = stats.get("totalUpload", profile.traffic_up)
+                                
+                                last_conn_raw = api_data.get("updatedAt")
+                                last_connected = profile.last_connected
+                                if last_conn_raw:
+                                    try:
+                                        last_connected = datetime.fromtimestamp(int(last_conn_raw), tz=timezone.utc)
+                                    except (ValueError, TypeError):
+                                        pass
+                                
+                                await update_profile(
+                                    session, profile,
+                                    traffic_down=traffic_down,
+                                    traffic_up=traffic_up,
+                                    last_connected=last_connected
+                                )
                 finally:
                     await session.close()
             except Exception as e:
