@@ -24,22 +24,22 @@ class UserContextMiddleware(BaseMiddleware):
                 
                 # Сохраняем пользователя в данные для доступа из обработчиков
                 data['db_user'] = user
-                
-                # Проверяем, что команда /start или callback'и принятия оферты всегда работают
-                if isinstance(event, Message) and event.text and event.text.startswith("/start"):
-                    return await handler(event, data)
-                
-                if isinstance(event, CallbackQuery):
-                    if event.data in ["accept_tos", "read_tos"]:
-                        return await handler(event, data)
-                
-                # Проверяем, что пользователь не заблокирован
+
+                # Проверяем, что пользователь не заблокирован (ПРИОРИТЕТ 1)
                 if user and user.is_banned:
                     if isinstance(event, Message):
                         await event.answer("⛔️ У вас заблокирован доступ к сервису.")
                     elif isinstance(event, CallbackQuery):
                         await event.answer("⛔️ У вас заблокирован доступ к сервису.", show_alert=True)
                     return
+
+                # Проверяем, что команда /start или callback'и принятия оферты всегда работают (ПРИОРИТЕТ 2)
+                if isinstance(event, Message) and event.text and event.text.startswith("/start"):
+                    return await handler(event, data)
+
+                if isinstance(event, CallbackQuery):
+                    if event.data in ["accept_tos", "read_tos"]:
+                        return await handler(event, data)
                 
                 # Проверяем, что пользователь принял оферту
                 if not user or not user.tos_accepted:
