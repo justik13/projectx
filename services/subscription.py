@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.repositories.users_repo import get_user_by_telegram_id, create_user, update_user
-from database.repositories.payments_repo import create_payment, get_payment_by_id
+from database.repositories.payments_repo import create_payment, get_payment_by_id, get_user_payments
 from database.models import User, Payment
 from config.settings import get_settings
 from datetime import datetime, timedelta, timezone
@@ -128,7 +128,9 @@ class SubscriptionService:
         )
         
         # Реферальная система: бонус за ПЕРВУЮ оплату
-        is_first_payment = user.last_payment_at is None
+        payments = await get_user_payments(session, user.id)
+        completed_payments = [p for p in payments if p.status == 'completed']
+        is_first_payment = len(completed_payments) == 0
         
         if is_first_payment and user.referred_by:
             referrer = await get_user_by_telegram_id(session, user.referred_by)

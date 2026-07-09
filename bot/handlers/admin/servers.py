@@ -184,6 +184,7 @@ async def toggle_server(callback: CallbackQuery):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
     
+    await callback.answer("⏳ Выполняется...")
     server_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:
@@ -229,6 +230,7 @@ async def delete_server_handler(callback: CallbackQuery):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
     
+    await callback.answer("⏳ Выполняется...")
     server_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:
