@@ -45,10 +45,10 @@ class EncryptedString(TypeDecorator):
             return decrypted.decode("utf-8")
         except InvalidToken:
             logging.warning("Ошибка расшифровки: неверный токен")
-            return value
+            return None
         except Exception as e:
             logging.error(f"Ошибка расшифровки: {e}")
-            return value
+            return None
 
 def encrypt_value(value: str, key: str) -> str:
     """Шифрует значение с использованием ключа"""

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
             return [int(x.strip()) for x in v.split(",") if x.strip()]
         elif isinstance(v, int):
             return [v]
+        elif isinstance(v, list):
+            return [int(x) for x in v]
         else:
             return v
 
