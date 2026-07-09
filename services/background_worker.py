@@ -14,6 +14,7 @@ async def start_background_worker():
     """Запуск бесконечных циклов фоновых задач синхронизации"""
     asyncio.create_task(subscription_expiry_checker_loop())
     asyncio.create_task(traffic_sync_loop())
+    asyncio.create_task(cleanup_dangling_peers_loop())
     logger.info("Фоновые воркеры успешно запущены.")
 
 async def subscription_expiry_checker_loop():
@@ -107,3 +108,43 @@ async def traffic_sync_loop():
             logger.error(f"Ошибка в цикле синхронизации трафика: {e}", exc_info=True)
             
         await asyncio.sleep(900)  # Синхронизация каждые 15 минут
+
+
+async def cleanup_dangling_peers_loop():
+    """Фоновый цикл очистки 'призраков' (пиров, которых нет в БД, но они есть на сервере)"""
+    # Ждем 10 минут после старта бота перед первым запуском
+    await asyncio.sleep(600)
+    while True:
+        try:
+            logger.info("Запуск очистки 'призраков' (Dangling Peers)...")
+            session = await get_session()
+            try:
+                servers = await get_active_servers(session)
+                
+                # Получаем все peer_id из БД (они автоматически расшифруются благодаря EncryptedString)
+                from database.models import VPNProfile
+                from sqlalchemy import select
+                result = await session.execute(select(VPNProfile.peer_id))
+                db_peer_ids = {row[0] for row in result.all()}
+                
+                for server in servers:
+                    client = AmneziaClient(server.api_url, server.api_key)
+                    api_clients_list = await client.get_all_clients()
+                    if not api_clients_list:
+                        continue
+                        
+                    for api_client in api_clients_list:
+                        client_id = api_client.get("id")
+                        # В API поле имени может называться clientName или name
+                        client_name = api_client.get("clientName", api_client.get("name", ""))
+                        
+                        # Удаляем только тех, кто создан ботом (имеет префикс tg_) и отсутствует в БД
+                        if client_name.startswith("tg_") and client_id not in db_peer_ids:
+                            logger.warning(f"Обнаружен 'призрак' на сервере {server.name}: {client_name} ({client_id}). Удаляю...")
+                            await client.delete_user(client_id=client_id)
+            finally:
+                await session.close()
+        except Exception as e:
+            logger.error(f"Ошибка в цикле очистки 'призраков': {e}", exc_info=True)
+            
+        await asyncio.sleep(86400)  # Повторяем раз в сутки
