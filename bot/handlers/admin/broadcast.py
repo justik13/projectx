@@ -8,7 +8,6 @@ from bot.states import AdminStates
 from config.settings import get_settings
 import logging
 import asyncio
-# ✅ ИСПРАВЛЕНО: TelegramForbiddenError вместо TelegramForbiddenRequest
 from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, TelegramBadRequest
 
 router = Router()
@@ -40,6 +39,15 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     """Обработать введённое сообщение для рассылки с валидацией HTML"""
     if not is_admin(message.from_user.id):
         await state.clear()
+        return
+    
+    # ✅ Защита от медиа-сообщений (фото, стикеры, голосовые и т.д.)
+    if not message.text:
+        await message.answer(
+            "⚠️ Пожалуйста, отправьте <b>текстовое</b> сообщение.\n"
+            "Фото, стикеры и файлы не поддерживаются в рассылке.",
+            parse_mode="HTML"
+        )
         return
     
     broadcast_text = message.text
@@ -128,7 +136,6 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext):
                 fail_count -= 1
             except Exception:
                 pass
-        # ✅ ИСПРАВЛЕНО: TelegramForbiddenError
         except TelegramForbiddenError:
             fail_count += 1
             logging.info(f"User {uid} blocked the bot")
@@ -203,7 +210,6 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext):
                 fail_count -= 1
             except Exception:
                 pass
-        # ✅ ИСПРАВЛЕНО: TelegramForbiddenError
         except TelegramForbiddenError:
             fail_count += 1
             logging.info(f"User {uid} blocked the bot")

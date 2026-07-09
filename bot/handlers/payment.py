@@ -71,6 +71,15 @@ async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | 
         if not tariff or not user:
             await callback.answer("❌ Ошибка данных", show_alert=True)
             return
+        
+        # ✅ Защита P0: Telegram API требует price_stars > 0
+        if tariff.price_stars <= 0:
+            logging.error(f"Tariff {tariff.id} has invalid price_stars={tariff.price_stars}")
+            await callback.answer(
+                "❌ Ошибка тарифа: некорректная цена. Обратитесь в поддержку.",
+                show_alert=True
+            )
+            return
 
         # Создаем предварительную запись о платеже в БД
         payment = await create_payment(
