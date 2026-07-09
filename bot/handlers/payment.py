@@ -82,7 +82,10 @@ async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | 
         )
 
         # Удаляем предыдущее инлайн-сообщение выбора тарифа
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
 
         # Отправляем инвойс на оплату Stars (XTR)
         prices = [LabeledPrice(label="Доступ к сети", amount=tariff.price_stars)]
