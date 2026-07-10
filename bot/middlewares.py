@@ -7,11 +7,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class UserContextMiddleware(BaseMiddleware):
     """
-    🔥 FIX P1: Fetch & Release паттерн.
-    Middleware быстро забирает юзера из БД и НЕМЕДЛЕННО закрывает сессию,
-    чтобы не блокировать пул соединений SQLite во время долгих сетевых запросов в хэндлерах.
+    Middleware для проверки бана и подгрузки контекста пользователя.
+    Проверка ToS удалена — использование сервиса означает автоматическое принятие условий.
     """
     async def __call__(self, handler, event, data):
         user_id = None
@@ -19,7 +19,6 @@ class UserContextMiddleware(BaseMiddleware):
             user_id = event.from_user.id
         elif isinstance(event, CallbackQuery):
             user_id = event.from_user.id
-
         if not user_id:
             return await handler(event, data)
 
@@ -28,7 +27,6 @@ class UserContextMiddleware(BaseMiddleware):
             user = await get_user_by_telegram_id(session, user_id)
             data['db_user'] = user
 
-            # 🔥 UX FIX: Добавляем кнопку поддержки при бане
             if user and user.is_banned:
                 settings = get_settings()
                 support_username = settings.SUPPORT_USERNAME.lstrip('@')
@@ -49,29 +47,18 @@ class UserContextMiddleware(BaseMiddleware):
                         "⛔️ У вас заблокирован доступ к сервису.",
                         show_alert=True
                     )
-                    await event.message.answer(
-                        "Если вы считаете, что это ошибка, свяжитесь с поддержкой:",
-                        reply_markup=keyboard
-                    )
-                return
-
-            if isinstance(event, Message) and event.text and event.text.startswith("/start"):
-                return await handler(event, data)
-            if isinstance(event, CallbackQuery) and event.data in ["accept_tos", "read_tos"]:
-                return await handler(event, data)
-
-            if not user or not user.tos_accepted:
-                if isinstance(event, Message):
-                    await event.answer("📋 Сначала примите пользовательское соглашение.\nНажмите /start")
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("📋 Сначала примите пользовательское соглашение", show_alert=True)
+                    try:
+                        await event.message.answer(
+                            "Если вы считаете, что это ошибка, свяжитесь с поддержкой:",
+                            reply_markup=keyboard
+                        )
+                    except Exception:
+                        pass
                 return
 
         except Exception as e:
             logger.error(f"Critical error in UserContextMiddleware: {e}", exc_info=True)
             raise
         finally:
-            # 🔥 FIX P1: Закрываем сессию ДО передачи управления хэндлеру
             await session.close()
-
         return await handler(event, data)

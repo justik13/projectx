@@ -19,6 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class ThrottlingMiddleware:
     def __init__(self, limit: float = 0.5):
         self.limit = limit
@@ -32,10 +33,8 @@ class ThrottlingMiddleware:
             action_key = f"msg:{event.text or ''}"
         else:
             action_key = None
-
         if not user_id or not action_key:
             return await handler(event, data)
-
         key = f"{user_id}:{action_key}"
         if key in self._last_call:
             if hasattr(event, 'answer'):
@@ -47,16 +46,16 @@ class ThrottlingMiddleware:
         self._last_call[key] = asyncio.get_running_loop().time()
         return await handler(event, data)
 
+
 async def setup_bot_commands(bot: Bot):
-    """Настройка команд бота и Menu Button"""
     commands = [
         BotCommand(command="start", description="🚀 Запустить бота"),
         BotCommand(command="help", description="❓ Помощь и FAQ"),
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-    # 🔥 UX FIX: Устанавливаем Menu Button с командами
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     logger.info("Bot commands and menu button configured")
+
 
 async def setup_bot() -> tuple[Bot, Dispatcher]:
     settings = get_settings()
@@ -80,17 +79,22 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     from bot.handlers.admin.servers import router as admin_servers_router
     from bot.handlers.admin.tariffs import router as admin_tariffs_router
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
+    from bot.handlers.fallback import router as fallback_router
 
-    for r in [start_router, profile_router, connection_router, support_router, payment_router,
-              admin_dashboard_router, admin_users_router, admin_servers_router,
-              admin_tariffs_router, admin_broadcast_router]:
+    # ВАЖНО: fallback_router регистрируется ПОСЛЕДНИМ,
+    # чтобы он срабатывал только для неопознанных сообщений
+    for r in [
+        start_router, profile_router, connection_router, support_router,
+        payment_router, admin_dashboard_router, admin_users_router,
+        admin_servers_router, admin_tariffs_router, admin_broadcast_router,
+        fallback_router
+    ]:
         dp.include_router(r)
 
-    # 🔥 UX FIX: Настраиваем команды и Menu Button
     await setup_bot_commands(bot)
-
     logger.info("Все роутеры зарегистрированы")
     return bot, dp
+
 
 async def main():
     try:
@@ -103,14 +107,11 @@ async def main():
         except Exception as e:
             logger.critical(f"❌ DB_ENCRYPTION_KEY невалиден: {e}")
             return
-
         logger.info("Инициализация БД...")
         await init_db()
         logger.info("БД инициализирована")
-
         bot, dp = await setup_bot()
         await start_background_worker(bot)
-
         logger.info("Запуск polling...")
         await dp.start_polling(bot)
     except Exception as e:
@@ -119,6 +120,7 @@ async def main():
         await close_db()
         await close_http_session()
         logger.info("Работа бота завершена")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

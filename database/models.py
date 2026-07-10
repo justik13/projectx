@@ -3,8 +3,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from datetime import datetime, timezone
 from utils.encryption import EncryptedString
 
+
 class Base(DeclarativeBase):
     pass
+
 
 class User(Base):
     __tablename__ = "users"
@@ -12,7 +14,7 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    tos_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
+    tos_accepted: Mapped[bool] = mapped_column(Boolean, default=True)
     subscription_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     device_limit: Mapped[int] = mapped_column(Integer, default=3)
     referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -20,21 +22,29 @@ class User(Base):
     last_payment_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+    # Поля для умных уведомлений
+    notified_3d: Mapped[bool] = mapped_column(Boolean, default=False)
+    notified_1d: Mapped[bool] = mapped_column(Boolean, default=False)
+    notified_2h: Mapped[bool] = mapped_column(Boolean, default=False)
 
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
+
 
 class VPNProfile(Base):
     __tablename__ = "vpn_profiles"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, 
+        Integer,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False, index=True
     )
     server_id: Mapped[int] = mapped_column(
-        Integer, 
+        Integer,
         ForeignKey("servers.id", ondelete="CASCADE"),
         nullable=False, index=True
     )
@@ -47,10 +57,13 @@ class VPNProfile(Base):
     last_ip: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     sync_fail_count: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
-
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
     user = relationship("User", back_populates="profiles")
     server = relationship("Server")
+
 
 class Server(Base):
     __tablename__ = "servers"
@@ -63,7 +76,11 @@ class Server(Base):
     protocol: Mapped[str] = mapped_column(String(50), default="amneziawg2")
     max_clients: Mapped[int] = mapped_column(Integer, default=50)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
 
 class Tariff(Base):
     __tablename__ = "tariffs"
@@ -73,26 +90,46 @@ class Tariff(Base):
     price_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
 
 class Payment(Base):
     __tablename__ = "payments"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, 
+        Integer,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False, index=True
     )
     tariff_id: Mapped[int] = mapped_column(
-        Integer, 
+        Integer,
         ForeignKey("tariffs.id", ondelete="RESTRICT"),
         nullable=False
     )
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-
     user = relationship("User", back_populates="payments")
     tariff = relationship("Tariff")
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )

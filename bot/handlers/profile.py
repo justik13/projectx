@@ -7,15 +7,20 @@ from aiogram.fsm.context import FSMContext
 from database.connection import get_session
 from database.repositories.users_repo import get_user_by_telegram_id, get_user_referrals
 from database.repositories.profiles_repo import get_user_profiles
+from database.repositories.payments_repo import get_user_payments
 from services.subscription import SubscriptionService
 from bot.texts import PROFILE_TEXT, REFERRAL_TEXT
-from bot.keyboards import get_profile_keyboard, get_referral_keyboard, get_back_button
+from bot.keyboards import (
+    get_profile_keyboard, get_referral_keyboard,
+    get_back_button, get_history_keyboard
+)
 from utils.formatters import format_traffic, format_datetime, format_days_left
 from config.settings import get_settings
 from database.models import User
 
 router = Router()
 logger = logging.getLogger(__name__)
+
 
 @router.message(F.text == "👤 Профиль")
 async def show_profile(message: Message, state: FSMContext, db_user: User | None = None):
@@ -38,14 +43,50 @@ async def show_profile(message: Message, state: FSMContext, db_user: User | None
         safe_name = html.escape(user.first_name or "Пользователь")
         safe_username = html.escape(user.username or "—")
         referrals_count = len(await get_user_referrals(session, user.telegram_id))
-        text = PROFILE_TEXT.format(name=safe_name, username=safe_username, telegram_id=user.telegram_id,
-                                     status_emoji=status_emoji, status_text=status_text, valid_until=valid_until,
-                                     days_left=days_left, devices_count=profiles_count, device_limit=user.device_limit,
-                                     total_traffic=total_traffic_str, referrals_count=referrals_count,
-                                     referral_days=user.referral_days)
+        text = PROFILE_TEXT.format(
+            name=safe_name, username=safe_username, telegram_id=user.telegram_id,
+            status_emoji=status_emoji, status_text=status_text, valid_until=valid_until,
+            days_left=days_left, devices_count=profiles_count, device_limit=user.device_limit,
+            total_traffic=total_traffic_str, referrals_count=referrals_count,
+            referral_days=user.referral_days
+        )
         await message.answer(text, reply_markup=get_profile_keyboard(), parse_mode="HTML")
     finally:
         await session.close()
+
+
+@router.callback_query(F.data == "user_history")
+async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
+    await state.clear()
+    user = db_user
+    if not user:
+        await callback.answer("❌ Пользователь не найден", show_alert=True)
+        return
+    session = await get_session()
+    try:
+        payments = await get_user_payments(session, user.id)
+        text = (
+            "🧾 <b>История оплат</b>\n"
+            "─────────────────────────────\n"
+        )
+        if not payments:
+            text += "_История пуста. У вас пока не было оплат._"
+        else:
+            for p in payments[:10]:
+                status = "✅" if p.status == 'completed' else "⏳"
+                date = format_datetime(p.paid_at or p.created_at)
+                currency = "⭐" if p.currency == "stars" else "₽"
+                text += f"{status} {date} | {p.amount} {currency}\n"
+            if len(payments) > 10:
+                text += f"\n<i>Показаны последние 10 из {len(payments)} оплат</i>"
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_history_keyboard(),
+            parse_mode="HTML"
+        )
+    finally:
+        await session.close()
+
 
 @router.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
@@ -60,12 +101,17 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
         bot_info = await callback.bot.get_me()
         referral_link = f"https://t.me/{bot_info.username}?start=ref_{user.telegram_id}"
         invited_count = len(await get_user_referrals(session, user.telegram_id))
-        text = REFERRAL_TEXT.format(bonus_days=settings.REFERRAL_BONUS_DAYS, referral_link=referral_link,
-                                     invited_count=invited_count, bonus_total=user.referral_days)
-        await callback.message.edit_text(text, reply_markup=get_referral_keyboard(), parse_mode="HTML")
+        text = REFERRAL_TEXT.format(
+            bonus_days=settings.REFERRAL_BONUS_DAYS, referral_link=referral_link,
+            invited_count=invited_count, bonus_total=user.referral_days
+        )
+        await callback.message.edit_text(
+            text, reply_markup=get_referral_keyboard(), parse_mode="HTML"
+        )
         await callback.answer()
     finally:
         await session.close()
+
 
 @router.callback_query(F.data == "referrals_list")
 async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
@@ -78,23 +124,37 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
     try:
         referrals = await get_user_referrals(session, user.telegram_id)
         if not referrals:
-            text = "👥 Список рефералов пока пуст.\nПригласите друзей по вашей ссылке, чтобы они появились здесь."
+            text = (
+                "👥 Список рефералов пока пуст.\n"
+                "Пригласите друзей по вашей ссылке, чтобы они появились здесь."
+            )
         else:
             settings = get_settings()
-            text = "👥 Ваши рефералы:\n─────────────────────────────\n"
+            text = (
+                "👥 Ваши рефералы:\n"
+                "─────────────────────────────\n"
+            )
             for referral in referrals:
-                safe_user_string = f"@{html.escape(referral.username)}" if referral.username else f"ID: {referral.telegram_id}"
+                safe_user_string = (
+                    f"@{html.escape(referral.username)}" if referral.username
+                    else f"ID: {referral.telegram_id}"
+                )
                 bonus_days = settings.REFERRAL_BONUS_DAYS
                 text += f"• {safe_user_string} — {bonus_days} бонусных дней\n"
             text += f"\nВсего приглашено: {len(referrals)} пользователей"
-        await callback.message.edit_text(text, reply_markup=get_back_button("referral"), parse_mode="HTML")
+        await callback.message.edit_text(
+            text, reply_markup=get_back_button("referral"), parse_mode="HTML"
+        )
         await callback.answer()
     finally:
         await session.close()
 
+
 @router.callback_query(F.data.in_(["back_to_profile", "back_to_main"]))
-async def back_to_profile_or_main(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
-    await state.clear()  # 🔥 P1 FIX: Сбрасываем Ghost State
+async def back_to_profile_or_main(
+    callback: CallbackQuery, state: FSMContext, db_user: User | None = None
+):
+    await state.clear()
     if callback.data == "back_to_profile":
         user = db_user
         if not user:
@@ -111,14 +171,18 @@ async def back_to_profile_or_main(callback: CallbackQuery, state: FSMContext, db
             safe_name = html.escape(user.first_name or "Пользователь")
             safe_username = html.escape(user.username or "—")
             referrals_count = len(await get_user_referrals(session, user.telegram_id))
-            text = PROFILE_TEXT.format(name=safe_name, username=safe_username, telegram_id=user.telegram_id,
-                                        status_emoji=status_emoji, status_text=status_text,
-                                        valid_until=format_datetime(user.subscription_end),
-                                        days_left=format_days_left(user.subscription_end),
-                                        devices_count=profiles_count, device_limit=user.device_limit,
-                                        total_traffic=format_traffic(total_traffic),
-                                        referrals_count=referrals_count, referral_days=user.referral_days)
-            await callback.message.edit_text(text, reply_markup=get_profile_keyboard(), parse_mode="HTML")
+            text = PROFILE_TEXT.format(
+                name=safe_name, username=safe_username, telegram_id=user.telegram_id,
+                status_emoji=status_emoji, status_text=status_text,
+                valid_until=format_datetime(user.subscription_end),
+                days_left=format_days_left(user.subscription_end),
+                devices_count=profiles_count, device_limit=user.device_limit,
+                total_traffic=format_traffic(total_traffic),
+                referrals_count=referrals_count, referral_days=user.referral_days
+            )
+            await callback.message.edit_text(
+                text, reply_markup=get_profile_keyboard(), parse_mode="HTML"
+            )
             await callback.answer()
         finally:
             await session.close()
@@ -129,11 +193,5 @@ async def back_to_profile_or_main(callback: CallbackQuery, state: FSMContext, db
             pass
         await callback.answer()
 
-@router.callback_query(F.data == "back_to_main_menu")
-async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await callback.answer()
+
+@router.callback_query(F.data
