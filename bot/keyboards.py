@@ -1,12 +1,10 @@
 # bot/keyboards.py — все клавиатуры бота
-
 from aiogram.types import (
     ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
-
 
 def get_main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     """Главное меню (Reply-клавиатура)"""
@@ -20,6 +18,17 @@ def get_main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     builder.adjust(2, 2)
     return builder.as_markup(resize_keyboard=True)
 
+def get_help_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для раздела Помощь"""
+    from config.settings import get_settings
+    settings = get_settings()
+    username = settings.SUPPORT_USERNAME.lstrip('@')
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"💬 Написать @{username}", url=f"https://t.me/{username}")
+    builder.button(text="📖 Пользовательское соглашение", url="https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19")
+    builder.button(text="🔒 Политика конфиденциальности", url="https://telegra.ph/Politika-konfidencialnosti-04-01-26")
+    builder.adjust(1)
+    return builder.as_markup()
 
 def get_tos_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура для принятия оферты"""
@@ -28,13 +37,11 @@ def get_tos_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="✅ Принять", callback_data="accept_tos")
     return builder.as_markup()
 
-
 def get_profile_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура для раздела Профиль"""
     builder = InlineKeyboardBuilder()
     builder.button(text="🎁 Пригласить друга", callback_data="referral")
     return builder.as_markup()
-
 
 def get_referral_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура для раздела Рефералы"""
@@ -43,7 +50,6 @@ def get_referral_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="← Назад", callback_data="back_to_profile")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_connection_keyboard(has_subscription: bool = True) -> InlineKeyboardMarkup:
     """Клавиатура для раздела Подключение"""
@@ -54,7 +60,6 @@ def get_connection_keyboard(has_subscription: bool = True) -> InlineKeyboardMark
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_device_keyboard(profile_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для управления устройством"""
     builder = InlineKeyboardBuilder()
@@ -64,7 +69,6 @@ def get_device_keyboard(profile_id: int) -> InlineKeyboardMarkup:
     builder.button(text="← Назад", callback_data="back_to_connections")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_payment_tariff_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     """Клавиатура для выбора тарифа"""
@@ -78,7 +82,6 @@ def get_payment_tariff_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_payment_method_keyboard(tariff_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для выбора способа оплаты"""
     builder = InlineKeyboardBuilder()
@@ -87,7 +90,6 @@ def get_payment_method_keyboard(tariff_id: int) -> InlineKeyboardMarkup:
     builder.button(text="← Назад", callback_data="back_to_payment")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_payment_confirm_keyboard(tariff_id: int, amount: int, currency: str) -> InlineKeyboardMarkup:
     """Клавиатура для подтверждения оплаты"""
@@ -100,20 +102,17 @@ def get_payment_confirm_keyboard(tariff_id: int, amount: int, currency: str) -> 
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_support_keyboard(support_username: str) -> InlineKeyboardMarkup:
     """Клавиатура для раздела Поддержка"""
     builder = InlineKeyboardBuilder()
     builder.button(text="💬 Написать в поддержку", url=f"https://t.me/{support_username.lstrip('@')}")
     return builder.as_markup()
 
-
 def get_back_button(callback_data: str = "back_to_main") -> InlineKeyboardMarkup:
     """Универсальная кнопка Назад"""
     builder = InlineKeyboardBuilder()
     builder.button(text="← Назад", callback_data=callback_data)
     return builder.as_markup()
-
 
 # ═══════════════════════════════════════════════════════════════
 # АДМИН-КЛАВИАТУРЫ
@@ -130,7 +129,6 @@ def get_admin_menu() -> InlineKeyboardMarkup:
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
-
 def get_admin_users_keyboard(page: int = 1, total_pages: int = 1) -> InlineKeyboardMarkup:
     """Клавиатура для списка пользователей (пагинация)"""
     builder = InlineKeyboardBuilder()
@@ -143,7 +141,6 @@ def get_admin_users_keyboard(page: int = 1, total_pages: int = 1) -> InlineKeybo
     builder.adjust(2, 1, 1)
     return builder.as_markup()
 
-
 def get_admin_user_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для карточки пользователя"""
     builder = InlineKeyboardBuilder()
@@ -153,7 +150,6 @@ def get_admin_user_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder.button(text="← К списку", callback_data="admin_users")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_admin_extend_days_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для выбора дней продления"""
@@ -167,7 +163,6 @@ def get_admin_extend_days_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
-
 def get_admin_servers_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура для списка серверов"""
     builder = InlineKeyboardBuilder()
@@ -175,7 +170,6 @@ def get_admin_servers_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="← В админку", callback_data="admin_menu")
     builder.adjust(1, 1)
     return builder.as_markup()
-
 
 def get_admin_server_card_keyboard(server_id: int, is_active: bool) -> InlineKeyboardMarkup:
     """Клавиатура для карточки сервера"""
@@ -188,7 +182,6 @@ def get_admin_server_card_keyboard(server_id: int, is_active: bool) -> InlineKey
     builder.adjust(1, 1, 1, 1)
     return builder.as_markup()
 
-
 def get_admin_tariffs_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура для списка тарифов"""
     builder = InlineKeyboardBuilder()
@@ -196,7 +189,6 @@ def get_admin_tariffs_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="← В админку", callback_data="admin_menu")
     builder.adjust(1, 1)
     return builder.as_markup()
-
 
 def get_admin_tariff_card_keyboard(tariff_id: int, is_active: bool) -> InlineKeyboardMarkup:
     """Клавиатура для карточки тарифа"""
@@ -211,7 +203,6 @@ def get_admin_tariff_card_keyboard(tariff_id: int, is_active: bool) -> InlineKey
     builder.adjust(1, 1, 1, 1, 1, 1)
     return builder.as_markup()
 
-
 def get_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура для подтверждения рассылки"""
     builder = InlineKeyboardBuilder()
@@ -223,9 +214,7 @@ def get_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
 
 def get_tos_accept_keyboard():
     """Клавиатура для принятия оферты с 3 кнопками"""
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
     from bot.texts import TOS_AGREEMENT_URL, PRIVACY_POLICY_URL
-    
     builder = InlineKeyboardBuilder()
     builder.button(text="📖 Пользовательское соглашение", url=TOS_AGREEMENT_URL)
     builder.button(text="🔒 Политика конфиденциальности", url=PRIVACY_POLICY_URL)

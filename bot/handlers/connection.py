@@ -23,6 +23,7 @@ from database.models import User
 
 router = Router()
 logger = logging.getLogger(__name__)
+
 DEVICE_NAME_REGEX = re.compile(r'^[a-zA-Z0-9\s_-]+$')
 REPLY_MENU_BUTTONS = ["👤 Профиль", "🔌 Подключение", "💳 Оплата", "💬 Поддержка", "🛠 Админка"]
 
@@ -92,7 +93,7 @@ async def back_to_connections(callback: CallbackQuery, state: FSMContext, db_use
 
 @router.callback_query(F.data.startswith("manage_device:"))
 async def manage_device(callback: CallbackQuery, state: FSMContext):
-    await state.clear()  # 🔥 P1 FIX
+    await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:
@@ -106,8 +107,10 @@ async def manage_device(callback: CallbackQuery, state: FSMContext):
         protocol = server.protocol if server else "—"
         safe_device_name = html.escape(profile.device_name)
         safe_server_name = html.escape(server_name)
-        text = (f"📱 Управление устройством: <b>{safe_device_name}</b>\n─────────────────────────────\n"
-                f"📍 Локация: {flag} {safe_server_name}\n📡 Протокол: {protocol}\n"
+        text = (f"📱 Управление устройством: <b>{safe_device_name}</b>\n"
+                f"─────────────────────────────\n"
+                f"📍 Локация: {flag} {safe_server_name}\n"
+                f"📡 Протокол: {protocol}\n"
                 f"📊 Трафик: ∑ {format_traffic(profile.traffic_down + profile.traffic_up)}\n"
                 f"⏱ Последняя активность: {format_datetime(profile.last_connected) if profile.last_connected else 'Нет данных'}")
         await callback.message.edit_text(text, reply_markup=get_device_keyboard(profile.id), parse_mode="HTML")
@@ -117,7 +120,7 @@ async def manage_device(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("download_conf:"))
 async def download_conf(callback: CallbackQuery, state: FSMContext):
-    await state.clear()  # 🔥 P1 FIX
+    await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:
@@ -125,6 +128,11 @@ async def download_conf(callback: CallbackQuery, state: FSMContext):
         if not profile:
             await callback.answer("❌ Профиль не найден", show_alert=True)
             return
+        # 🔥 UX FIX: Показываем индикатор загрузки
+        await callback.bot.send_chat_action(
+            chat_id=callback.from_user.id,
+            action="upload_document"
+        )
         file_bytes = profile.raw_config.encode("utf-8")
         safe_device_name = "".join(c for c in profile.device_name if c.isalnum() or c in (' ', '_', '-')).strip()
         input_file = BufferedInputFile(file_bytes, filename=f"{safe_device_name or 'client'}.conf")
@@ -182,7 +190,7 @@ async def rename_device_process(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("delete_device:"))
 async def delete_device(callback: CallbackQuery, state: FSMContext):
-    await state.clear()  # 🔥 P1 FIX
+    await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:
@@ -190,6 +198,8 @@ async def delete_device(callback: CallbackQuery, state: FSMContext):
         if not profile:
             await callback.answer("❌ Устройство уже удалено", show_alert=True)
             return
+        # 🔥 UX FIX: Показываем индикатор загрузки
+        await callback.answer("⏳ Удаляю устройство...", show_alert=False)
         server = await get_server_by_id(session, profile.server_id)
         if server:
             client = AmneziaClient(server.api_url, server.api_key)
@@ -200,12 +210,12 @@ async def delete_device(callback: CallbackQuery, state: FSMContext):
         else:
             logger.warning(f"Deleting orphan profile {profile.id} (server not found)")
         await delete_profile(session, profile)
-        await callback.answer("🗑 Устройство успешно удалено", show_alert=True)
         user = await get_user_by_telegram_id(session, callback.from_user.id)
         if not user:
             return
         text, builder = await _build_connections_screen(user, session)
         await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        await callback.answer("🗑 Устройство успешно удалено", show_alert=True)
     except Exception as e:
         logger.error(f"Error deleting device: {e}")
         await callback.answer("❌ Ошибка при удалении устройства на сервере", show_alert=True)
@@ -287,6 +297,11 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             await message.answer(ERROR_DEVICE_LIMIT_REACHED.format(limit=user.device_limit))
             await state.clear()
             return
+        # 🔥 UX FIX: Показываем индикатор загрузки
+        await message.bot.send_chat_action(
+            chat_id=message.from_user.id,
+            action="typing"
+        )
         short_hash = uuid.uuid4().hex[:4]
         clean_device_name = re.sub(r'[^a-zA-Z0-9]', '', device_name)[:10]
         client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
@@ -327,7 +342,7 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
 
 @router.callback_query(F.data.startswith("copy_config:"))
 async def copy_config(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
-    await state.clear()  # 🔥 P1 FIX
+    await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
     try:

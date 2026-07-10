@@ -1,9 +1,11 @@
+# bot/main.py
 import asyncio
 import logging
 from cachetools import TTLCache
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.chat_action import ChatActionMiddleware
+from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands
 from config.settings import get_settings
 from database.connection import init_db, close_db
 from services.background_worker import start_background_worker
@@ -11,7 +13,10 @@ from bot.middlewares import UserContextMiddleware
 from cryptography.fernet import Fernet
 from services.amnezia_client import close_http_session
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 class ThrottlingMiddleware:
@@ -27,8 +32,10 @@ class ThrottlingMiddleware:
             action_key = f"msg:{event.text or ''}"
         else:
             action_key = None
+
         if not user_id or not action_key:
             return await handler(event, data)
+
         key = f"{user_id}:{action_key}"
         if key in self._last_call:
             if hasattr(event, 'answer'):
@@ -40,6 +47,17 @@ class ThrottlingMiddleware:
         self._last_call[key] = asyncio.get_running_loop().time()
         return await handler(event, data)
 
+async def setup_bot_commands(bot: Bot):
+    """Настройка команд бота и Menu Button"""
+    commands = [
+        BotCommand(command="start", description="🚀 Запустить бота"),
+        BotCommand(command="help", description="❓ Помощь и FAQ"),
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    # 🔥 UX FIX: Устанавливаем Menu Button с командами
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    logger.info("Bot commands and menu button configured")
+
 async def setup_bot() -> tuple[Bot, Dispatcher]:
     settings = get_settings()
     bot = Bot(token=settings.BOT_TOKEN)
@@ -48,7 +66,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
-    dp.message.middleware(ThrottlingMiddleware(limit=1.0))      # 🔥 P1: Защита от макросов
+    dp.message.middleware(ThrottlingMiddleware(limit=1.0))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.5))
     dp.message.middleware(ChatActionMiddleware())
 
@@ -67,6 +85,9 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
               admin_dashboard_router, admin_users_router, admin_servers_router,
               admin_tariffs_router, admin_broadcast_router]:
         dp.include_router(r)
+
+    # 🔥 UX FIX: Настраиваем команды и Menu Button
+    await setup_bot_commands(bot)
 
     logger.info("Все роутеры зарегистрированы")
     return bot, dp

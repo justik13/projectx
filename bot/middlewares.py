@@ -1,7 +1,8 @@
 from aiogram import BaseMiddleware
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from database.connection import get_session
 from database.repositories.users_repo import get_user_by_telegram_id
+from config.settings import get_settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -26,25 +27,46 @@ class UserContextMiddleware(BaseMiddleware):
         try:
             user = await get_user_by_telegram_id(session, user_id)
             data['db_user'] = user
-            
+
+            # 🔥 UX FIX: Добавляем кнопку поддержки при бане
             if user and user.is_banned:
+                settings = get_settings()
+                support_username = settings.SUPPORT_USERNAME.lstrip('@')
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text=f"💬 Связаться с поддержкой @{support_username}",
+                        url=f"https://t.me/{support_username}"
+                    )]
+                ])
                 if isinstance(event, Message):
-                    await event.answer("⛔️ У вас заблокирован доступ к сервису.")
+                    await event.answer(
+                        "⛔️ У вас заблокирован доступ к сервису.\n"
+                        "Если вы считаете, что это ошибка, свяжитесь с поддержкой.",
+                        reply_markup=keyboard
+                    )
                 elif isinstance(event, CallbackQuery):
-                    await event.answer("⛔️ У вас заблокирован доступ к сервису.", show_alert=True)
+                    await event.answer(
+                        "⛔️ У вас заблокирован доступ к сервису.",
+                        show_alert=True
+                    )
+                    await event.message.answer(
+                        "Если вы считаете, что это ошибка, свяжитесь с поддержкой:",
+                        reply_markup=keyboard
+                    )
                 return
-            
+
             if isinstance(event, Message) and event.text and event.text.startswith("/start"):
                 return await handler(event, data)
             if isinstance(event, CallbackQuery) and event.data in ["accept_tos", "read_tos"]:
                 return await handler(event, data)
-            
+
             if not user or not user.tos_accepted:
                 if isinstance(event, Message):
                     await event.answer("📋 Сначала примите пользовательское соглашение.\nНажмите /start")
                 elif isinstance(event, CallbackQuery):
                     await event.answer("📋 Сначала примите пользовательское соглашение", show_alert=True)
                 return
+
         except Exception as e:
             logger.error(f"Critical error in UserContextMiddleware: {e}", exc_info=True)
             raise
