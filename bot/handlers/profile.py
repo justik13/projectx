@@ -150,48 +150,36 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
         await session.close()
 
 
-@router.callback_query(F.data.in_(["back_to_profile", "back_to_main"]))
-async def back_to_profile_or_main(
-    callback: CallbackQuery, state: FSMContext, db_user: User | None = None
-):
+@router.callback_query(F.data == "back_to_profile")
+async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
     await state.clear()
-    if callback.data == "back_to_profile":
-        user = db_user
-        if not user:
-            await callback.answer("❌ Пользователь не найден", show_alert=True)
-            return
-        session = await get_session()
-        try:
-            profiles = await get_user_profiles(session, user.id)
-            profiles_count = len(profiles)
-            total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
-            has_access = await SubscriptionService.check_access(session, user.telegram_id)
-            status_emoji = "🟢" if has_access else "🔴"
-            status_text = "Активен" if has_access else "Неактивен"
-            safe_name = html.escape(user.first_name or "Пользователь")
-            safe_username = html.escape(user.username or "—")
-            referrals_count = len(await get_user_referrals(session, user.telegram_id))
-            text = PROFILE_TEXT.format(
-                name=safe_name, username=safe_username, telegram_id=user.telegram_id,
-                status_emoji=status_emoji, status_text=status_text,
-                valid_until=format_datetime(user.subscription_end),
-                days_left=format_days_left(user.subscription_end),
-                devices_count=profiles_count, device_limit=user.device_limit,
-                total_traffic=format_traffic(total_traffic),
-                referrals_count=referrals_count, referral_days=user.referral_days
-            )
-            await callback.message.edit_text(
-                text, reply_markup=get_profile_keyboard(), parse_mode="HTML"
-            )
-            await callback.answer()
-        finally:
-            await session.close()
-    else:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+    user = db_user
+    if not user:
+        await callback.answer("❌ Пользователь не найден", show_alert=True)
+        return
+    session = await get_session()
+    try:
+        profiles = await get_user_profiles(session, user.id)
+        profiles_count = len(profiles)
+        total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
+        has_access = await SubscriptionService.check_access(session, user.telegram_id)
+        status_emoji = "🟢" if has_access else "🔴"
+        status_text = "Активен" if has_access else "Неактивен"
+        safe_name = html.escape(user.first_name or "Пользователь")
+        safe_username = html.escape(user.username or "—")
+        referrals_count = len(await get_user_referrals(session, user.telegram_id))
+        text = PROFILE_TEXT.format(
+            name=safe_name, username=safe_username, telegram_id=user.telegram_id,
+            status_emoji=status_emoji, status_text=status_text,
+            valid_until=format_datetime(user.subscription_end),
+            days_left=format_days_left(user.subscription_end),
+            devices_count=profiles_count, device_limit=user.device_limit,
+            total_traffic=format_traffic(total_traffic),
+            referrals_count=referrals_count, referral_days=user.referral_days
+        )
+        await callback.message.edit_text(
+            text, reply_markup=get_profile_keyboard(), parse_mode="HTML"
+        )
         await callback.answer()
-
-
-@router.callback_query(F.data
+    finally:
+        await session.close()

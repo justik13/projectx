@@ -67,7 +67,6 @@ async def back_to_main_menu(callback: CallbackQuery, state: FSMContext, db_user:
     except Exception:
         pass
     
-    # Показываем главное меню заново
     settings = get_settings()
     is_admin = callback.from_user.id in settings.ADMIN_IDS
     from bot.texts import WELCOME_TEXT
