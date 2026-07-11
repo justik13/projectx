@@ -1,11 +1,14 @@
 import logging
+import math
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database.connection import get_session
 from database.repositories.tariffs_repo import (
-    get_all_tariffs, get_tariff_by_id, create_tariff, update_tariff, delete_tariff
+    get_all_tariffs, get_tariff_by_id, create_tariff, update_tariff, delete_tariff,
+    get_tariff_count, get_tariffs_paginated
 )
 from bot.keyboards import get_admin_tariffs_keyboard, get_admin_tariff_card_keyboard, get_back_button
 from bot.states import AdminStates
@@ -15,9 +18,41 @@ from services.audit_service import AuditService
 router = Router()
 logger = logging.getLogger(__name__)
 
+TARIFFS_PER_PAGE = 10
+
 
 def is_admin(telegram_id: int) -> bool:
     return telegram_id in get_settings().ADMIN_IDS
+
+
+async def _build_tariffs_list_text_and_kb(tariffs, page: int, total_pages: int, total: int) -> tuple[str, InlineKeyboardBuilder]:
+    """🔥 НОВОЕ: сборка текста и клавиатуры тарифов с пагинацией"""
+    text = (
+        f"🛠 Админка › 💰 <b>Тарифы</b>\n"
+        f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
+    )
+    builder = InlineKeyboardBuilder()
+
+    if not tariffs:
+        text += "_Тарифов пока нет_\n"
+    else:
+        for tariff in tariffs:
+            status = "🟢" if tariff.is_active else "🔴"
+            btn_text = f"{status} {tariff.duration_days} дн. · {tariff.price_rub}₽ / {tariff.price_stars}⭐"
+            builder.button(text=btn_text, callback_data=f"admin_tariff_card:{tariff.id}")
+
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(("⬅️", f"admin_tariffs_page:{page - 1}"))
+    if page < total_pages:
+        nav_buttons.append(("➡️", f"admin_tariffs_page:{page + 1}"))
+    for btn_text, btn_data in nav_buttons:
+        builder.button(text=btn_text, callback_data=btn_data)
+
+    builder.button(text="➕ Добавить тариф", callback_data="admin_tariff_add")
+    builder.button(text="← В админку", callback_data="admin_menu")
+    builder.adjust(1)
+    return text, builder
 
 
 @router.callback_query(F.data == "admin_tariffs")
@@ -27,19 +62,33 @@ async def show_tariffs_list(callback: CallbackQuery):
         return
     session = await get_session()
     try:
-        tariffs = await get_all_tariffs(session)
-        text = "🛠 Админка › 💰 <b>Тарифы</b>\n\n"
-        if not tariffs:
-            text += "_Тарифов пока нет_"
-        else:
-            for tariff in tariffs:
-                status = "🟢" if tariff.is_active else "🔴"
-                text += f"{status} <b>{tariff.duration_days} дней</b>\n"
-                text += f"{tariff.price_rub} ₽ / {tariff.price_stars} ⭐\n\n"
+        total_tariffs = await get_tariff_count(session)
+        total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
+        tariffs = await get_tariffs_paginated(session, page=1, per_page=TARIFFS_PER_PAGE)
+        text, kb = await _build_tariffs_list_text_and_kb(tariffs, 1, total_pages, total_tariffs)
         try:
-            await callback.message.edit_text(
-                text, reply_markup=get_admin_tariffs_keyboard(), parse_mode="HTML"
-            )
+            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        except TelegramBadRequest:
+            pass
+        await callback.answer()
+    finally:
+        await session.close()
+
+
+@router.callback_query(F.data.startswith("admin_tariffs_page:"))
+async def tariffs_pagination(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
+    page = int(callback.data.split(":")[1])
+    session = await get_session()
+    try:
+        total_tariffs = await get_tariff_count(session)
+        total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
+        tariffs = await get_tariffs_paginated(session, page=page, per_page=TARIFFS_PER_PAGE)
+        text, kb = await _build_tariffs_list_text_and_kb(tariffs, page, total_pages, total_tariffs)
+        try:
+            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         except TelegramBadRequest:
             pass
         await callback.answer()
@@ -74,8 +123,10 @@ async def process_add_tariff(message: Message, state: FSMContext):
     if message.text.startswith("/"):
         await state.clear()
         return
+
     data = await state.get_data()
     step = data.get("step")
+
     if step == "days":
         try:
             days = int(message.text.strip())
@@ -110,6 +161,7 @@ async def process_add_tariff(message: Message, state: FSMContext):
         except ValueError:
             await message.answer("⚠️ Введите число больше 0 (Stars требует положительную сумму):")
             return
+
         all_data = await state.get_data()
         session = await get_session()
         try:
@@ -190,6 +242,7 @@ async def toggle_tariff(callback: CallbackQuery, state: FSMContext):
         action = "включен" if new_status else "выключен"
         await callback.answer(f"✅ Тариф {action}", show_alert=True)
         logger.info(f"Admin {callback.from_user.id} toggled tariff {tariff_id} to {new_status}")
+
         tariff = await get_tariff_by_id(session, tariff_id)
         status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
         text = (
@@ -232,18 +285,14 @@ async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext):
         )
         await callback.answer("✅ Тариф отключен", show_alert=True)
         logger.info(f"Admin {callback.from_user.id} disabled tariff {tariff_id}")
-        tariffs = await get_all_tariffs(session)
-        text = "🛠 Админка › 💰 <b>Тарифы</b>\n\n"
-        if not tariffs:
-            text += "_Тарифов пока нет_"
-        else:
-            for t in tariffs:
-                status = "🟢" if t.is_active else "🔴"
-                text += f"{status} <b>{t.duration_days} дней</b>\n{t.price_rub} ₽ / {t.price_stars} ⭐\n\n"
+
+        # Возврат к списку с пагинацией
+        total_tariffs = await get_tariff_count(session)
+        total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
+        tariffs = await get_tariffs_paginated(session, page=1, per_page=TARIFFS_PER_PAGE)
+        text, kb = await _build_tariffs_list_text_and_kb(tariffs, 1, total_pages, total_tariffs)
         try:
-            await callback.message.edit_text(
-                text, reply_markup=get_admin_tariffs_keyboard(), parse_mode="HTML"
-            )
+            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         except TelegramBadRequest:
             pass
     finally:

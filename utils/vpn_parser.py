@@ -1,28 +1,3 @@
-# utils/vpn_parser.py
-"""
-Парсер vpn:// URI от Amnezia API.
-
-Формат: vpn://<base64url_encoded_json>
-
-JSON внутри имеет структуру:
-{
-    "containers": [{
-        "awg" | "amneziawg" | "amneziawg2": {
-            "config": "..."  # базовый WG конфиг
-            "H1": ..., "H2": ..., "H3": ..., "H4": ...,
-            "J1": ..., "J2": ..., "J3": ...,
-            "S1": ..., "S2": ...,
-            # для AWG 2.0:
-            "Jc": ..., "Jmin": ..., "Jmax": ...
-        }
-    }],
-    "defaultContainer": "awg",
-    "description": "Server Name",
-    "dns1": "1.1.1.1",
-    "dns2": "1.0.0.1",
-    "hostName": "server.com"
-}
-"""
 import base64
 import json
 import logging
@@ -155,8 +130,8 @@ def _extract_config(data: dict, original_uri: str) -> Optional[AmneziaWGConfig]:
     # Метаданные верхнего уровня
     config.description = data.get("description", "") or ""
     config.host_name = data.get("hostName", "") or ""
-    dns1 = data.get("dns1") or "1.1.1.1"
-    dns2 = data.get("dns2") or "1.0.0.1"
+    dns1 = data.get("dns1") or "8.8.8.8"
+    dns2 = data.get("dns2") or "8.8.4.4"
     config.dns = f"{dns1}, {dns2}"
     
     # Ищем контейнер с конфигом
@@ -210,22 +185,6 @@ def _extract_config(data: dict, original_uri: str) -> Optional[AmneziaWGConfig]:
 
 
 def _parse_wg_config(wg_config: str, config: AmneziaWGConfig) -> None:
-    """
-    Парсит строку базового WireGuard конфига и заполняет поля в config.
-    
-    Формат строки:
-    [Interface]
-    Address = 10.8.1.5/32
-    DNS = 1.1.1.1, 1.0.0.1
-    PrivateKey = xxx
-    
-    [Peer]
-    PublicKey = yyy
-    PresharedKey = zzz
-    AllowedIPs = 0.0.0.0/0, ::/0
-    Endpoint = server:port
-    PersistentKeepalive = 25
-    """
     current_section = None
     
     for line in wg_config.splitlines():

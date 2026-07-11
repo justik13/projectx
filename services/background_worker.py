@@ -2,6 +2,7 @@ import asyncio
 import logging
 import html
 from aiogram import Bot
+from aiogram.exceptions import TelegramForbiddenError
 from config.settings import get_settings
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
@@ -11,13 +12,15 @@ from database.repositories.servers_repo import get_active_servers
 from database.repositories.tariffs_repo import get_active_tariffs
 from services.amnezia_client import AmneziaClient
 from database.models import User, VPNProfile, Server, Payment
+from database.repositories.users_repo import mark_user_bot_blocked
 from bot.keyboards import get_payment_method_keyboard
 
 logger = logging.getLogger("BackgroundWorker")
 
 
 async def start_background_worker(bot: Bot):
-    asyncio.create_task(subscription_expiry_checker_loop(bot))
+    # 🔥 ИСПРАВЛЕНО: subscription_expiry_checker_loop удалён.
+    # API сам отключает пиров по expiresAt, боту не нужно спамить PATCH запросами.
     asyncio.create_task(traffic_sync_loop())
     asyncio.create_task(cleanup_dangling_peers_loop())
     asyncio.create_task(stale_payments_checker_loop(bot))
@@ -33,12 +36,12 @@ async def subscription_notifications_loop(bot: Bot):
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             session = await get_session()
             try:
-                # Ищем пользователей, у которых подписка заканчивается в ближайшие 3 дня
-                # и которые ещё не получали соответствующее уведомление
+                # 🔥 ИСПРАВЛЕНО: исключаем пользователей, заблокировавших бота
                 stmt = select(User).where(
                     User.subscription_end > now,
                     User.subscription_end <= now + timedelta(days=3),
                     User.is_banned == False,
+                    User.is_bot_blocked == False,
                     or_(
                         User.notified_3d == False,
                         User.notified_1d == False,
@@ -48,32 +51,35 @@ async def subscription_notifications_loop(bot: Bot):
                 users = (await session.execute(stmt)).scalars().all()
                 if not users:
                     continue
+
                 tariffs = await get_active_tariffs(session)
                 tariff_id = tariffs[0].id if tariffs else None
+
                 for user in users:
                     time_left = user.subscription_end - now
                     msg = None
                     if time_left <= timedelta(hours=2) and not user.notified_2h:
                         msg = (
                             "🔴 <b>Ваш доступ отключится через 2 часа!</b>\n"
-                            "Не оставайтесь без защищённой сети.\n\n"
+                            "Не оставайтесь без защищённой сети.\n"
                             "Нажмите кнопку ниже, чтобы продлить подписку в один клик."
                         )
                         user.notified_2h = True
                     elif time_left <= timedelta(days=1) and not user.notified_1d:
                         msg = (
                             "🟡 <b>Ваш доступ отключится через 1 день.</b>\n"
-                            "Рекомендуем продлить подписку заранее, чтобы не потерять связь.\n\n"
+                            "Рекомендуем продлить подписку заранее, чтобы не потерять связь.\n"
                             "Нажмите кнопку ниже для быстрого продления."
                         )
                         user.notified_1d = True
                     elif time_left <= timedelta(days=3) and not user.notified_3d:
                         msg = (
                             "🟢 <b>Ваш доступ отключится через 3 дня.</b>\n"
-                            "Успейте продлить подписку и продолжайте пользоваться сервисом без перебоев.\n\n"
+                            "Успейте продлить подписку и продолжайте пользоваться сервисом без перебоев.\n"
                             "Нажмите кнопку ниже для оплаты."
                         )
                         user.notified_3d = True
+
                     if msg:
                         try:
                             kb = get_payment_method_keyboard(tariff_id) if tariff_id else None
@@ -85,6 +91,14 @@ async def subscription_notifications_loop(bot: Bot):
                             )
                             await session.commit()
                             logger.info(f"Sent notification to user {user.telegram_id}")
+                        except TelegramForbiddenError:
+                            # 🔥 ИСПРАВЛЕНО: пользователь заблокировал бота
+                            logger.info(f"User {user.telegram_id} blocked the bot")
+                            try:
+                                await mark_user_bot_blocked(session, user.telegram_id)
+                            except Exception as e:
+                                logger.error(f"Failed to mark user {user.telegram_id} as bot_blocked: {e}")
+                            await session.rollback()
                         except Exception as e:
                             logger.warning(f"Failed to send notification to {user.telegram_id}: {e}")
                             await session.rollback()
@@ -95,170 +109,40 @@ async def subscription_notifications_loop(bot: Bot):
             await asyncio.sleep(60)
 
 
-async def subscription_expiry_checker_loop(bot: Bot):
-    settings = get_settings()
-    while True:
-        try:
-            logger.info("Запуск проверки истечения подписок...")
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            session = await get_session()
-            try:
-                stmt_disable = (
-                    select(VPNProfile.id, VPNProfile.peer_id, VPNProfile.server_id)
-                    .join(User, VPNProfile.user_id == User.id)
-                    .join(Server, VPNProfile.server_id == Server.id)
-                    .where(
-                        VPNProfile.is_active == True,
-                        VPNProfile.sync_fail_count < 3,
-                        Server.is_active == True,
-                        or_(User.subscription_end <= now, User.is_banned == True)
-                    )
-                )
-                res_disable = await session.execute(stmt_disable)
-                to_disable = res_disable.all()
-                stmt_enable = (
-                    select(VPNProfile.id, VPNProfile.peer_id, VPNProfile.server_id)
-                    .join(User, VPNProfile.user_id == User.id)
-                    .join(Server, VPNProfile.server_id == Server.id)
-                    .where(
-                        VPNProfile.is_active == False,
-                        Server.is_active == True,
-                        User.subscription_end > now,
-                        User.is_banned == False
-                    )
-                )
-                res_enable = await session.execute(stmt_enable)
-                to_enable = res_enable.all()
-                tasks_data = defaultdict(lambda: {'disable': [], 'enable': []})
-                server_ids = set()
-                for p_id, peer_id, s_id in to_disable:
-                    server_ids.add(s_id)
-                    tasks_data[s_id]['disable'].append((p_id, peer_id))
-                for p_id, peer_id, s_id in to_enable:
-                    server_ids.add(s_id)
-                    tasks_data[s_id]['enable'].append((p_id, peer_id))
-                if not server_ids:
-                    await asyncio.sleep(1800)
-                    continue
-                stmt_servers = select(Server).where(Server.id.in_(server_ids))
-                servers_res = await session.execute(stmt_servers)
-                servers_data = {
-                    s.id: {'api_url': s.api_url, 'api_key': s.api_key, 'name': s.name}
-                    for s in servers_res.scalars().all()
-                }
-            finally:
-                await session.close()
-
-            async def _process_server_status(server_id, server_info, data):
-                client = AmneziaClient(server_info['api_url'], server_info['api_key'])
-                updates = []
-                for p_id, peer_id in data['disable']:
-                    if await client.update_client(client_id=peer_id, status="disabled"):
-                        updates.append((p_id, False))
-                for p_id, peer_id in data['enable']:
-                    if await client.update_client(client_id=peer_id, status="active"):
-                        updates.append((p_id, True))
-                return server_id, updates
-
-            tasks = [
-                _process_server_status(s_id, servers_data[s_id], tasks_data[s_id])
-                for s_id in server_ids
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            ids_to_disable, ids_to_enable = [], []
-            for r in results:
-                if not isinstance(r, Exception) and r is not None:
-                    _, server_updates = r
-                    for p_id, new_status in server_updates:
-                        (ids_to_disable if not new_status else ids_to_enable).append(p_id)
-            if ids_to_disable or ids_to_enable:
-                session = await get_session()
-                try:
-                    if ids_to_disable:
-                        await session.execute(
-                            update(VPNProfile)
-                            .where(VPNProfile.id.in_(ids_to_disable))
-                            .values(is_active=False, sync_fail_count=0)
-                        )
-                    if ids_to_enable:
-                        await session.execute(
-                            update(VPNProfile)
-                            .where(VPNProfile.id.in_(ids_to_enable))
-                            .values(is_active=True, sync_fail_count=0)
-                        )
-                    await session.commit()
-                    logger.info(
-                        f"Обновлено статусов: выключено {len(ids_to_disable)}, "
-                        f"включено {len(ids_to_enable)}"
-                    )
-                finally:
-                    await session.close()
-            failed_profile_ids = [p_id for p_id, _, _ in to_disable if p_id not in ids_to_disable]
-            if failed_profile_ids:
-                session = await get_session()
-                try:
-                    await session.execute(
-                        update(VPNProfile)
-                        .where(VPNProfile.id.in_(failed_profile_ids))
-                        .values(sync_fail_count=VPNProfile.sync_fail_count + 1)
-                    )
-                    await session.commit()
-                    check_stmt = select(VPNProfile.id, VPNProfile.server_id).where(
-                        VPNProfile.id.in_(failed_profile_ids),
-                        VPNProfile.sync_fail_count >= 3
-                    )
-                    res = await session.execute(check_stmt)
-                    critical_fails = res.all()
-                    for p_id, s_id in critical_fails:
-                        server_name = servers_data.get(s_id, {}).get('name', f"ID {s_id}")
-                        logger.critical(f"⚠️ CB: Profile {p_id} on {server_name} failed 3+ times!")
-                        for admin_id in settings.ADMIN_IDS:
-                            try:
-                                await bot.send_message(
-                                    admin_id,
-                                    f"🚨 <b>Circuit Breaker</b>\n"
-                                    f"Сервер <b>{html.escape(server_name)}</b> недоступен.\n"
-                                    f"Профиль <code>{p_id}</code> не отключился 3+ раза.",
-                                    parse_mode="HTML"
-                                )
-                            except Exception as e:
-                                logger.error(f"Alert failed to {admin_id}: {e}")
-                finally:
-                    await session.close()
-        except Exception as e:
-            logger.error(f"Ошибка в цикле подписок: {e}", exc_info=True)
-        await asyncio.sleep(1800)
-
-
 async def traffic_sync_loop():
+    """🔥 ИСПРАВЛЕНО: теперь синхронизирует is_active статус из API в БД"""
     while True:
         try:
-            logger.info("Запуск синхронизации трафика...")
+            logger.info("Запуск синхронизации трафика и статусов...")
             session = await get_session()
             try:
                 stmt = (
                     select(
                         VPNProfile.id, VPNProfile.peer_id, VPNProfile.server_id,
                         VPNProfile.traffic_down, VPNProfile.traffic_up, VPNProfile.last_connected,
+                        VPNProfile.is_active,
                         Server.api_url, Server.api_key, Server.name
                     )
                     .join(Server, VPNProfile.server_id == Server.id)
-                    .where(VPNProfile.is_active == True, Server.is_active == True)
+                    .where(Server.is_active == True)
                 )
                 result = await session.execute(stmt)
                 rows = result.all()
+
                 by_server = defaultdict(list)
                 servers_map = {}
                 for row in rows:
-                    p_id, peer_id, s_id, t_down, t_up, last_conn, api_url, api_key, s_name = row
+                    p_id, peer_id, s_id, t_down, t_up, last_conn, is_active, api_url, api_key, s_name = row
                     by_server[s_id].append({
                         'id': p_id, 'peer_id': peer_id,
                         'traffic_down': t_down, 'traffic_up': t_up,
-                        'last_connected': last_conn
+                        'last_connected': last_conn,
+                        'is_active': is_active
                     })
                     servers_map[s_id] = {'api_url': api_url, 'api_key': api_key, 'name': s_name}
             finally:
                 await session.close()
+
             if not servers_map:
                 await asyncio.sleep(900)
                 continue
@@ -280,6 +164,7 @@ async def traffic_sync_loop():
                 r[0]: r[1] for r in results
                 if not isinstance(r, Exception) and r is not None and r[1] is not None
             }
+
             updates_data = {}
             for server_id, api_clients in api_data_by_server.items():
                 for p_dict in by_server[server_id]:
@@ -298,14 +183,23 @@ async def traffic_sync_loop():
                                 ).replace(tzinfo=None)
                             except (ValueError, TypeError):
                                 pass
+
+                        # 🔥 НОВОЕ: синхронизация is_active статуса из API
+                        api_status = api_data.get("status", "active")
+                        api_is_active = (api_status == "active")
+                        db_is_active = p_dict['is_active']
+
                         if (p_dict['traffic_down'] != t_down or
-                                p_dict['traffic_up'] != t_up or
-                                p_dict['last_connected'] != last_connected):
+                            p_dict['traffic_up'] != t_up or
+                            p_dict['last_connected'] != last_connected or
+                            db_is_active != api_is_active):
                             updates_data[p_dict['id']] = {
                                 'traffic_down': t_down,
                                 'traffic_up': t_up,
-                                'last_connected': last_connected
+                                'last_connected': last_connected,
+                                'is_active': api_is_active
                             }
+
             if updates_data:
                 session = await get_session()
                 try:
@@ -314,11 +208,12 @@ async def traffic_sync_loop():
                             update(VPNProfile).where(VPNProfile.id == p_id).values(
                                 traffic_down=data['traffic_down'],
                                 traffic_up=data['traffic_up'],
-                                last_connected=data['last_connected']
+                                last_connected=data['last_connected'],
+                                is_active=data['is_active']
                             )
                         )
                     await session.commit()
-                    logger.info(f"Трафик синхронизирован для {len(updates_data)} устройств.")
+                    logger.info(f"Трафик и статусы синхронизированы для {len(updates_data)} устройств.")
                 finally:
                     await session.close()
         except Exception as e:
@@ -342,6 +237,7 @@ async def cleanup_dangling_peers_loop():
                 ]
             finally:
                 await session.close()
+
             if not db_peer_ids or all(p is None for p in db_peer_ids):
                 if servers_data:
                     logger.critical("🛑 DB returned empty/invalid peer IDs. Aborting cleanup!")
@@ -414,7 +310,7 @@ async def stale_payments_checker_loop(bot: Bot):
                 if not stale_payments:
                     continue
                 msg = f"⚠️ <b>{len(stale_payments)} зависших платежей (pending > 1ч)</b>\n"
-                msg += "Возможно, Stars списались, но БД не обновилась.\n"
+                msg += "Возможно, Stars списались, но БД не обновилась.\n\n"
                 for p in stale_payments[:10]:
                     msg += (
                         f"ID: <code>{p.id}</code> · "
@@ -423,6 +319,7 @@ async def stale_payments_checker_loop(bot: Bot):
                     )
                 if len(stale_payments) > 10:
                     msg += f"\n<i>... и ещё {len(stale_payments) - 10}</i>"
+
                 for admin_id in settings.ADMIN_IDS:
                     try:
                         await bot.send_message(admin_id, msg, parse_mode="HTML")

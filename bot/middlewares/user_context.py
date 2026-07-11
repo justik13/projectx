@@ -13,12 +13,14 @@ class UserContextMiddleware(BaseMiddleware):
     Middleware для проверки бана и подгрузки контекста пользователя.
     Проверка ToS удалена — использование сервиса означает автоматическое принятие условий.
     """
+
     async def __call__(self, handler, event, data):
         user_id = None
         if isinstance(event, Message):
             user_id = event.from_user.id
         elif isinstance(event, CallbackQuery):
             user_id = event.from_user.id
+
         if not user_id:
             return await handler(event, data)
 
@@ -36,6 +38,7 @@ class UserContextMiddleware(BaseMiddleware):
                         url=f"https://t.me/{support_username}"
                     )]
                 ])
+
                 if isinstance(event, Message):
                     await event.answer(
                         "⛔️ У вас заблокирован доступ к сервису.\n"
@@ -61,4 +64,5 @@ class UserContextMiddleware(BaseMiddleware):
             raise
         finally:
             await session.close()
+
         return await handler(event, data)

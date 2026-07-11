@@ -1,15 +1,13 @@
-# bot/main.py
 import asyncio
 import logging
-from cachetools import TTLCache
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.chat_action import ChatActionMiddleware
-from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands
+from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands, ErrorEvent
 from config.settings import get_settings
 from database.connection import init_db, close_db
 from services.background_worker import start_background_worker
-from bot.middlewares import UserContextMiddleware
+from bot.middlewares import UserContextMiddleware, ThrottlingMiddleware
 from cryptography.fernet import Fernet
 from services.amnezia_client import close_http_session
 
@@ -20,31 +18,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class ThrottlingMiddleware:
-    def __init__(self, limit: float = 0.5):
-        self.limit = limit
-        self._last_call = TTLCache(maxsize=10000, ttl=limit * 3)
-
-    async def __call__(self, handler, event, data):
-        user_id = event.from_user.id if event.from_user else None
-        if hasattr(event, 'data'):
-            action_key = event.data
-        elif hasattr(event, 'text'):
-            action_key = f"msg:{event.text or ''}"
-        else:
-            action_key = None
-        if not user_id or not action_key:
-            return await handler(event, data)
-        key = f"{user_id}:{action_key}"
-        if key in self._last_call:
-            if hasattr(event, 'answer'):
-                try:
-                    await event.answer("⏳ Слишком часто!", show_alert=False)
-                except Exception:
-                    pass
-            return
-        self._last_call[key] = asyncio.get_running_loop().time()
-        return await handler(event, data)
+async def global_error_handler(event: ErrorEvent):
+    """🔥 Глобальный обработчик непредвиденных ошибок"""
+    logger.critical(f"Unhandled exception: {event.exception}", exc_info=True)
+    try:
+        if event.update.callback_query:
+            await event.update.callback_query.answer(
+                "⚠️ Ведутся технические работы. Попробуйте через минуту.",
+                show_alert=True
+            )
+        elif event.update.message:
+            await event.update.message.answer(
+                "⚠️ <b>Ошибка сервера</b>\n"
+                "Мы уже чиним проблему. Попробуйте позже.",
+                parse_mode="HTML"
+            )
+    except Exception:
+        pass
+    return True
 
 
 async def setup_bot_commands(bot: Bot):
@@ -63,12 +54,14 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
+    # Регистрация мидлварей
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
     dp.message.middleware(ThrottlingMiddleware(limit=1.0))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.5))
     dp.message.middleware(ChatActionMiddleware())
 
+    # Импорт и регистрация роутеров
     from bot.handlers.start import router as start_router
     from bot.handlers.profile import router as profile_router
     from bot.handlers.connection import router as connection_router
@@ -81,8 +74,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
     from bot.handlers.fallback import router as fallback_router
 
-    # ВАЖНО: fallback_router регистрируется ПОСЛЕДНИМ,
-    # чтобы он срабатывал только для неопознанных сообщений
     for r in [
         start_router, profile_router, connection_router, support_router,
         payment_router, admin_dashboard_router, admin_users_router,
@@ -90,6 +81,9 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
         fallback_router
     ]:
         dp.include_router(r)
+
+    # Регистрация глобального обработчика ошибок
+    dp.errors.register(global_error_handler)
 
     await setup_bot_commands(bot)
     logger.info("Все роутеры зарегистрированы")
@@ -107,9 +101,11 @@ async def main():
         except Exception as e:
             logger.critical(f"❌ DB_ENCRYPTION_KEY невалиден: {e}")
             return
+
         logger.info("Инициализация БД...")
         await init_db()
         logger.info("БД инициализирована")
+
         bot, dp = await setup_bot()
         await start_background_worker(bot)
         logger.info("Запуск polling...")
