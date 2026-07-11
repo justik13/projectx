@@ -1,8 +1,6 @@
-# bot/keyboards.py — все клавиатуры бота
 from aiogram.types import (
     ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
-    InlineKeyboardButton,
     CopyTextButton,
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
@@ -58,14 +56,6 @@ def get_referral_keyboard(referral_link: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_connection_keyboard(has_subscription: bool = True) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    if has_subscription:
-        builder.button(text="➕ Добавить устройство", callback_data="add_device")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
 def get_device_keyboard(profile_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить имя", callback_data=f"rename_device:{profile_id}")
@@ -106,32 +96,11 @@ def get_payment_method_keyboard(tariff_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_payment_confirm_keyboard(tariff_id: int, amount: int, currency: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    if currency == "stars":
-        builder.button(text=f"💎 Оплатить {amount} ⭐", callback_data=f"confirm_payment:{tariff_id}")
-    else:
-        builder.button(text=f"💎 Оплатить {amount} ₽", callback_data=f"confirm_payment:{tariff_id}")
-    builder.button(text="← К выбору способа оплаты", callback_data="back_to_payment_method")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def get_support_keyboard(support_username: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="💬 Написать в поддержку", url=f"https://t.me/{support_username.lstrip('@')}")
-    return builder.as_markup()
-
-
 def get_back_button(callback_data: str = "back_to_main_menu") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="← Назад", callback_data=callback_data)
     return builder.as_markup()
 
-
-# ═══════════════════════════════════════════════════════════════
-# АДМИН-КЛАВИАТУРЫ
-# ═══════════════════════════════════════════════════════════════
 
 def get_admin_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -167,14 +136,6 @@ def get_admin_extend_days_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_admin_servers_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Добавить сервер", callback_data="admin_server_add")
-    builder.button(text="← В админку", callback_data="admin_menu")
-    builder.adjust(1, 1)
-    return builder.as_markup()
-
-
 def get_admin_server_card_keyboard(server_id: int, is_active: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить", callback_data=f"admin_server_edit:{server_id}")
@@ -183,14 +144,6 @@ def get_admin_server_card_keyboard(server_id: int, is_active: bool) -> InlineKey
     builder.button(text="🗑 Удалить сервер", callback_data=f"admin_server_delete:{server_id}")
     builder.button(text="← К списку серверов", callback_data="admin_servers")
     builder.adjust(1, 1, 1, 1)
-    return builder.as_markup()
-
-
-def get_admin_tariffs_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Добавить тариф", callback_data="admin_tariff_add")
-    builder.button(text="← В админку", callback_data="admin_menu")
-    builder.adjust(1, 1)
     return builder.as_markup()
 
 
