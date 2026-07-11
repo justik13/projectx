@@ -36,7 +36,6 @@ def get_profile_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🎁 Пригласить друга", callback_data="referral")
     builder.button(text="🧾 История оплат", callback_data="user_history")
-    builder.button(text="← В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -47,8 +46,12 @@ def get_history_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_referral_keyboard() -> InlineKeyboardMarkup:
+def get_referral_keyboard(referral_link: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.button(
+        text="📋 Скопировать ссылку",
+        copy_text=CopyTextButton(text=referral_link)
+    )
     builder.button(text="👥 Список рефералов", callback_data="referrals_list")
     builder.button(text="← К профилю", callback_data="back_to_profile")
     builder.adjust(1)
@@ -59,7 +62,6 @@ def get_connection_keyboard(has_subscription: bool = True) -> InlineKeyboardMark
     builder = InlineKeyboardBuilder()
     if has_subscription:
         builder.button(text="➕ Добавить устройство", callback_data="add_device")
-    builder.button(text="← В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -140,18 +142,6 @@ def get_admin_menu() -> InlineKeyboardMarkup:
     builder.button(text="📜 Аудит-лог", callback_data="admin_audit")
     builder.button(text="← В главное меню", callback_data="back_to_main_menu")
     builder.adjust(2, 2, 1, 1)
-    return builder.as_markup()
-
-
-def get_admin_users_keyboard(page: int = 1, total_pages: int = 1) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    if page > 1:
-        builder.button(text="⬅️ Назад", callback_data=f"admin_users_page:{page - 1}")
-    if page < total_pages:
-        builder.button(text="Вперёд ➡️", callback_data=f"admin_users_page:{page + 1}")
-    builder.button(text="🔍 Поиск по ID", callback_data="admin_users_search")
-    builder.button(text="← В админку", callback_data="admin_menu")
-    builder.adjust(2, 1, 1)
     return builder.as_markup()
 
 

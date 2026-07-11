@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 @router.message(F.text == "👤 Профиль")
 async def show_profile(message: Message, state: FSMContext, db_user: User | None = None):
     await state.clear()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     user = db_user
     if not user:
         await message.answer("❌ Пользователь не найден.")
@@ -65,10 +69,7 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
     session = await get_session()
     try:
         payments = await get_user_payments(session, user.id)
-        text = (
-            "🧾 <b>История оплат</b>\n"
-            "─────────────────────────────\n"
-        )
+        text = "🧾 <b>История оплат</b>\n\n"
         if not payments:
             text += "_История пуста. У вас пока не было оплат._"
         else:
@@ -106,7 +107,9 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
             invited_count=invited_count, bonus_total=user.referral_days
         )
         await callback.message.edit_text(
-            text, reply_markup=get_referral_keyboard(), parse_mode="HTML"
+            text,
+            reply_markup=get_referral_keyboard(referral_link),
+            parse_mode="HTML"
         )
         await callback.answer()
     finally:
@@ -125,15 +128,13 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
         referrals = await get_user_referrals(session, user.telegram_id)
         if not referrals:
             text = (
-                "👥 Список рефералов пока пуст.\n"
+                "👥 <b>Список рефералов</b>\n\n"
+                "Список рефералов пока пуст.\n"
                 "Пригласите друзей по вашей ссылке, чтобы они появились здесь."
             )
         else:
             settings = get_settings()
-            text = (
-                "👥 Ваши рефералы:\n"
-                "─────────────────────────────\n"
-            )
+            text = "👥 <b>Ваши рефералы</b>\n\n"
             for referral in referrals:
                 safe_user_string = (
                     f"@{html.escape(referral.username)}" if referral.username

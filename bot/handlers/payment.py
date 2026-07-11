@@ -14,19 +14,25 @@ from database.models import User
 
 router = Router()
 
+
 @router.message(F.text == "💳 Оплата")
 async def show_payment(message: Message, state: FSMContext):
     await state.clear()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     session = await get_session()
     try:
         tariffs = await get_active_tariffs(session)
         if not tariffs:
             await message.answer("💳 В данный момент нет доступных тарифов.\n"
-                                  "Обратитесь в поддержку для ручного продления доступа.")
+                                 "Обратитесь в поддержку для ручного продления доступа.")
             return
-        await message.answer(PAYMENT_TARIFFS_HEADER, reply_markup=get_payment_tariff_keyboard(tariffs))
+        await message.answer(PAYMENT_TARIFFS_HEADER, reply_markup=get_payment_tariff_keyboard(tariffs), parse_mode="HTML")
     finally:
         await session.close()
+
 
 @router.callback_query(F.data.startswith("select_tariff:"))
 async def select_tariff(callback: CallbackQuery, state: FSMContext):
@@ -38,12 +44,13 @@ async def select_tariff(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ Выбранный тариф сейчас недоступен", show_alert=True)
             return
         text = PAYMENT_METHOD_TEXT.format(duration_days=tariff.duration_days, price_rub=tariff.price_rub,
-                                           price_stars=tariff.price_stars)
-        await callback.message.edit_text(text, reply_markup=get_payment_method_keyboard(tariff.id))
+                                          price_stars=tariff.price_stars)
+        await callback.message.edit_text(text, reply_markup=get_payment_method_keyboard(tariff.id), parse_mode="HTML")
         await state.update_data(tariff_id=tariff.id)
         await callback.answer()
     finally:
         await session.close()
+
 
 @router.callback_query(F.data.startswith("pay_stars:"))
 async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
@@ -56,11 +63,11 @@ async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | 
             await callback.answer("❌ Ошибка данных", show_alert=True)
             return
         if tariff.price_stars <= 0:
-            logger.error(f"Tariff {tariff.id} has invalid price_stars={tariff.price_stars}")
+            logging.error(f"Tariff {tariff.id} has invalid price_stars={tariff.price_stars}")
             await callback.answer("❌ Ошибка тарифа: некорректная цена.", show_alert=True)
             return
         payment = await create_payment(session=session, user_id=user.id, tariff_id=tariff.id,
-                                        amount=tariff.price_stars, currency="stars")
+                                       amount=tariff.price_stars, currency="stars")
         try:
             await callback.message.delete()
         except Exception:
@@ -75,9 +82,9 @@ async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | 
                 payload=f"stars_payment:{payment.id}", currency="XTR",
                 start_parameter="network-access-stars")
         except TelegramAPIError as e:
-            logger.error(f"Failed to send invoice: {e}")
+            logging.error(f"Failed to send invoice: {e}")
             await callback.message.answer("❌ Ошибка платежной системы Telegram. Попробуйте позже.",
-                                           reply_markup=get_back_button("back_to_main_menu"))
+                                          reply_markup=get_back_button("back_to_main_menu"))
             payment.status = 'failed'
             await session.commit()
             return
@@ -86,9 +93,11 @@ async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | 
     finally:
         await session.close()
 
+
 @router.pre_checkout_query()
 async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
+
 
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, state: FSMContext):
@@ -105,11 +114,12 @@ async def process_successful_payment(message: Message, state: FSMContext):
             user = await get_user_by_telegram_id(session, message.from_user.id)
             valid_until = user.subscription_end.strftime("%d.%m.%Y %H:%M") if user.subscription_end else "—"
             text = PAYMENT_SUCCESS.format(duration_days=payment.tariff.duration_days, valid_until=valid_until)
-            await message.answer(text, reply_markup=get_back_button("back_to_main_menu"))
+            await message.answer(text, reply_markup=get_back_button("back_to_main_menu"), parse_mode="HTML")
         else:
             await message.answer("⚠️ Возникла задержка при зачислении. Пожалуйста, напишите в поддержку.")
     finally:
         await session.close()
+
 
 @router.callback_query(F.data.startswith("pay_sbp:"))
 async def pay_sbp(callback: CallbackQuery, state: FSMContext):
@@ -117,18 +127,20 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext):
     session = await get_session()
     try:
         tariff = await get_tariff_by_id(session, tariff_id)
-        text = (f"💳 Оплата через СБП\n─────────────────────────────\n"
-                f"К оплате: {tariff.price_rub} ₽\nНажмите кнопку ниже для оплаты — доступ будет активирован мгновенно.")
+        text = (f"💳 <b>Оплата через СБП</b>\n\n"
+                f"К оплате: {tariff.price_rub} ₽\n\n"
+                f"Нажмите кнопку ниже для оплаты — доступ будет активирован мгновенно.")
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         builder = InlineKeyboardBuilder()
         builder.button(text="💎 Оплатить", callback_data=f"confirm_payment_sbp:{tariff.id}")
-        builder.button(text="← Назад", callback_data=f"select_tariff:{tariff.id}")
+        builder.button(text="← К выбору тарифа", callback_data=f"select_tariff:{tariff.id}")
         builder.adjust(1)
         await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
         await state.update_data(tariff_id=tariff.id, payment_method="sbp", amount=tariff.price_rub)
         await callback.answer()
     finally:
         await session.close()
+
 
 @router.callback_query(F.data.startswith("confirm_payment_sbp:"))
 async def confirm_payment_sbp(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
@@ -142,23 +154,25 @@ async def confirm_payment_sbp(callback: CallbackQuery, state: FSMContext, db_use
             return
         tariff = await get_tariff_by_id(session, tariff_id)
         payment = await create_payment(session=session, user_id=user.id, tariff_id=tariff.id,
-                                        amount=tariff.price_rub, currency="rub")
+                                       amount=tariff.price_rub, currency="rub")
         success = await SubscriptionService.handle_successful_payment(session, payment.id)
         if success:
             valid_until = user.subscription_end.strftime("%d.%m.%Y %H:%M") if user.subscription_end else "—"
             await callback.message.edit_text(
-                f"✅ <b>Оплата прошла успешно!</b>\n─────────────────────────────\n"
-                f"Вам продлён доступ на {tariff.duration_days} дней.\nДействует до: {valid_until}",
+                f"✅ <b>Оплата прошла успешно!</b>\n\n"
+                f"Вам продлён доступ на {tariff.duration_days} дней.\n"
+                f"Действует до: {valid_until}",
                 reply_markup=get_back_button("back_to_main_menu"), parse_mode="HTML")
         else:
             await callback.message.edit_text("⚠️ Возникла задержка при зачислении. Пожалуйста, напишите в поддержку.",
-                                              reply_markup=get_back_button("back_to_main_menu"), parse_mode="HTML")
+                                             reply_markup=get_back_button("back_to_main_menu"), parse_mode="HTML")
     finally:
         await session.close()
 
+
 @router.callback_query(F.data == "back_to_payment")
 async def back_to_payment(callback: CallbackQuery, state: FSMContext):
-    await state.clear()  # 🔥 P1 FIX
+    await state.clear()
     data = await state.get_data()
     tariff_id = data.get("tariff_id")
     if not tariff_id:
@@ -168,9 +182,9 @@ async def back_to_payment(callback: CallbackQuery, state: FSMContext):
     try:
         tariff = await get_tariff_by_id(session, tariff_id)
         text = PAYMENT_METHOD_TEXT.format(duration_days=tariff.duration_days, price_rub=tariff.price_rub,
-                                           price_stars=tariff.price_stars)
+                                          price_stars=tariff.price_stars)
         try:
-            await callback.message.edit_text(text, reply_markup=get_payment_method_keyboard(tariff.id))
+            await callback.message.edit_text(text, reply_markup=get_payment_method_keyboard(tariff.id), parse_mode="HTML")
         except TelegramBadRequest:
             pass
         await callback.answer()

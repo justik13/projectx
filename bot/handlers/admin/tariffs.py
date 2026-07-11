@@ -28,17 +28,14 @@ async def show_tariffs_list(callback: CallbackQuery):
     session = await get_session()
     try:
         tariffs = await get_all_tariffs(session)
-        text = (
-            "🛠 Админка › 💰 <b>Тарифы</b>\n"
-            "─────────────────────────────\n"
-        )
+        text = "🛠 Админка › 💰 <b>Тарифы</b>\n\n"
         if not tariffs:
             text += "_Тарифов пока нет_"
         else:
             for tariff in tariffs:
                 status = "🟢" if tariff.is_active else "🔴"
                 text += f"{status} <b>{tariff.duration_days} дней</b>\n"
-                text += f"   {tariff.price_rub} ₽ / {tariff.price_stars} ⭐\n\n"
+                text += f"{tariff.price_rub} ₽ / {tariff.price_stars} ⭐\n\n"
         try:
             await callback.message.edit_text(
                 text, reply_markup=get_admin_tariffs_keyboard(), parse_mode="HTML"
@@ -125,7 +122,8 @@ async def process_add_tariff(message: Message, state: FSMContext):
                 f"{all_data['duration_days']} days, {all_data['price_rub']} RUB, {price_stars} Stars"
             )
             await message.answer(
-                f"✅ Тариф добавлен!\n⏱ <b>{all_data['duration_days']} дней</b>\n"
+                f"✅ Тариф добавлен!\n\n"
+                f"⏱ <b>{all_data['duration_days']} дней</b>\n"
                 f"💵 {all_data['price_rub']} ₽ / ⭐ {price_stars}",
                 reply_markup=get_back_button("admin_tariffs"), parse_mode="HTML"
             )
@@ -150,8 +148,7 @@ async def show_tariff_card(callback: CallbackQuery, state: FSMContext):
             return
         status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
         text = (
-            f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n"
-            f"─────────────────────────────\n"
+            f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n\n"
             f"<b>ID:</b> {tariff.id}\n"
             f"<b>Дней:</b> {tariff.duration_days}\n"
             f"<b>Цена ₽:</b> {tariff.price_rub}\n"
@@ -196,8 +193,7 @@ async def toggle_tariff(callback: CallbackQuery, state: FSMContext):
         tariff = await get_tariff_by_id(session, tariff_id)
         status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
         text = (
-            f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n"
-            f"─────────────────────────────\n"
+            f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n\n"
             f"<b>ID:</b> {tariff.id}\n"
             f"<b>Дней:</b> {tariff.duration_days}\n"
             f"<b>Цена ₽:</b> {tariff.price_rub}\n"
@@ -237,10 +233,7 @@ async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext):
         await callback.answer("✅ Тариф отключен", show_alert=True)
         logger.info(f"Admin {callback.from_user.id} disabled tariff {tariff_id}")
         tariffs = await get_all_tariffs(session)
-        text = (
-            "🛠 Админка › 💰 <b>Тарифы</b>\n"
-            "─────────────────────────────\n"
-        )
+        text = "🛠 Админка › 💰 <b>Тарифы</b>\n\n"
         if not tariffs:
             text += "_Тарифов пока нет_"
         else:

@@ -48,8 +48,7 @@ async def process_broadcast_message(message: Message, state: FSMContext):
         return
     broadcast_text = message.text
     preview = (
-        f"📢 Предпросмотр рассылки:\n"
-        f"─────────────────────────────\n"
+        f"📢 <b>Предпросмотр рассылки:</b>\n\n"
         f"{broadcast_text}"
     )
     try:
@@ -117,7 +116,7 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext):
             fail_count += 1
             logging.warning(f"Failed to send broadcast to {uid}: {e}")
     await callback.message.edit_text(
-        f"✅ Рассылка завершена!\n"
+        f"✅ Рассылка завершена!\n\n"
         f"📤 Отправлено: {success_count}\n"
         f"❌ Ошибок: {fail_count}\n"
         f"👥 Всего: {total_count}",
@@ -182,7 +181,7 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext):
             fail_count += 1
             logging.warning(f"Failed to send broadcast to {uid}: {e}")
     await callback.message.edit_text(
-        f"✅ Рассылка завершена!\n"
+        f"✅ Рассылка завершена!\n\n"
         f"📤 Отправлено: {success_count}\n"
         f"❌ Ошибок: {fail_count}\n"
         f"👥 Активных: {total_count}",

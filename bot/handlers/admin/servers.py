@@ -20,12 +20,13 @@ from services.audit_service import AuditService
 
 router = Router()
 
+
 def is_admin(telegram_id: int) -> bool:
     return telegram_id in get_settings().ADMIN_IDS
 
+
 REPLY_MENU_BUTTONS = ["👤 Профиль", "🔌 Подключение", "💳 Оплата", "💬 Поддержка", "🛠 Админка"]
 
-# Регулярка для проверки URL
 URL_REGEX = re.compile(
     r'^https?://'
     r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
@@ -45,10 +46,7 @@ async def show_servers_list(callback: CallbackQuery, state: FSMContext):
     session = await get_session()
     try:
         servers = await get_all_servers(session)
-        text = (
-            "🛠 Админка › 🌍 <b>Серверы</b>\n"
-            "─────────────────────────────\n"
-        )
+        text = "🛠 Админка › 🌍 <b>Серверы</b>\n\n"
         if not servers:
             text += "_Серверов пока нет_\nНажмите [➕ Добавить сервер]"
         else:
@@ -115,7 +113,6 @@ async def process_add_server(message: Message, state: FSMContext):
         )
     elif step == "api_url":
         api_url = message.text.strip()
-        # 🔥 ВАЛИДАЦИЯ URL
         if len(api_url) > 500:
             await message.answer("⚠️ Слишком длинный URL (макс. 500 символов).")
             return
@@ -157,17 +154,13 @@ async def process_add_server(message: Message, state: FSMContext):
             await message.answer("⚠️ Введите число больше 0:")
             return
         all_data = await state.get_data()
-        
-        # 🔥 ПРОВЕРКА ДОСТУПНОСТИ СЕРВЕРА (Healthcheck)
         check_msg = await message.answer(
             "🔍 <b>Проверяю доступность сервера...</b>\n"
             "Ожидайте, это может занять несколько секунд.",
             parse_mode="HTML"
         )
-        
         client = AmneziaClient(all_data["api_url"], all_data["api_key"])
         is_healthy = await client.healthcheck()
-        
         if not is_healthy:
             await check_msg.edit_text(
                 "❌ <b>Сервер недоступен!</b>\n\n"
@@ -182,8 +175,6 @@ async def process_add_server(message: Message, state: FSMContext):
             )
             await state.clear()
             return
-        
-        # Дополнительная проверка — получение инфо о сервере
         server_info = await client.get_server_info()
         if not server_info:
             await check_msg.edit_text(
@@ -194,8 +185,6 @@ async def process_add_server(message: Message, state: FSMContext):
             )
             await state.clear()
             return
-        
-        # Проверка протокола
         protocols = server_info.get("protocols", [])
         if "amneziawg2" not in protocols:
             available = ", ".join(protocols) if protocols else "неизвестно"
@@ -207,8 +196,6 @@ async def process_add_server(message: Message, state: FSMContext):
             )
             await state.clear()
             return
-        
-        # Всё ок — сохраняем сервер
         session = await get_session()
         try:
             server = await create_server(
@@ -251,8 +238,7 @@ async def show_server_card(callback: CallbackQuery, state: FSMContext):
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
         safe_name = html.escape(server.name)
         text = (
-            f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_name}</b>\n"
-            f"─────────────────────────────\n"
+            f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_name}</b>\n\n"
             f"<b>ID:</b> {server.id}\n"
             f"<b>Статус:</b> {status}\n"
             f"<b>Протокол:</b> {server.protocol}\n"
@@ -327,8 +313,7 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext):
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
         safe_name = html.escape(server.name)
         text = (
-            f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_name}</b>\n"
-            f"─────────────────────────────\n"
+            f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_name}</b>\n\n"
             f"<b>ID:</b> {server.id}\n"
             f"<b>Статус:</b> {status}\n"
             f"<b>Протокол:</b> {server.protocol}\n"
@@ -398,10 +383,7 @@ async def delete_server_handler(callback: CallbackQuery, state: FSMContext):
             )
             return
         servers = await get_all_servers(session)
-        text = (
-            "🛠 Админка › 🌍 <b>Серверы</b>\n"
-            "─────────────────────────────\n"
-        )
+        text = "🛠 Админка › 🌍 <b>Серверы</b>\n\n"
         if not servers:
             text += "_Серверов пока нет_"
         else:
@@ -469,8 +451,7 @@ async def process_edit_server(message: Message, state: FSMContext):
         flag = server.country_flag or "🌍"
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
         text = (
-            f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_new_name}</b>\n"
-            f"─────────────────────────────\n"
+            f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_new_name}</b>\n\n"
             f"<b>ID:</b> {server.id}\n"
             f"<b>Статус:</b> {status}\n"
             f"<b>Протокол:</b> {server.protocol}\n"

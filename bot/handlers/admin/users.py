@@ -9,6 +9,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database.connection import get_session
 from database.repositories.users_repo import (
     get_user_by_telegram_id, get_users_paginated, get_user_count, update_user, get_user_referrals
@@ -17,7 +18,7 @@ from database.repositories.profiles_repo import get_user_profiles
 from services.subscription import SubscriptionService
 from services.audit_service import AuditService
 from bot.keyboards import (
-    get_admin_users_keyboard, get_admin_user_card_keyboard,
+    get_admin_user_card_keyboard,
     get_admin_extend_days_keyboard, get_back_button
 )
 from bot.states import AdminStates
@@ -45,12 +46,8 @@ async def show_users_list(callback: CallbackQuery, state: FSMContext):
         total_users = await get_user_count(session)
         total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
         users = await get_users_paginated(session, page=1, per_page=USERS_PER_PAGE)
-        text = await _build_users_list_text(users, 1, total_pages, total_users)
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_admin_users_keyboard(page=1, total_pages=total_pages),
-            parse_mode="HTML"
-        )
+        text, kb = await _build_users_list_text_and_kb(users, 1, total_pages, total_users)
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
     finally:
         await session.close()
@@ -68,37 +65,45 @@ async def users_pagination(callback: CallbackQuery, state: FSMContext):
         total_users = await get_user_count(session)
         total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
         users = await get_users_paginated(session, page=page, per_page=USERS_PER_PAGE)
-        text = await _build_users_list_text(users, page, total_pages, total_users)
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_admin_users_keyboard(page=page, total_pages=total_pages),
-            parse_mode="HTML"
-        )
+        text, kb = await _build_users_list_text_and_kb(users, page, total_pages, total_users)
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
     finally:
         await session.close()
 
 
-async def _build_users_list_text(users, page: int, total_pages: int, total: int) -> str:
+async def _build_users_list_text_and_kb(users, page: int, total_pages: int, total: int) -> tuple[str, InlineKeyboardBuilder]:
     text = (
         f"🛠 Админка › 👥 <b>Пользователи</b>\n"
-        f"(стр. {page}/{total_pages}) · Всего: {total}\n"
-        f"─────────────────────────────\n"
+        f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
     )
+    builder = InlineKeyboardBuilder()
     if not users:
         text += "_Пользователей пока нет_\n"
-        return text
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    for user in users:
-        status = "🟢" if user.subscription_end and user.subscription_end > now else "🔴"
-        ban = "🚫" if user.is_banned else ""
-        username = f"@{html.escape(user.username)}" if user.username else "—"
-        days = format_days_left(user.subscription_end)
-        text += (
-            f"{status}{ban} <b>{user.telegram_id}</b> {username}\n"
-            f"Осталось: {days}\n\n"
-        )
-    return text
+    else:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for user in users:
+            status = "🟢" if user.subscription_end and user.subscription_end > now else "🔴"
+            ban = "🚫" if user.is_banned else ""
+            username = f"@{html.escape(user.username)}" if user.username else f"ID:{user.telegram_id}"
+            days = format_days_left(user.subscription_end)
+            btn_text = f"{status}{ban} {username} · {days}"
+            builder.button(text=btn_text, callback_data=f"admin_user_card:{user.telegram_id}")
+    
+    # Кнопки пагинации
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(("⬅️", f"admin_users_page:{page - 1}"))
+    if page < total_pages:
+        nav_buttons.append(("➡️", f"admin_users_page:{page + 1}"))
+    
+    for btn_text, btn_data in nav_buttons:
+        builder.button(text=btn_text, callback_data=btn_data)
+    
+    builder.button(text="🔍 Поиск по ID", callback_data="admin_users_search")
+    builder.button(text="← В админку", callback_data="admin_menu")
+    builder.adjust(1)
+    return text, builder
 
 
 @router.callback_query(F.data == "admin_users_search")
@@ -201,11 +206,10 @@ async def _build_user_card_text(user, session) -> str:
     safe_first_name = html.escape(user.first_name) if user.first_name else '—'
     referrals = await get_user_referrals(session, user.telegram_id)
     return (
-        f"🛠 Админка › 👥 Пользователи › 👤 <b>Карточка</b>\n"
-        f"─────────────────────────────\n"
-        f"<b>ID:</b> {user.telegram_id}\n"
+        f"🛠 Админка › 👥 Пользователи › 👤 <b>Карточка</b>\n\n"
+        f"<b>ID:</b> <code>{user.telegram_id}</code>\n"
         f"<b>Username:</b> @{safe_username}\n"
-        f"<b>Имя:</b> {safe_first_name}\n"
+        f"<b>Имя:</b> {safe_first_name}\n\n"
         f"<b>Статус:</b> {status}\n"
         f"<b>Бан:</b> {ban}\n"
         f"<b>Действует до:</b> {format_datetime(user.subscription_end)}\n"
@@ -415,9 +419,8 @@ async def show_user_devices(callback: CallbackQuery, state: FSMContext):
             return
         profiles = await get_user_profiles(session, user.id)
         text = (
-            f"🛠 Админка › 👥 Пользователи › 🔧 <b>Устройства</b>\n"
-            f"Пользователь <code>{telegram_id}</code>\n"
-            f"─────────────────────────────\n"
+            f"🛠 Админка › 👥 Пользователи › 🔧 <b>Устройства</b>\n\n"
+            f"Пользователь <code>{telegram_id}</code>\n\n"
         )
         if not profiles:
             text += "_Устройств нет_\n"
@@ -426,10 +429,9 @@ async def show_user_devices(callback: CallbackQuery, state: FSMContext):
                 safe_device_name = html.escape(p.device_name)
                 text += (
                     f"📱 <b>{safe_device_name}</b>\n"
-                    f"    Peer: <code>{p.peer_id[:16]}...</code>\n"
-                    f"    Трафик: ↓{p.traffic_down} ↑{p.traffic_up}\n\n"
+                    f"Peer: <code>{p.peer_id[:16]}...</code>\n"
+                    f"Трафик: ↓{p.traffic_down} ↑{p.traffic_up}\n\n"
                 )
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
         builder = InlineKeyboardBuilder()
         builder.button(text="← К карточке пользователя", callback_data=f"admin_user_card:{telegram_id}")
         builder.adjust(1)

@@ -9,8 +9,7 @@ WELCOME_TEXT = (
 )
 
 HELP_TEXT = (
-    "❓ <b>Помощь и часто задаваемые вопросы</b>\n"
-    "─────────────────────────────\n"
+    "❓ <b>Помощь и часто задаваемые вопросы</b>\n\n"
     "<b>1. Как подключить устройство?</b>\n"
     "Перейдите в раздел «🔌 Подключение» и следуйте инструкциям.\n\n"
     "<b>2. Что делать, если не работает подключение?</b>\n"
@@ -27,102 +26,78 @@ HELP_TEXT = (
 )
 
 PROFILE_TEXT = (
-    "👤 Профиль\n"
-    "─────────────────────────────\n"
+    "👤 <b>Профиль</b>\n\n"
     "{name} (@{username})\n"
-    "id {telegram_id}\n"
+    "ID: <code>{telegram_id}</code>\n\n"
     "Статус: {status_emoji} {status_text}\n"
     "Действует до: {valid_until}\n"
     "Осталось: {days_left}\n"
     "Устройства: {devices_count}/{device_limit}\n"
-    "Всего трафика: {total_traffic}\n"
+    "Всего трафика: {total_traffic}\n\n"
     "🎁 Рефералов: {referrals_count}  ·  Получено дней: +{referral_days}"
 )
 
 REFERRAL_TEXT = (
-    "🎁 Пригласи друга — получи {bonus_days} дня бесплатно\n"
-    "─────────────────────────────\n"
-    "🔗 Ваша ссылка:\n"
-    "{referral_link}\n\n"
-    "[📋 Скопировать ссылку]\n\n"
+    "🎁 <b>Пригласи друга — получи {bonus_days} дня бесплатно</b>\n\n"
+    "🔗 <b>Ваша ссылка:</b>\n"
+    "<code>{referral_link}</code>\n\n"
+    "💡 <i>Нажмите на ссылку выше, чтобы скопировать, или используйте кнопку ниже.</i>\n\n"
     "Приглашено: {invited_count}\n"
     "Получено дней: +{bonus_total}"
 )
 
-REFERRALS_LIST_HEADER = (
-    "👥 Ваши рефералы\n"
-    "─────────────────────────────\n"
-)
-
-REFERRAL_ITEM = "{index}. {username} → +{days} дней ✅\n"
-
 CONNECTION_LIST_HEADER = (
-    "🔌 Ваши устройства ({count}/{limit})\n"
-    "─────────────────────────────\n"
+    "🔌 <b>Ваши устройства</b> ({count}/{limit})\n\n"
 )
 
 DEVICE_CARD = (
-    "📱 {device_name} ({flag} {server_name})\n"
+    "📱 <b>{device_name}</b> ({flag} {server_name})\n"
     "{last_connected_text}\n"
-    "↓ {traffic_down}  ↑ {traffic_up}  Σ {traffic_total}\n"
+    "↓ {traffic_down}  ↑ {traffic_up}  Σ {traffic_total}\n\n"
 )
 
 DEVICE_NOT_CONNECTED = "⏱ Ещё не подключалось"
 DEVICE_RECENTLY_ACTIVE = "⏱ Активно недавно ({last_connected})"
 
 SUPPORT_TEXT = (
-    "💬 Поддержка\n"
-    "─────────────────────────────\n"
+    "💬 <b>Поддержка</b>\n\n"
     "Если у вас возникли вопросы, напишите нашему оператору:\n"
-    "👤 {support_username}\n"
+    "👤 {support_username}\n\n"
     "Мы отвечаем в течение 24 часов."
 )
 
 PAYMENT_TARIFFS_HEADER = (
-    "💳 Продление доступа\n"
-    "─────────────────────────────\n"
+    "💳 <b>Продление доступа</b>\n\n"
     "Выберите тариф:\n"
 )
 
-PAYMENT_TARIFF_ITEM = "⏱ {days} дней  —  {price_rub} ₽   ·  {price_stars} ⭐\n"
-
 PAYMENT_METHOD_TEXT = (
-    "💳 Способ оплаты\n"
-    "─────────────────────────────\n"
-    "Тариф: {duration_days} дней — {price_rub} ₽ / {price_stars} ⭐\n"
+    "💳 <b>Способ оплаты</b>\n\n"
+    "Тариф: {duration_days} дней — {price_rub} ₽ / {price_stars} ⭐\n\n"
     "Выберите способ оплаты:"
 )
 
-PAYMENT_STARS_CONFIRM = (
-    "💳 Оплата Telegram Stars\n"
-    "─────────────────────────────\n"
-    "К оплате: {price_stars} ⭐\n"
-    "После нажатия кнопки «Оплатить» доступ будет активирован мгновенно."
-)
-
 PAYMENT_SUCCESS = (
-    "✅ Оплата прошла успешно!\n"
-    "─────────────────────────────\n"
+    "✅ <b>Оплата прошла успешно!</b>\n\n"
     "Вам продлён доступ на {duration_days} дней.\n"
     "Действует до: {valid_until}"
 )
 
 ERROR_NO_SUBSCRIPTION = (
-    "⚠️ У вас нет активной подписки.\n"
+    "⚠️ <b>У вас нет активной подписки.</b>\n\n"
     "Продлите доступ, чтобы подключать устройства."
 )
 
 ERROR_DEVICE_LIMIT_REACHED = (
-    "⚠️ Достигнут лимит устройств ({limit}).\n"
+    "⚠️ <b>Достигнут лимит устройств</b> ({limit}).\n\n"
     "Удалите одно из устройств или обратитесь в поддержку."
 )
 
 ERROR_SERVER_UNAVAILABLE = (
-    "⚠️ Выбранный сервер временно недоступен.\n"
+    "⚠️ <b>Выбранный сервер временно недоступен.</b>\n\n"
     "Попробуйте другую локацию или обратитесь в поддержку."
 )
 
-# Fallback-сообщения для непонятных вводов
 FALLBACK_MEDIA_TEXT = (
     "🤖 Я текстовый ассистент и пока не умею распознавать картинки, "
     "голосовые сообщения, стикеры или видео-кружочки.\n\n"
@@ -134,6 +109,5 @@ FALLBACK_UNKNOWN_TEXT = (
     "Пожалуйста, используйте кнопки меню внизу экрана."
 )
 
-# Ссылки на документы
 TOS_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19"
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-04-01-26"

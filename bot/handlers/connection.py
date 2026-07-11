@@ -36,7 +36,7 @@ async def _build_connections_screen(user: User, session) -> tuple[str, InlineKey
     text = CONNECTION_LIST_HEADER.format(count=profiles_count, limit=user.device_limit)
     builder = InlineKeyboardBuilder()
     if profiles_count == 0:
-        text += "\n_У вас пока нет подключённых устройств._"
+        text += "_У вас пока нет подключённых устройств._"
     else:
         for profile in profiles:
             server = profile.server
@@ -44,7 +44,7 @@ async def _build_connections_screen(user: User, session) -> tuple[str, InlineKey
             server_name = server.name if server else "Неизвестно"
             safe_device_name = html.escape(profile.device_name)
             safe_server_name = html.escape(server_name)
-            builder.button(text=f"⚙️ Настройки: {safe_device_name}", callback_data=f"manage_device:{profile.id}")
+            builder.button(text=f"⚙️ {safe_device_name}", callback_data=f"manage_device:{profile.id}")
             traffic_total = format_traffic(profile.traffic_down + profile.traffic_up)
             last_connected_text = (
                 DEVICE_RECENTLY_ACTIVE.format(last_connected=format_datetime(profile.last_connected))
@@ -56,10 +56,9 @@ async def _build_connections_screen(user: User, session) -> tuple[str, InlineKey
                 traffic_down=format_traffic(profile.traffic_down),
                 traffic_up=format_traffic(profile.traffic_up),
                 traffic_total=traffic_total
-            ) + "\n"
+            )
     if profiles_count < user.device_limit:
         builder.button(text="➕ Добавить устройство", callback_data="add_device")
-    builder.button(text="← Назад", callback_data="back_to_main_menu")
     builder.adjust(1)
     return text, builder
 
@@ -67,6 +66,10 @@ async def _build_connections_screen(user: User, session) -> tuple[str, InlineKey
 @router.message(F.text == "🔌 Подключение")
 async def show_connections(message: Message, state: FSMContext, db_user: User | None = None):
     await state.clear()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     user = db_user
     if not user:
         await message.answer("❌ Пользователь не найден.")
@@ -74,10 +77,10 @@ async def show_connections(message: Message, state: FSMContext, db_user: User | 
     session = await get_session()
     try:
         if not await SubscriptionService.check_access(session, user.telegram_id):
-            await message.answer(ERROR_NO_SUBSCRIPTION)
+            await message.answer(ERROR_NO_SUBSCRIPTION, parse_mode="HTML")
             return
         text, builder = await _build_connections_screen(user, session)
-        await message.answer(text, reply_markup=builder.as_markup())
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
     finally:
         await session.close()
 
@@ -92,7 +95,7 @@ async def back_to_connections(callback: CallbackQuery, state: FSMContext, db_use
     session = await get_session()
     try:
         text, builder = await _build_connections_screen(user, session)
-        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
         await callback.answer()
     except Exception as e:
         logger.error(f"Error returning to connections: {e}")
@@ -103,7 +106,6 @@ async def back_to_connections(callback: CallbackQuery, state: FSMContext, db_use
 
 @router.callback_query(F.data.startswith("manage_device:"))
 async def manage_device(callback: CallbackQuery, state: FSMContext):
-    """Карточка устройства"""
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
@@ -119,8 +121,8 @@ async def manage_device(callback: CallbackQuery, state: FSMContext):
         safe_device_name = html.escape(profile.device_name)
         safe_server_name = html.escape(server_name)
         text = (
-            f"📱 Управление устройством: <b>{safe_device_name}</b>\n"
-            f"─────────────────────────────\n"
+            f"📱 <b>Управление устройством</b>\n\n"
+            f"<b>{safe_device_name}</b>\n"
             f"📍 Локация: {flag} {safe_server_name}\n"
             f"📡 Протокол: {protocol}\n"
             f"📊 Трафик: ∑ {format_traffic(profile.traffic_down + profile.traffic_up)}\n"
@@ -139,7 +141,6 @@ async def manage_device(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("show_config:"))
 async def show_config(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
-    """Показать ключ подключения с возможностью копирования тапом"""
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
@@ -152,8 +153,6 @@ async def show_config(callback: CallbackQuery, state: FSMContext, db_user: User 
         if not user or profile.user_id != user.id:
             await callback.answer("⛔️ Нет доступа", show_alert=True)
             return
-            
-        # Отправляем отдельным сообщением. Тег <code> позволяет копировать текст в один тап.
         await callback.message.answer(
             f"🔑 <b>Ключ подключения для {html.escape(profile.device_name)}:</b>\n\n"
             f"<code>{html.escape(profile.raw_config)}</code>\n\n"
@@ -234,7 +233,7 @@ async def rename_device_process(message: Message, state: FSMContext):
             await update_profile(session, profile, device_name=new_name)
             await message.answer(
                 f"✅ Устройство успешно переименовано в <b>{html.escape(new_name)}</b>",
-                reply_markup=get_back_button(f"manage_device:{profile_id}"), 
+                reply_markup=get_back_button(f"manage_device:{profile_id}"),
                 parse_mode="HTML"
             )
             await state.clear()
@@ -242,13 +241,8 @@ async def rename_device_process(message: Message, state: FSMContext):
         await session.close()
 
 
-# ═══════════════════════════════════════════════════════════════
-# УДАЛЕНИЕ УСТРОЙСТВА С ПОДТВЕРЖДЕНИЕМ
-# ═══════════════════════════════════════════════════════════════
-
 @router.callback_query(F.data.startswith("request_delete_device:"))
 async def request_delete_device(callback: CallbackQuery, state: FSMContext):
-    """Показать экран подтверждения удаления"""
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
@@ -259,8 +253,7 @@ async def request_delete_device(callback: CallbackQuery, state: FSMContext):
             return
         safe_device_name = html.escape(profile.device_name)
         text = (
-            f"⚠️ <b>Подтверждение удаления</b>\n"
-            f"─────────────────────────────\n"
+            f"⚠️ <b>Подтверждение удаления</b>\n\n"
             f"Вы уверены, что хотите удалить устройство:\n"
             f"📱 <b>{safe_device_name}</b>?\n\n"
             f"<i>После удаления вам нужно будет создать устройство заново и обновить конфиг в приложении.</i>"
@@ -277,7 +270,6 @@ async def request_delete_device(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("cancel_delete_device:"))
 async def cancel_delete_device(callback: CallbackQuery, state: FSMContext):
-    """Отмена удаления — возврат к карточке устройства"""
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
@@ -293,8 +285,8 @@ async def cancel_delete_device(callback: CallbackQuery, state: FSMContext):
         safe_device_name = html.escape(profile.device_name)
         safe_server_name = html.escape(server_name)
         text = (
-            f"📱 Управление устройством: <b>{safe_device_name}</b>\n"
-            f"─────────────────────────────\n"
+            f"📱 <b>Управление устройством</b>\n\n"
+            f"<b>{safe_device_name}</b>\n"
             f"📍 Локация: {flag} {safe_server_name}\n"
             f"📡 Протокол: {protocol}\n"
             f"📊 Трафик: ∑ {format_traffic(profile.traffic_down + profile.traffic_up)}\n"
@@ -312,7 +304,6 @@ async def cancel_delete_device(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("confirm_delete_device:"))
 async def confirm_delete_device(callback: CallbackQuery, state: FSMContext):
-    """Подтверждённое удаление устройства"""
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
@@ -321,7 +312,6 @@ async def confirm_delete_device(callback: CallbackQuery, state: FSMContext):
         if not profile:
             await callback.answer("❌ Устройство уже удалено", show_alert=True)
             return
-
         await callback.answer("⏳ Удаляю устройство...", show_alert=False)
         server = await get_server_by_id(session, profile.server_id)
         if server:
@@ -332,13 +322,12 @@ async def confirm_delete_device(callback: CallbackQuery, state: FSMContext):
                 return
         else:
             logger.warning(f"Deleting orphan profile {profile.id} (server not found)")
-
         await delete_profile(session, profile)
         user = await get_user_by_telegram_id(session, callback.from_user.id)
         if not user:
             return
         text, builder = await _build_connections_screen(user, session)
-        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
         await callback.answer("🗑 Устройство успешно удалено", show_alert=True)
     except Exception as e:
         logger.error(f"Error deleting device: {e}")
@@ -346,10 +335,6 @@ async def confirm_delete_device(callback: CallbackQuery, state: FSMContext):
     finally:
         await session.close()
 
-
-# ═══════════════════════════════════════════════════════════════
-# СОЗДАНИЕ УСТРОЙСТВА
-# ═══════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "add_device")
 async def start_add_device(callback: CallbackQuery, state: FSMContext):
@@ -360,14 +345,14 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext):
         if not servers:
             await callback.answer("❌ Нет доступных локаций", show_alert=True)
             return
-        text = "🌍 Выберите локацию для подключения:\n"
+        text = "🌍 <b>Выберите локацию для подключения:</b>\n"
         builder = InlineKeyboardBuilder()
         for server in servers:
             flag = server.country_flag or "🌍"
             builder.button(text=f"{flag} {server.name}", callback_data=f"select_server:{server.id}")
         builder.button(text="← Назад", callback_data="back_to_connections")
         builder.adjust(1)
-        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
         await state.set_state(DeviceCreationStates.choose_server)
         await callback.answer()
     finally:
@@ -402,18 +387,14 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
     if not message.text:
         await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение.")
         return
-        
-    # ПРАВИЛЬНЫЙ блок прерывания операции
     if message.text.startswith("/") or message.text in REPLY_MENU_BUTTONS:
         await state.clear()
         await message.answer("⚠️ Операция прервана.", reply_markup=get_back_button("back_to_connections"))
         return
-        
     device_name = message.text.strip()
     if not device_name or len(device_name) > 16 or not DEVICE_NAME_REGEX.match(device_name):
         await message.answer("⚠️ Имя устройства должно быть от 1 до 16 символов (только латиница, цифры, пробелы и дефисы):")
         return
-        
     data = await state.get_data()
     server_id = data.get("server_id")
     session = await get_session()
@@ -428,13 +409,11 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             await message.answer("⚠️ Сервер использует неподдерживаемый протокол.")
             await state.clear()
             return
-            
         profiles_count = await get_user_profiles_count(session, user.id)
         if profiles_count >= user.device_limit:
-            await message.answer(ERROR_DEVICE_LIMIT_REACHED.format(limit=user.device_limit))
+            await message.answer(ERROR_DEVICE_LIMIT_REACHED.format(limit=user.device_limit), parse_mode="HTML")
             await state.clear()
             return
-
         await message.bot.send_chat_action(
             chat_id=message.from_user.id,
             action="typing"
@@ -445,12 +424,10 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
         expires_ts = await SubscriptionService.get_expires_timestamp(user)
         client = AmneziaClient(server.api_url, server.api_key)
         result = await client.create_user(client_name=client_name, expires_at=expires_ts)
-        
         if not result or not result.get("id") or not result.get("config"):
-            await message.answer(ERROR_SERVER_UNAVAILABLE)
+            await message.answer(ERROR_SERVER_UNAVAILABLE, parse_mode="HTML")
             await state.clear()
             return
-            
         try:
             profile = await create_profile(
                 session, user_id=user.id, server_id=server.id,
@@ -466,16 +443,12 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             await message.answer("❌ Произошла ошибка при создании устройства. Попробуйте еще раз.")
             await state.clear()
             return
-            
         await state.clear()
-        
-        # ПРАВИЛЬНЫЙ блок успешного создания
+        # Минималистичный вывод: ключ НЕ показывается, только кнопки
         await message.answer(
-            f"✅ <b>Устройство добавлено!</b>\n"
+            f"✅ <b>Устройство добавлено!</b>\n\n"
             f"📱 {html.escape(device_name)} ({server.country_flag} {html.escape(server.name)})\n\n"
-            f"🔑 <b>Ключ подключения:</b>\n"
-            f"<code>{html.escape(profile.raw_config)}</code>\n\n"
-            f"<i>💡 Нажмите на моноширинный текст выше, чтобы скопировать ключ в буфер обмена.</i>",
+            f"<i>Используйте кнопки ниже, чтобы получить ключ подключения.</i>",
             reply_markup=get_device_keyboard(profile.id),
             parse_mode="HTML"
         )

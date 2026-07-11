@@ -16,6 +16,10 @@ router = Router()
 
 @router.message(F.text == "🛠 Админка")
 async def show_admin(message: Message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
     settings = get_settings()
     telegram_id = message.from_user.id
     if telegram_id not in settings.ADMIN_IDS:
@@ -28,9 +32,8 @@ async def show_admin(message: Message):
         new_users_24h = await get_new_users_count_24h(session)
         free_ips = await get_total_free_ips(session)
         text = (
-            f"🛠 <b>Админ-панель</b>\n"
-            f"─────────────────────────────\n"
-            f"📊 <b>Статистика:</b>\n"
+            f"🛠 <b>Админ-панель</b>\n\n"
+            f"📊 <b>Статистика:</b>\n\n"
             f"👥 Всего пользователей: {total_users}\n"
             f"✅ Активных подписок: {active_subs}\n"
             f"🆕 Новых за 24ч: {new_users_24h}\n"
@@ -59,9 +62,8 @@ async def back_to_admin(callback: CallbackQuery):
         new_users_24h = await get_new_users_count_24h(session)
         free_ips = await get_total_free_ips(session)
         text = (
-            f"🛠 <b>Админ-панель</b>\n"
-            f"─────────────────────────────\n"
-            f"📊 <b>Статистика:</b>\n"
+            f"🛠 <b>Админ-панель</b>\n\n"
+            f"📊 <b>Статистика:</b>\n\n"
             f"👥 Всего пользователей: {total_users}\n"
             f"✅ Активных подписок: {active_subs}\n"
             f"🆕 Новых за 24ч: {new_users_24h}\n"
@@ -79,7 +81,6 @@ async def back_to_admin(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_audit")
 async def show_audit_log(callback: CallbackQuery):
-    """Показать аудит-лог последних действий админов."""
     settings = get_settings()
     if callback.from_user.id not in settings.ADMIN_IDS:
         await callback.answer("⛔️ Нет доступа", show_alert=True)
@@ -88,8 +89,7 @@ async def show_audit_log(callback: CallbackQuery):
     try:
         logs = await get_recent_audit_logs(session, limit=10)
         text = (
-            f"🛠 Админка › 📜 <b>Аудит-лог</b>\n"
-            f"─────────────────────────────\n"
+            f"🛠 Админка › 📜 <b>Аудит-лог</b>\n\n"
             f"<i>Последние 10 действий администраторов:</i>\n\n"
         )
         if not logs:
@@ -113,11 +113,11 @@ async def show_audit_log(callback: CallbackQuery):
                 target_info = ""
                 if log.target_type and log.target_id:
                     target_info = f" {log.target_type} <code>{log.target_id}</code>"
-                details = f"\n   <i>{log.details}</i>" if log.details else ""
+                details = f"\n<i>{log.details}</i>" if log.details else ""
                 text += (
                     f"[{date}]\n"
-                    f"   Admin <code>{log.admin_id}</code>\n"
-                    f"   ➡️ {action_text}{target_info}{details}\n\n"
+                    f"Admin <code>{log.admin_id}</code>\n"
+                    f"➡️ {action_text}{target_info}{details}\n\n"
                 )
         await callback.message.edit_text(
             text,
