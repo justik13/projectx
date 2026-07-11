@@ -17,7 +17,7 @@ class User(Base):
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tos_accepted: Mapped[bool] = mapped_column(Boolean, default=True)
     subscription_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-    device_limit: Mapped[int] = mapped_column(Integer, default=3)
+    device_limit: Mapped[int] = mapped_column(Integer, default=2)
     referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     referral_days: Mapped[int] = mapped_column(Integer, default=0)
     last_payment_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
@@ -87,6 +87,7 @@ class Tariff(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    device_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)  # ← НОВОЕ ПОЛЕ
     price_rub: Mapped[int] = mapped_column(Integer, nullable=False)
     price_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

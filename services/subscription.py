@@ -25,25 +25,41 @@ class SubscriptionService:
         user = await get_user_by_telegram_id(session, telegram_id)
         if user:
             return user
+
         referred_by = None
         if ref_id is not None and ref_id != telegram_id:
             ref_user = await get_user_by_telegram_id(session, ref_id)
             if ref_user:
                 referred_by = ref_id
+
         return await create_user(session, telegram_id, username, first_name, referred_by)
 
     @staticmethod
-    async def extend_subscription(session: AsyncSession, telegram_id: int, days: int) -> Optional[User]:
+    async def extend_subscription(
+        session: AsyncSession,
+        telegram_id: int,
+        days: int,
+        new_device_limit: Optional[int] = None,
+    ) -> Optional[User]:
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user:
             return None
+
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        current_end = user.subscription_end if (user.subscription_end and user.subscription_end > now) else now
+        current_end = user.subscription_end if (
+            user.subscription_end and user.subscription_end > now
+        ) else now
+
         new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else current_end + timedelta(days=days)
         user.subscription_end = new_end
         user.notified_3d = False
         user.notified_1d = False
         user.notified_2h = False
+
+        # Обновляем лимит устройств если передан
+        if new_device_limit is not None:
+            user.device_limit = new_device_limit
+
         await session.commit()
         return user
 

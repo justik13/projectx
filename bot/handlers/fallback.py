@@ -42,3 +42,8 @@ async def handle_unknown_text(message: Message):
         return
 
     await message.answer(texts.FALLBACK_UNKNOWN_TEXT)
+
+@router.callback_query(F.data == "noop_group_header")
+async def noop_group_header(callback: CallbackQuery):
+    """Некликабельный заголовок группы тарифов."""
+    await callback.answer()
