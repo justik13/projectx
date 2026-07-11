@@ -6,8 +6,8 @@ from aiogram.utils.chat_action import ChatActionMiddleware
 from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands, ErrorEvent
 from config.settings import get_settings
 from database.connection import init_db, close_db
-from services.background_worker import start_background_worker
-from bot.middlewares import UserContextMiddleware, ThrottlingMiddleware
+from services.workers import start_background_worker
+from bot.middlewares import UserContextMiddleware, ThrottlingMiddleware, DBSessionMiddleware
 from cryptography.fernet import Fernet
 from services.amnezia_client import close_http_session
 
@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 
 async def global_error_handler(event: ErrorEvent):
-    """🔥 Глобальный обработчик непредвиденных ошибок"""
     logger.critical(f"Unhandled exception: {event.exception}", exc_info=True)
     try:
         if event.update.callback_query:
@@ -29,8 +28,7 @@ async def global_error_handler(event: ErrorEvent):
             )
         elif event.update.message:
             await event.update.message.answer(
-                "⚠️ <b>Ошибка сервера</b>\n"
-                "Мы уже чиним проблему. Попробуйте позже.",
+                "⚠️ <b>Ошибка сервера</b>\nМы уже чиним проблему. Попробуйте позже.",
                 parse_mode="HTML"
             )
     except Exception:
@@ -45,7 +43,7 @@ async def setup_bot_commands(bot: Bot):
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-    logger.info("Bot commands and menu button configured")
+    logger.info("Bot commands configured")
 
 
 async def setup_bot() -> tuple[Bot, Dispatcher]:
@@ -54,14 +52,16 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
-    # Регистрация мидлварей
+    # Middleware (порядок важен!)
+    dp.message.middleware(DBSessionMiddleware())
+    dp.callback_query.middleware(DBSessionMiddleware())
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
     dp.message.middleware(ThrottlingMiddleware(limit=1.0))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.5))
     dp.message.middleware(ChatActionMiddleware())
 
-    # Импорт и регистрация роутеров
+    # Роутеры
     from bot.handlers.start import router as start_router
     from bot.handlers.profile import router as profile_router
     from bot.handlers.connection import router as connection_router
@@ -82,11 +82,8 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     ]:
         dp.include_router(r)
 
-    # Регистрация глобального обработчика ошибок
     dp.errors.register(global_error_handler)
-
     await setup_bot_commands(bot)
-    logger.info("Все роутеры зарегистрированы")
     return bot, dp
 
 
@@ -104,8 +101,6 @@ async def main():
 
         logger.info("Инициализация БД...")
         await init_db()
-        logger.info("БД инициализирована")
-
         bot, dp = await setup_bot()
         await start_background_worker(bot)
         logger.info("Запуск polling...")

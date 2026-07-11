@@ -1,30 +1,34 @@
 from datetime import datetime
 
-PERMANENT_SUBSCRIPTION_DAYS = 7777
+# Subscription
+PERMANENT_SUBSCRIPTION_DAYS = 36500
 PERMANENT_END_DATE = datetime(2100, 1, 1)
 
+# Telegram limits
 TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
 BROADCAST_DELAY = 0.04
 
+# Server limits
 MAX_CLIENTS_HARD_LIMIT = 10000
 DEFAULT_SUBNET_CAPACITY = 250
 
+# Worker intervals (seconds)
 TRAFFIC_SYNC_INTERVAL = 900
 NOTIFICATION_INTERVAL = 1800
 CLEANUP_INTERVAL = 86400
 STALE_PAYMENT_THRESHOLD = 3600
 
+# API
 API_CONCURRENCY_LIMIT = 20
 API_RETRY_COUNT = 2
 API_TIMEOUT = 15
+AMNEZIA_PROTOCOL = "amneziawg2"
 
+# Pagination
 ITEMS_PER_PAGE = 10
 
+# UI
 REPLY_MENU_BUTTONS = [
-    "👤 Профиль",
-    "🔌 Подключение", 
-    "💳 Оплата",
-    "💬 Поддержка",
-    "🛠 Админка"
+    "👤 Профиль", "🔌 Подключение", "💳 Оплата", "💬 Поддержка", "🛠 Админка"
 ]
