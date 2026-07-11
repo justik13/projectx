@@ -1,8 +1,4 @@
 #!/bin/bash
-# ═══════════════════════════════════════════════════════════════
-# ProjectX Bot — Deploy Script (Production Ready)
-# Автоматическая установка и настройка бота на VPS (Ubuntu/Debian)
-# ═══════════════════════════════════════════════════════════════
 set -e
 
 RED='\033[0;31m'
@@ -25,11 +21,9 @@ success() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; }
 error() { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
 
-# 🛡️ Утилита для безопасной записи переменных в .env (защита от инъекций $, `, \)
 write_env_var() {
     local key=$1
     local value=$2
-    # Экранируем одинарные кавычки, если они вдруг есть в значении
     value="${value//\'/\'\\\'\'}"
     echo "${key}='${value}'" >> "$PROJECT_DIR/.env"
 }
@@ -44,7 +38,6 @@ check_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         log "ОС: $PRETTY_NAME"
-        # 🔥 FIX P0: Явная проверка поддерживаемых ОС
         if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
             error "Скрипт поддерживает только Ubuntu и Debian. Обнаружена ОС: $ID"
         fi
@@ -57,7 +50,6 @@ install_dependencies() {
     log "Обновление пакетов..."
     apt-get update -qq
     log "Установка системных зависимостей..."
-    # 🔥 FIX P0: Обработка ошибок apt-get + добавлен rsync
     if ! apt-get install -y -qq \
         python3 \
         python3-venv \
@@ -89,7 +81,6 @@ migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
         log "Изоляция кодовой базы: синхронизация проекта в безопасную директорию $PROJECT_DIR..."
         mkdir -p "$PROJECT_DIR"
-        # 🔥 FIX P0: Используем rsync с жесткими исключениями, чтобы не затереть БД и .env
         if ! rsync -a --delete \
             --exclude='.env' \
             --exclude='bot_data.db' \
@@ -146,7 +137,6 @@ setup_env() {
     echo -e "${BLUE}[1/4]${NC} Telegram Bot Token (получить у @BotFather)"
     read -p "Введите BOT_TOKEN: " BOT_TOKEN
     [ -z "$BOT_TOKEN" ] && error "BOT_TOKEN не может быть пустым"
-    # 🔥 FIX P0: Валидация формата токена
     if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then
         error "Неверный формат BOT_TOKEN. Ожидается формат 123456789:ABCdefGHI..."
     fi
@@ -155,7 +145,6 @@ setup_env() {
     echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
     read -p "Введите ADMIN_IDS: " ADMIN_IDS
     [ -z "$ADMIN_IDS" ] && error "ADMIN_IDS не может быть пустым"
-    # 🔥 FIX P0: Валидация формата ID
     if [[ ! "$ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
         error "Неверный формат ADMIN_IDS. Ожидались только числовые ID через запятую (например: 123456789,987654321)"
     fi
@@ -172,15 +161,11 @@ setup_env() {
     read -p "Лимит устройств по умолчанию [3]: " DEFAULT_DEVICE_LIMIT
     DEFAULT_DEVICE_LIMIT=${DEFAULT_DEVICE_LIMIT:-3}
 
-    # 🔥 FIX P0: Генерируем ключ через встроенный secrets (без cryptography)
     log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
     DB_ENCRYPTION_KEY=$(python3 -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
     success "Ключ шифрования успешно сгенерирован"
 
-    # 🔥 FIX P0: Безопасная запись .env (защита от инъекций $, `, \)
     cat > "$PROJECT_DIR/.env" << 'HEADER'
-# ProjectX Bot Configuration
-# Создано автоматически
 HEADER
     
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
@@ -209,7 +194,6 @@ asyncio.run(init_db())
 
 setup_systemd() {
     log "Настройка и изоляция systemd сервиса..."
-    # 🔥 FIX: Игнорируем ошибку, если сервис еще не запущен (защита от set -e)
     systemctl is-active --quiet "$SERVICE_NAME" && systemctl stop "$SERVICE_NAME" || true
 
     cat > "$SERVICE_FILE" << EOF
@@ -257,17 +241,14 @@ ENV_FILE="$PROJECT_DIR/.env"
 DATE=\$(date +%Y%m%d_%H%M%S)
 
 if [ -f "\$DB_FILE" ]; then
-    # Бэкап БД
     sqlite3 "\$DB_FILE" ".backup '\$BACKUP_DIR/bot_data_\$DATE.db'"
     gzip "\$BACKUP_DIR/bot_data_\$DATE.db"
 
-    # 🔥 КРИТИЧНО: Бэкап ключей шифрования (Fernet)
     if [ -f "\$ENV_FILE" ]; then
         cp "\$ENV_FILE" "\$BACKUP_DIR/env_\$DATE.backup"
         gzip "\$BACKUP_DIR/env_\$DATE.backup"
     fi
 
-    # Ротация (30 дней)
     find "\$BACKUP_DIR" -name "bot_data_*.db.gz" -mtime +30 -delete
     find "\$BACKUP_DIR" -name "env_*.backup.gz" -mtime +30 -delete
 
@@ -277,7 +258,6 @@ EOF
     chmod +x /usr/local/bin/projectx-backup.sh
 
     CRON_JOB="0 3 * * * /usr/local/bin/projectx-backup.sh >> /var/log/projectx-backup.log 2>&1"
-    # 🔥 FIX: Безопасное добавление в cron (игнорируем ошибку, если crontab пуст)
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "$CRON_JOB") | crontab -
     
     /usr/local/bin/projectx-backup.sh || true
@@ -290,7 +270,6 @@ setup_monitoring() {
 #!/bin/bash
 SERVICE_NAME="$SERVICE_NAME"
 BOT_TOKEN_FILE="$PROJECT_DIR/.env"
-# 🔥 FIX P0: Безопасный парсинг .env (cut -d'=' -f2- + удаление кавычек)
 ADMIN_IDS=\$(grep "^ADMIN_IDS=" "\$BOT_TOKEN_FILE" | cut -d'=' -f2- | tr -d '"' | tr -d "'" | cut -d',' -f1)
 BOT_TOKEN=\$(grep "^BOT_TOKEN=" "\$BOT_TOKEN_FILE" | cut -d'=' -f2- | tr -d '"' | tr -d "'")
 
@@ -307,7 +286,6 @@ EOF
     chmod +x /usr/local/bin/projectx-healthcheck.sh
 
     CRON_HEALTH="*/5 * * * * /usr/local/bin/projectx-healthcheck.sh"
-    # 🔥 FIX: Безопасное добавление в cron
     (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "$CRON_HEALTH") | crontab -
     success "Мониторинг доступности настроен (проверка каждые 5 минут)"
 }
@@ -369,7 +347,6 @@ main() {
     install_dependencies
     migrate_to_opt
     
-    # 🔥 FIX P0: Сначала ставим venv и зависимости, потом генерируем .env
     setup_venv
     setup_env
     
