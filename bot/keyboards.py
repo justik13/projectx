@@ -65,7 +65,6 @@ def get_connection_keyboard(has_subscription: bool = True) -> InlineKeyboardMark
 
 
 def get_device_keyboard(profile_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура для управления устройством"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить имя", callback_data=f"rename_device:{profile_id}")
     builder.button(text="🔑 Показать ключ", callback_data=f"show_config:{profile_id}")
@@ -77,7 +76,6 @@ def get_device_keyboard(profile_id: int) -> InlineKeyboardMarkup:
 
 
 def get_device_delete_confirm_keyboard(profile_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура подтверждения удаления устройства"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Да, удалить", callback_data=f"confirm_delete_device:{profile_id}")
     builder.button(text="❌ Отмена", callback_data=f"cancel_delete_device:{profile_id}")
