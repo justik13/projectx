@@ -269,6 +269,7 @@ ERROR_TECHNICAL_MESSAGE = (
 )
 ERROR_TECHNICAL_ALERT = "⚠️ Ведутся технические работы. Попробуйте через минуту."
 ERROR_TOO_FREQUENT = "⏳ Слишком часто!"
+ERROR_SERVER_UNAVAILABLE_GENERIC = "⚠️ Сервер недоступен. Попробуйте позже."
 
 # --- Amnezia API и серверы ---
 ERROR_SERVER_UNREACHABLE = (
