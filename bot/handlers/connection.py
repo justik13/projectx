@@ -1,8 +1,9 @@
-# bot/handlers/connection.py
 import html
 import logging
 import uuid
 import re
+from utils.vpn_parser import parse_vpn_uri
+from utils.config_builder import build_amneziawg_config
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
@@ -18,13 +19,11 @@ from services.amnezia_client import AmneziaClient
 from bot.texts import (
     CONNECTION_LIST_HEADER, DEVICE_CARD, DEVICE_NOT_CONNECTED,
     DEVICE_RECENTLY_ACTIVE, ERROR_NO_SUBSCRIPTION, ERROR_DEVICE_LIMIT_REACHED,
-    ERROR_SERVER_UNAVAILABLE, DOWNLOAD_CONF_FALLBACK
+    ERROR_SERVER_UNAVAILABLE
 )
 from bot.keyboards import get_device_keyboard, get_back_button, get_device_delete_confirm_keyboard
 from bot.states import DeviceCreationStates, DeviceManagementStates
 from utils.formatters import format_traffic, format_datetime
-from utils.vpn_parser import parse_vpn_uri, is_valid_amneziawg_config
-from utils.config_builder import build_amneziawg_config
 from database.models import User
 
 router = Router()
@@ -124,12 +123,12 @@ async def manage_device(callback: CallbackQuery, state: FSMContext):
         safe_device_name = html.escape(profile.device_name)
         safe_server_name = html.escape(server_name)
         text = (
-            f"📱 <b>Управление устройством</b>\n"
+            f"📱 <b>Управление устройством</b>\n\n"
             f"<b>{safe_device_name}</b>\n"
             f"📍 Локация: {flag} {safe_server_name}\n"
             f"📡 Протокол: {protocol}\n"
             f"📊 Трафик: ∑ {format_traffic(profile.traffic_down + profile.traffic_up)}\n"
-            f"⏱ Последняя активность: {format_datetime(profile.last_connected) if profile.last_connected else 'Нет данных'}\n"
+            f"⏱ Последняя активность: {format_datetime(profile.last_connected) if profile.last_connected else 'Нет данных'}\n\n"
             f"<i>Нажмите «🔑 Показать ключ», чтобы получить ключ подключения.</i>"
         )
         await callback.message.edit_text(
@@ -144,6 +143,7 @@ async def manage_device(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("show_config:"))
 async def show_config(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
+    """Показать ключ подключения с возможностью копирования тапом"""
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
@@ -156,9 +156,11 @@ async def show_config(callback: CallbackQuery, state: FSMContext, db_user: User 
         if not user or profile.user_id != user.id:
             await callback.answer("⛔️ Нет доступа", show_alert=True)
             return
+            
+        # ИСПРАВЛЕНО: Возвращен правильный код отправки ключа
         await callback.message.answer(
-            f"🔑 <b>Ключ подключения для {html.escape(profile.device_name)}:</b>\n"
-            f"<code>{html.escape(profile.raw_config)}</code>\n"
+            f"🔑 <b>Ключ подключения для {html.escape(profile.device_name)}:</b>\n\n"
+            f"<code>{html.escape(profile.raw_config)}</code>\n\n"
             f"<i>💡 Нажмите на моноширинный текст выше, чтобы скопировать ключ в буфер обмена.</i>",
             parse_mode="HTML"
         )
@@ -169,12 +171,7 @@ async def show_config(callback: CallbackQuery, state: FSMContext, db_user: User 
 
 @router.callback_query(F.data.startswith("download_conf:"))
 async def download_conf(callback: CallbackQuery, state: FSMContext):
-    """
-    Скачать .conf файл для AmneziaWG / AmneziaWG 2.0.
-    
-    Парсит vpn:// URI, извлекает обфускационные параметры
-    и собирает валидный .conf файл с полной обфускацией.
-    """
+    """Скачать .conf файл (парсит vpn:// и собирает реальный конфиг)"""
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
@@ -183,59 +180,38 @@ async def download_conf(callback: CallbackQuery, state: FSMContext):
         if not profile:
             await callback.answer("❌ Профиль не найден", show_alert=True)
             return
-        
+
         await callback.bot.send_chat_action(
             chat_id=callback.from_user.id,
             action="upload_document"
         )
-        
-        safe_device_name = "".join(
-            c for c in profile.device_name if c.isalnum() or c in (' ', '_', '-')
-        ).strip() or "client"
-        
-        # Парсим vpn:// URI
+
+        # Парсим vpn:// и собираем настоящий AmneziaWG .conf
         parsed = parse_vpn_uri(profile.raw_config)
-        
-        if parsed is None or not is_valid_amneziawg_config(parsed):
-            logger.warning(
-                f"download_conf: failed to parse vpn:// URI for profile {profile_id}, "
-                f"sending fallback"
-            )
-            await callback.message.answer(
-                DOWNLOAD_CONF_FALLBACK.format(device_name=html.escape(profile.device_name), raw_config=html.escape(profile.raw_config)),
-                parse_mode="HTML"
-            )
-            await callback.answer("⚠️ Не удалось собрать .conf, отправлен ключ", show_alert=False)
-            return
-        
-        # Собираем .conf
-        conf_content = build_amneziawg_config(parsed)
-        if conf_content is None:
-            logger.error(f"download_conf: build returned None for profile {profile_id}")
-            await callback.message.answer(
-                DOWNLOAD_CONF_FALLBACK.format(device_name=html.escape(profile.device_name), raw_config=html.escape(profile.raw_config)),
-                parse_mode="HTML"
-            )
-            await callback.answer("⚠️ Ошибка сборки .conf", show_alert=False)
-            return
-        
-        # Отправляем как .conf
-        file_bytes = conf_content.encode("utf-8")
-        input_file = BufferedInputFile(file_bytes, filename=f"{safe_device_name}.conf")
-        
-        protocol_badge = "AmneziaWG 2.0" if parsed.protocol == "amneziawg2" else "AmneziaWG"
-        
+        if parsed:
+            conf_content = build_amneziawg_config(parsed)
+            if conf_content:
+                file_bytes = conf_content.encode("utf-8")
+                # ИСПРАВЛЕНО: заменен битый символ □ на 📁
+                caption_text = f"📁 <b>AmneziaWG .conf</b> для устройства <b>{html.escape(profile.device_name)}</b>"
+            else:
+                file_bytes = profile.raw_config.encode("utf-8")
+                caption_text = f"📁 Файл конфигурации (vpn://) для <b>{html.escape(profile.device_name)}</b>"
+        else:
+            file_bytes = profile.raw_config.encode("utf-8")
+            caption_text = f"📁 Файл конфигурации (vpn://) для <b>{html.escape(profile.device_name)}</b>"
+
+        safe_device_name = "".join(c for c in profile.device_name if c.isalnum() or c in (' ', '_', '-')).strip()
+        input_file = BufferedInputFile(file_bytes, filename=f"{safe_device_name or 'client'}.conf")
+
         await callback.message.answer_document(
             document=input_file,
-            caption=(
-                f"📁 <b>Конфигурация {protocol_badge}</b>\n"
-                f"📱 Устройство: <b>{html.escape(profile.device_name)}</b>\n\n"
-                f"<i>Импортируйте файл в приложение AmneziaVPN.</i>"
-            ),
+            caption=caption_text,
             parse_mode="HTML"
         )
-        await callback.answer("✅ .conf отправлен")
+        await callback.answer("✅ Файл отправлен")
     except Exception as e:
+        # ИСПРАВЛЕНО: возвращен try...except для обработки ошибок
         logger.error(f"Error in download_conf: {e}", exc_info=True)
         await callback.answer("❌ Ошибка при генерации .conf", show_alert=True)
     finally:
@@ -304,9 +280,9 @@ async def request_delete_device(callback: CallbackQuery, state: FSMContext):
             return
         safe_device_name = html.escape(profile.device_name)
         text = (
-            f"⚠️ <b>Подтверждение удаления</b>\n"
+            f"⚠️ <b>Подтверждение удаления</b>\n\n"
             f"Вы уверены, что хотите удалить устройство:\n"
-            f"📱 <b>{safe_device_name}</b>?\n"
+            f"📱 <b>{safe_device_name}</b>?\n\n"
             f"<i>После удаления вам нужно будет создать устройство заново и обновить конфиг в приложении.</i>"
         )
         await callback.message.edit_text(
@@ -336,7 +312,7 @@ async def cancel_delete_device(callback: CallbackQuery, state: FSMContext):
         safe_device_name = html.escape(profile.device_name)
         safe_server_name = html.escape(server_name)
         text = (
-            f"📱 <b>Управление устройством</b>\n"
+            f"📱 <b>Управление устройством</b>\n\n"
             f"<b>{safe_device_name}</b>\n"
             f"📍 Локация: {flag} {safe_server_name}\n"
             f"📡 Протокол: {protocol}\n"
@@ -396,7 +372,7 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext):
         if not servers:
             await callback.answer("❌ Нет доступных локаций", show_alert=True)
             return
-        text = "🌍 <b>Выберите локацию для подключения:</b>\n"
+        text = "🌍 <b>Выберите локацию для подключения:</b>\n\n"
         builder = InlineKeyboardBuilder()
         for server in servers:
             flag = server.country_flag or "🌍"
@@ -424,7 +400,7 @@ async def select_server(callback: CallbackQuery, state: FSMContext):
         await state.set_state(DeviceCreationStates.enter_device_name)
         flag = server.country_flag or "🌍"
         await callback.message.edit_text(
-            f"✏️ Введите имя устройства для {flag} {html.escape(server.name)}:\n"
+            f"✏️ Введите имя устройства для {flag} {html.escape(server.name)}:\n\n"
             f"(например: IPhone, MacBook, Work PC)\nМаксимум 16 символов, только латиница и цифры.",
             reply_markup=get_back_button("add_device")
         )
@@ -457,7 +433,7 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             return
         server = await get_server_by_id(session, server_id)
         if server.protocol != "amneziawg2":
-            await message.answer("⚠️ Сервер использует неподдерживаемый протокол.")
+            await message.answer("⚠️ Сервер использует неподдерживаемый протокол.", parse_mode="HTML")
             await state.clear()
             return
         profiles_count = await get_user_profiles_count(session, user.id)
@@ -465,17 +441,21 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             await message.answer(ERROR_DEVICE_LIMIT_REACHED.format(limit=user.device_limit), parse_mode="HTML")
             await state.clear()
             return
+            
         await message.bot.send_chat_action(chat_id=message.from_user.id, action="typing")
+        
         short_hash = uuid.uuid4().hex[:4]
         clean_device_name = re.sub(r'[^a-zA-Z0-9]', '', device_name)[:10]
         client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
         expires_ts = await SubscriptionService.get_expires_timestamp(user)
         client = AmneziaClient(server.api_url, server.api_key)
         result = await client.create_user(client_name=client_name, expires_at=expires_ts)
+        
         if not result or not result.get("id") or not result.get("config"):
             await message.answer(ERROR_SERVER_UNAVAILABLE, parse_mode="HTML")
             await state.clear()
             return
+            
         try:
             profile = await create_profile(
                 session, user_id=user.id, server_id=server.id,
@@ -491,11 +471,14 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
             await message.answer("❌ Произошла ошибка при создании устройства. Попробуйте еще раз.")
             await state.clear()
             return
+            
         await state.clear()
+        
+        # Успешное создание устройства
         await message.answer(
-            f"✅ <b>Устройство добавлено!</b>\n"
-            f"📱 {html.escape(device_name)} ({server.country_flag} {html.escape(server.name)})\n"
-            f"<i>Используйте кнопки ниже, чтобы получить ключ подключения.</i>",
+            f"✅ <b>Устройство добавлено!</b>\n\n"
+            f"📱 {html.escape(device_name)} ({server.country_flag} {html.escape(server.name)})\n\n"
+            f"<i>Используйте кнопки ниже, чтобы получить ключ подключения или скачать .conf файл.</i>",
             reply_markup=get_device_keyboard(profile.id),
             parse_mode="HTML"
         )

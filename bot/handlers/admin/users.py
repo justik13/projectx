@@ -47,11 +47,10 @@ async def show_users_list(callback: CallbackQuery, state: FSMContext):
         total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
         users = await get_users_paginated(session, page=1, per_page=USERS_PER_PAGE)
         text, kb = await _build_users_list_text_and_kb(users, 1, total_pages, total_users)
-        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
     finally:
         await session.close()
-
 
 @router.callback_query(F.data.startswith("admin_users_page:"))
 async def users_pagination(callback: CallbackQuery, state: FSMContext):
@@ -66,18 +65,19 @@ async def users_pagination(callback: CallbackQuery, state: FSMContext):
         total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
         users = await get_users_paginated(session, page=page, per_page=USERS_PER_PAGE)
         text, kb = await _build_users_list_text_and_kb(users, page, total_pages, total_users)
-        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
     finally:
         await session.close()
 
 
-async def _build_users_list_text_and_kb(users, page: int, total_pages: int, total: int) -> tuple[str, InlineKeyboardBuilder]:
+async def _build_users_list_text_and_kb(users, page: int, total_pages: int, total: int) -> tuple[str, InlineKeyboardMarkup]:
     text = (
-        f"🛠 Админка › 👥 <b>Пользователи</b>\n"
+        f"🛠 Админка › 👥 <b>Пользователи</b>\n\n"
         f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
     )
     builder = InlineKeyboardBuilder()
+    
     if not users:
         text += "_Пользователей пока нет_\n"
     else:
@@ -91,19 +91,16 @@ async def _build_users_list_text_and_kb(users, page: int, total_pages: int, tota
             builder.button(text=btn_text, callback_data=f"admin_user_card:{user.telegram_id}")
     
     # Кнопки пагинации
-    nav_buttons = []
     if page > 1:
-        nav_buttons.append(("⬅️", f"admin_users_page:{page - 1}"))
+        builder.button(text="⬅️", callback_data=f"admin_users_page:{page - 1}")
     if page < total_pages:
-        nav_buttons.append(("➡️", f"admin_users_page:{page + 1}"))
-    
-    for btn_text, btn_data in nav_buttons:
-        builder.button(text=btn_text, callback_data=btn_data)
+        builder.button(text="➡️", callback_data=f"admin_users_page:{page + 1}")
     
     builder.button(text="🔍 Поиск по ID", callback_data="admin_users_search")
     builder.button(text="← В админку", callback_data="admin_menu")
+    
     builder.adjust(1)
-    return text, builder
+    return text, builder.as_markup()
 
 
 @router.callback_query(F.data == "admin_users_search")
