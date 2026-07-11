@@ -64,18 +64,11 @@ def get_connection_keyboard(has_subscription: bool = True) -> InlineKeyboardMark
     return builder.as_markup()
 
 
-def get_device_keyboard(profile_id: int, raw_config: str) -> InlineKeyboardMarkup:
-    """
-    Клавиатура для управления устройством.
-    raw_config — ключ подключения для копирования.
-    """
+def get_device_keyboard(profile_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура для управления устройством"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить имя", callback_data=f"rename_device:{profile_id}")
-    # 🔥 Нативная кнопка копирования (copy_text) — ключ копируется в буфер обмена
-    builder.button(
-        text="🔑 Скопировать ключ",
-        copy_text=CopyTextButton(text=raw_config)
-    )
+    builder.button(text="🔑 Показать ключ", callback_data=f"show_config:{profile_id}")
     builder.button(text="📥 Скачать .conf", callback_data=f"download_conf:{profile_id}")
     builder.button(text="🗑 Удалить устройство", callback_data=f"request_delete_device:{profile_id}")
     builder.button(text="← К списку устройств", callback_data="back_to_connections")

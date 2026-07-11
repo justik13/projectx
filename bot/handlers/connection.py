@@ -362,7 +362,15 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
         return
     if message.text.startswith("/") or message.text in REPLY_MENU_BUTTONS:
         await state.clear()
-        await message.answer("⚠️ Операция прервана.", reply_markup=get_back_button("back_to_connections"))
+        await message.answer(
+            f"✅ <b>Устройство добавлено!</b>\n"
+            f"📱 {html.escape(device_name)} ({server.country_flag} {html.escape(server.name)})\n\n"
+            f"🔑 <b>Ключ подключения:</b>\n"
+            f"<code>{html.escape(profile.raw_config)}</code>\n\n"
+            f"<i>💡 Нажмите на моноширинный текст выше, чтобы скопировать ключ в буфер обмена.</i>",
+            reply_markup=get_device_keyboard(profile.id),
+            parse_mode="HTML"
+        )
         return
     device_name = message.text.strip()
     if not device_name or len(device_name) > 16 or not DEVICE_NAME_REGEX.match(device_name):
@@ -436,9 +444,9 @@ async def enter_device_name(message: Message, state: FSMContext, db_user: User |
         await session.close()
 
 
-@router.callback_query(F.data.startswith("copy_config:"))
-async def copy_config(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
-    """Legacy handler — оставлен для совместимости, но теперь используется copy_text"""
+@router.callback_query(F.data.startswith("show_config:"))
+async def show_config(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
+    """Показать ключ подключения с возможностью копирования тапом"""
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     session = await get_session()
@@ -446,14 +454,19 @@ async def copy_config(callback: CallbackQuery, state: FSMContext, db_user: User 
         profile = await get_profile_by_id(session, profile_id)
         user = db_user
         if not profile:
-            await callback.answer("❌ Конфигурация не найдена или была удалена.", show_alert=True)
+            await callback.answer("❌ Конфигурация не найдена.", show_alert=True)
             return
         if not user or profile.user_id != user.id:
             await callback.answer("⛔️ Нет доступа", show_alert=True)
             return
+            
+        # Отправляем отдельным сообщением для удобства копирования
         await callback.message.answer(
-            f"🔑 Ключ подключения для {html.escape(profile.device_name)}:\n"
-            f"<code>{html.escape(profile.raw_config)}</code>", parse_mode="HTML")
+            f"🔑 <b>Ключ подключения для {html.escape(profile.device_name)}:</b>\n\n"
+            f"<code>{html.escape(profile.raw_config)}</code>\n\n"
+            f"<i>💡 Нажмите на моноширинный текст выше, чтобы скопировать ключ в буфер обмена.</i>",
+            parse_mode="HTML"
+        )
         await callback.answer("✅ Ключ отправлен")
     finally:
         await session.close()
