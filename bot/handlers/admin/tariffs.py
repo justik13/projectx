@@ -10,7 +10,7 @@ from database.repositories.tariffs_repo import (
     get_all_tariffs, get_tariff_by_id, create_tariff, update_tariff, delete_tariff,
     get_tariff_count, get_tariffs_paginated
 )
-from bot.keyboards import get_admin_tariffs_keyboard, get_admin_tariff_card_keyboard, get_back_button
+from bot.keyboards import get_admin_tariff_card_keyboard, get_back_button
 from bot.states import AdminStates
 from config.settings import get_settings
 from services.audit_service import AuditService
@@ -26,7 +26,6 @@ def is_admin(telegram_id: int) -> bool:
 
 
 async def _build_tariffs_list_text_and_kb(tariffs, page: int, total_pages: int, total: int) -> tuple[str, InlineKeyboardBuilder]:
-    """🔥 НОВОЕ: сборка текста и клавиатуры тарифов с пагинацией"""
     text = (
         f"🛠 Админка › 💰 <b>Тарифы</b>\n"
         f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
@@ -140,6 +139,7 @@ async def process_add_tariff(message: Message, state: FSMContext):
             f"💵 Введите цену в рублях для {days} дней:",
             reply_markup=get_back_button("admin_tariffs")
         )
+
     elif step == "price_rub":
         try:
             price_rub = int(message.text.strip())
@@ -153,6 +153,7 @@ async def process_add_tariff(message: Message, state: FSMContext):
             "⭐ Введите цену в Stars:",
             reply_markup=get_back_button("admin_tariffs")
         )
+
     elif step == "price_stars":
         try:
             price_stars = int(message.text.strip())
@@ -173,6 +174,7 @@ async def process_add_tariff(message: Message, state: FSMContext):
                 session, message.from_user.id, "ADD_TARIFF", "Tariff", tariff.id,
                 f"{all_data['duration_days']} days, {all_data['price_rub']} RUB, {price_stars} Stars"
             )
+
             await message.answer(
                 f"✅ Тариф добавлен!\n\n"
                 f"⏱ <b>{all_data['duration_days']} дней</b>\n"
@@ -198,6 +200,7 @@ async def show_tariff_card(callback: CallbackQuery, state: FSMContext):
         if not tariff:
             await callback.answer("❌ Тариф не найден", show_alert=True)
             return
+
         status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
         text = (
             f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n\n"
@@ -207,6 +210,7 @@ async def show_tariff_card(callback: CallbackQuery, state: FSMContext):
             f"<b>Цена ⭐:</b> {tariff.price_stars}\n"
             f"<b>Статус:</b> {status}\n"
         )
+
         try:
             await callback.message.edit_text(
                 text,
@@ -233,12 +237,15 @@ async def toggle_tariff(callback: CallbackQuery, state: FSMContext):
         if not tariff:
             await callback.answer("❌ Тариф не найден", show_alert=True)
             return
+
         new_status = not tariff.is_active
         await update_tariff(session, tariff, is_active=new_status)
+
         await AuditService.log_action(
             session, callback.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
             f"toggled to {'active' if new_status else 'inactive'}"
         )
+
         action = "включен" if new_status else "выключен"
         await callback.answer(f"✅ Тариф {action}", show_alert=True)
         logger.info(f"Admin {callback.from_user.id} toggled tariff {tariff_id} to {new_status}")
@@ -253,6 +260,7 @@ async def toggle_tariff(callback: CallbackQuery, state: FSMContext):
             f"<b>Цена ⭐:</b> {tariff.price_stars}\n"
             f"<b>Статус:</b> {status}\n"
         )
+
         try:
             await callback.message.edit_text(
                 text,
@@ -278,15 +286,16 @@ async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext):
         if not tariff:
             await callback.answer("❌ Тариф не найден", show_alert=True)
             return
+
         await update_tariff(session, tariff, is_active=False)
         await AuditService.log_action(
             session, callback.from_user.id, "DELETE_TARIFF", "Tariff", tariff_id,
             f"{tariff.duration_days} days"
         )
+
         await callback.answer("✅ Тариф отключен", show_alert=True)
         logger.info(f"Admin {callback.from_user.id} disabled tariff {tariff_id}")
 
-        # Возврат к списку с пагинацией
         total_tariffs = await get_tariff_count(session)
         total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
         tariffs = await get_tariffs_paginated(session, page=1, per_page=TARIFFS_PER_PAGE)
@@ -328,6 +337,7 @@ async def process_edit_tariff_days(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("⚠️ Операция прервана.")
         return
+
     try:
         days = int(message.text.strip())
         if days < 1:
@@ -335,6 +345,7 @@ async def process_edit_tariff_days(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("⚠️ Введите число больше 0:")
         return
+
     data = await state.get_data()
     tariff_id = data["tariff_id"]
     session = await get_session()
@@ -344,11 +355,13 @@ async def process_edit_tariff_days(message: Message, state: FSMContext):
             await message.answer("❌ Тариф не найден", show_alert=True)
             await state.clear()
             return
+
         await update_tariff(session, tariff, duration_days=days)
         await AuditService.log_action(
             session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
             f"days: {tariff.duration_days} -> {days}"
         )
+
         await message.answer(
             f"✅ Дни тарифа изменены на {days} дней",
             reply_markup=get_back_button("admin_tariffs")
@@ -387,6 +400,7 @@ async def process_edit_tariff_rub(message: Message, state: FSMContext):
     if message.text.startswith("/"):
         await state.clear()
         return
+
     try:
         price_rub = int(message.text.strip())
         if price_rub < 0:
@@ -394,6 +408,7 @@ async def process_edit_tariff_rub(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("⚠️ Введите положительное число:")
         return
+
     data = await state.get_data()
     tariff_id = data["tariff_id"]
     session = await get_session()
@@ -403,12 +418,14 @@ async def process_edit_tariff_rub(message: Message, state: FSMContext):
             await message.answer("❌ Тариф не найден", show_alert=True)
             await state.clear()
             return
+
         old_price = tariff.price_rub
         await update_tariff(session, tariff, price_rub=price_rub)
         await AuditService.log_action(
             session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
             f"RUB: {old_price} -> {price_rub}"
         )
+
         await message.answer(
             f"✅ Цена в рублях изменена на {price_rub} ₽",
             reply_markup=get_back_button("admin_tariffs")
@@ -447,6 +464,7 @@ async def process_edit_tariff_stars(message: Message, state: FSMContext):
     if message.text.startswith("/"):
         await state.clear()
         return
+
     try:
         price_stars = int(message.text.strip())
         if price_stars <= 0:
@@ -454,6 +472,7 @@ async def process_edit_tariff_stars(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("⚠️ Введите число больше 0 (Stars требует положительную сумму):")
         return
+
     data = await state.get_data()
     tariff_id = data["tariff_id"]
     session = await get_session()
@@ -463,12 +482,14 @@ async def process_edit_tariff_stars(message: Message, state: FSMContext):
             await message.answer("❌ Тариф не найден", show_alert=True)
             await state.clear()
             return
+
         old_price = tariff.price_stars
         await update_tariff(session, tariff, price_stars=price_stars)
         await AuditService.log_action(
             session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
             f"Stars: {old_price} -> {price_stars}"
         )
+
         await message.answer(
             f"✅ Цена в Stars изменена на {price_stars} ⭐",
             reply_markup=get_back_button("admin_tariffs")

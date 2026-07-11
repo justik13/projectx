@@ -13,7 +13,7 @@ from database.repositories.servers_repo import (
     get_all_servers, get_server_by_id, create_server, update_server, delete_server,
     get_server_count, get_servers_paginated
 )
-from bot.keyboards import get_admin_servers_keyboard, get_admin_server_card_keyboard, get_back_button
+from bot.keyboards import get_admin_server_card_keyboard, get_back_button
 from bot.states import AdminStates
 from config.settings import get_settings
 from sqlalchemy import select, update
@@ -44,7 +44,6 @@ URL_REGEX = re.compile(
 
 
 async def _build_servers_list_text_and_kb(servers, page: int, total_pages: int, total: int) -> tuple[str, InlineKeyboardBuilder]:
-    """🔥 НОВОЕ: сборка текста и клавиатуры с пагинацией"""
     text = (
         f"🛠 Админка › 🌍 <b>Серверы</b>\n"
         f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
@@ -153,12 +152,14 @@ async def process_add_server(message: Message, state: FSMContext):
             "🏳️ Введите флаг страны (эмодзи, например: 🇳🇱):",
             reply_markup=get_back_button("admin_servers")
         )
+
     elif step == "flag":
         await state.update_data(country_flag=message.text.strip(), step="api_url")
         await message.answer(
             "🔗 Введите API URL сервера (например: http://127.0.0.1:4001):",
             reply_markup=get_back_button("admin_servers")
         )
+
     elif step == "api_url":
         api_url = message.text.strip()
         if len(api_url) > 500:
@@ -177,6 +178,7 @@ async def process_add_server(message: Message, state: FSMContext):
             "🔑 Введите API ключ сервера:",
             reply_markup=get_back_button("admin_servers")
         )
+
     elif step == "api_key":
         api_key = message.text.strip()
         if not api_key or len(api_key) < 8:
@@ -186,17 +188,18 @@ async def process_add_server(message: Message, state: FSMContext):
 
         all_data = await state.get_data()
         check_msg = await message.answer(
-            "🔍 <b>Проверяю доступность сервера...</b>\n"
+            "🔍 <b>Проверяю доступность сервера...</b>\n\n"
             "Ожидайте, это может занять несколько секунд.",
             parse_mode="HTML"
         )
 
         client = AmneziaClient(all_data["api_url"], all_data["api_key"])
         is_healthy = await client.healthcheck()
+
         if not is_healthy:
             await check_msg.edit_text(
-                "❌ <b>Сервер недоступен!</b>\n"
-                "Не удалось подключиться к Amnezia API по указанному адресу.\n"
+                "❌ <b>Сервер недоступен!</b>\n\n"
+                "Не удалось подключиться к Amnezia API по указанному адресу.\n\n"
                 "Возможные причины:\n"
                 "• Неверный URL или API ключ\n"
                 "• Сервер выключен или недоступен\n"
@@ -211,7 +214,7 @@ async def process_add_server(message: Message, state: FSMContext):
         server_info = await client.get_server_info()
         if not server_info:
             await check_msg.edit_text(
-                "❌ <b>Ошибка подключения к API!</b>\n"
+                "❌ <b>Ошибка подключения к API!</b>\n\n"
                 "Сервер отвечает на healthcheck, но не удалось получить информацию.\n"
                 "Возможно, неверный API ключ.",
                 parse_mode="HTML"
@@ -223,15 +226,14 @@ async def process_add_server(message: Message, state: FSMContext):
         if "amneziawg2" not in protocols:
             available = ", ".join(protocols) if protocols else "неизвестно"
             await check_msg.edit_text(
-                f"⚠️ <b>Протокол amneziawg2 не поддерживается!</b>\n"
-                f"Доступные протоколы на сервере: <code>{html.escape(available)}</code>\n"
+                f"⚠️ <b>Протокол amneziawg2 не поддерживается!</b>\n\n"
+                f"Доступные протоколы на сервере: <code>{html.escape(available)}</code>\n\n"
                 f"Этот бот работает только с протоколом <b>amneziawg2</b>.",
                 parse_mode="HTML"
             )
             await state.clear()
             return
 
-        # 🔥 ИСПРАВЛЕНО: Парсим лимит и имя из API, а не спрашиваем у админа
         api_max_peers = server_info.get("maxPeers") or server_info.get("serverMaxPeers") or server_info.get("SERVER_MAX_PEERS", 250)
         api_server_name = server_info.get("name") or server_info.get("serverName") or all_data["name"]
 
@@ -278,6 +280,7 @@ async def show_server_card(callback: CallbackQuery, state: FSMContext):
         flag = server.country_flag or "🌍"
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
         safe_name = html.escape(server.name)
+
         text = (
             f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_name}</b>\n\n"
             f"<b>ID:</b> {server.id}\n"
@@ -286,6 +289,7 @@ async def show_server_card(callback: CallbackQuery, state: FSMContext):
             f"<b>API URL:</b> {server.api_url}\n"
             f"<b>Макс клиентов:</b> {server.max_clients}\n"
         )
+
         await callback.message.edit_text(
             text,
             reply_markup=get_admin_server_card_keyboard(server.id, server.is_active),
@@ -310,8 +314,10 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext):
         if not server:
             await callback.answer("❌ Сервер не найден", show_alert=True)
             return
+
         new_status = not server.is_active
         server_info = {'api_url': server.api_url, 'api_key': server.api_key}
+
         result = await session.execute(
             select(VPNProfile.id, VPNProfile.peer_id).where(VPNProfile.server_id == server.id)
         )
@@ -323,12 +329,15 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext):
     if profiles_data:
         client = AmneziaClient(server_info['api_url'], server_info['api_key'])
         target_status = "active" if new_status else "disabled"
+
         sem = asyncio.Semaphore(20)
         async def _limited_update(peer_id, status):
             async with sem:
                 return await client.update_client(client_id=peer_id, status=status)
+
         tasks = [_limited_update(peer_id, target_status) for _, peer_id in profiles_data]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+
         api_errors = [r for r in results if isinstance(r, Exception) or r is False]
         if api_errors:
             network_success = False
@@ -341,10 +350,12 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext):
     try:
         server = await get_server_by_id(session, server_id)
         await update_server(session, server, is_active=new_status)
+
         await AuditService.log_action(
             session, callback.from_user.id, "TOGGLE_SERVER", "Server", server_id,
             "enabled" if new_status else "disabled"
         )
+
         if profiles_data:
             profile_ids = [p_id for p_id, _ in profiles_data]
             await session.execute(
@@ -362,6 +373,7 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext):
         flag = server.country_flag or "🌍"
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
         safe_name = html.escape(server.name)
+
         text = (
             f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_name}</b>\n\n"
             f"<b>ID:</b> {server.id}\n"
@@ -370,6 +382,7 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext):
             f"<b>API URL:</b> {server.api_url}\n"
             f"<b>Макс клиентов:</b> {server.max_clients}\n"
         )
+
         await callback.message.edit_text(
             text,
             reply_markup=get_admin_server_card_keyboard(server.id, server.is_active),
@@ -393,6 +406,7 @@ async def delete_server_handler(callback: CallbackQuery, state: FSMContext):
         if not server:
             await callback.answer("❌ Сервер не найден", show_alert=True)
             return
+
         result = await session.execute(
             select(VPNProfile.id, VPNProfile.peer_id).where(VPNProfile.server_id == server.id)
         )
@@ -404,12 +418,15 @@ async def delete_server_handler(callback: CallbackQuery, state: FSMContext):
     network_success = True
     if profiles_data:
         client = AmneziaClient(server_info['api_url'], server_info['api_key'])
+
         sem = asyncio.Semaphore(20)
         async def _limited_disable(peer_id):
             async with sem:
                 return await client.update_client(client_id=peer_id, status="disabled")
+
         tasks = [_limited_disable(peer_id) for _, peer_id in profiles_data]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+
         api_errors = [r for r in results if isinstance(r, Exception) or r is False]
         if api_errors:
             network_success = False
@@ -424,12 +441,14 @@ async def delete_server_handler(callback: CallbackQuery, state: FSMContext):
                     .where(VPNProfile.id.in_(profile_ids))
                     .values(is_active=False)
                 )
+
             server = await get_server_by_id(session, server_id)
             await update_server(session, server, is_active=False)
             await AuditService.log_action(
                 session, callback.from_user.id, "DELETE_SERVER", "Server", server_id, server.name
             )
             await session.commit()
+
             await callback.answer("✅ Сервер и связанные устройства успешно отключены", show_alert=True)
             logger.info(f"Admin {callback.from_user.id} disabled server {server_id}")
         else:
@@ -439,7 +458,6 @@ async def delete_server_handler(callback: CallbackQuery, state: FSMContext):
             )
             return
 
-        # Возврат к списку с пагинацией
         total_servers = await get_server_count(session)
         total_pages = max(1, math.ceil(total_servers / SERVERS_PER_PAGE))
         servers = await get_servers_paginated(session, page=1, per_page=SERVERS_PER_PAGE)
@@ -488,12 +506,15 @@ async def process_edit_server(message: Message, state: FSMContext):
             await message.answer("❌ Сервер не найден", show_alert=True)
             await state.clear()
             return
+
         new_name = message.text.strip()
         if len(new_name) > 255:
             await message.answer("⚠️ Слишком длинное имя (макс. 255 символов).")
             return
+
         await update_server(session, server, name=new_name)
         safe_new_name = html.escape(new_name)
+
         await message.answer(
             f"✅ Имя сервера изменено на: {safe_new_name}",
             reply_markup=get_back_button("admin_servers")
@@ -502,6 +523,7 @@ async def process_edit_server(message: Message, state: FSMContext):
 
         flag = server.country_flag or "🌍"
         status = "🟢 Активен" if server.is_active else "🔴 Отключен"
+
         text = (
             f"🛠 Админка › 🌍 Серверы › {flag} <b>{safe_new_name}</b>\n\n"
             f"<b>ID:</b> {server.id}\n"
@@ -510,6 +532,7 @@ async def process_edit_server(message: Message, state: FSMContext):
             f"<b>API URL:</b> {server.api_url}\n"
             f"<b>Макс клиентов:</b> {server.max_clients}\n"
         )
+
         await message.answer(
             text,
             reply_markup=get_admin_server_card_keyboard(server.id, server.is_active),
