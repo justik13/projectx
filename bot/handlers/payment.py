@@ -48,10 +48,10 @@ async def select_tariff(callback: CallbackQuery, state: FSMContext, session: Asy
 async def pay_stars(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     tariff_id = int(callback.data.split(":")[1])
     user = db_user
+    tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff or not user:
         await callback.answer("❌ Ошибка данных", show_alert=True)
         return
-    tariff = await get_tariff_by_id(session, tariff_id)
     if tariff.price_stars <= 0:
         logging.error(f"Tariff {tariff.id} has invalid price_stars={tariff.price_stars}")
         await callback.answer("❌ Ошибка тарифа: некорректная цена.", show_alert=True)
