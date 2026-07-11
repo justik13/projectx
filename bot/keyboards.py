@@ -3,6 +3,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    CopyTextButton,
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
@@ -63,13 +64,31 @@ def get_connection_keyboard(has_subscription: bool = True) -> InlineKeyboardMark
     return builder.as_markup()
 
 
-def get_device_keyboard(profile_id: int) -> InlineKeyboardMarkup:
+def get_device_keyboard(profile_id: int, raw_config: str) -> InlineKeyboardMarkup:
+    """
+    Клавиатура для управления устройством.
+    raw_config — ключ подключения для копирования.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить имя", callback_data=f"rename_device:{profile_id}")
+    # 🔥 Нативная кнопка копирования (copy_text) — ключ копируется в буфер обмена
+    builder.button(
+        text="🔑 Скопировать ключ",
+        copy_text=CopyTextButton(text=raw_config)
+    )
     builder.button(text="📥 Скачать .conf", callback_data=f"download_conf:{profile_id}")
-    builder.button(text="🗑 Удалить устройство", callback_data=f"delete_device:{profile_id}")
+    builder.button(text="🗑 Удалить устройство", callback_data=f"request_delete_device:{profile_id}")
     builder.button(text="← К списку устройств", callback_data="back_to_connections")
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_device_delete_confirm_keyboard(profile_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения удаления устройства"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить", callback_data=f"confirm_delete_device:{profile_id}")
+    builder.button(text="❌ Отмена", callback_data=f"cancel_delete_device:{profile_id}")
+    builder.adjust(2)
     return builder.as_markup()
 
 

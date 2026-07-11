@@ -58,23 +58,18 @@ async def cmd_help(message: Message, state: FSMContext):
         reply_markup=get_help_keyboard(),
         parse_mode="HTML"
     )
+
+
 @router.callback_query(F.data == "back_to_main_menu")
-async def back_to_main_menu(callback: CallbackQuery, state: FSMContext, db_user: User | None = None):
-    """Глобальный обработчик возврата в главное меню из любых разделов"""
+async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
+    """
+    Возврат в главное меню.
+    Просто удаляет текущее inline-сообщение, оставляя Reply-клавиатуру.
+    НЕ дублирует Welcome текст.
+    """
     await state.clear()
     try:
         await callback.message.delete()
     except Exception:
         pass
-    
-    settings = get_settings()
-    is_admin = callback.from_user.id in settings.ADMIN_IDS
-    from bot.texts import WELCOME_TEXT
-    from bot.keyboards import get_main_menu
-    
-    await callback.message.answer(
-        WELCOME_TEXT,
-        reply_markup=get_main_menu(is_admin=is_admin),
-        parse_mode="HTML"
-    )
-    await callback.answer()
+    await callback.answer("🏠 Главное меню")

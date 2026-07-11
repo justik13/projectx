@@ -1,6 +1,8 @@
 import html
 import logging
 import asyncio
+import re
+from urllib.parse import urlparse
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
@@ -18,12 +20,20 @@ from services.audit_service import AuditService
 
 router = Router()
 
-
 def is_admin(telegram_id: int) -> bool:
     return telegram_id in get_settings().ADMIN_IDS
 
-
 REPLY_MENU_BUTTONS = ["👤 Профиль", "🔌 Подключение", "💳 Оплата", "💬 Поддержка", "🛠 Админка"]
+
+# Регулярка для проверки URL
+URL_REGEX = re.compile(
+    r'^https?://'
+    r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
+    r'localhost|'
+    r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+    r'(?::\d+)?'
+    r'(?:/?|[/?]\S+)$', re.IGNORECASE
+)
 
 
 @router.callback_query(F.data == "admin_servers")
@@ -104,16 +114,30 @@ async def process_add_server(message: Message, state: FSMContext):
             reply_markup=get_back_button("admin_servers")
         )
     elif step == "api_url":
-        if len(message.text.strip()) > 500:
+        api_url = message.text.strip()
+        # 🔥 ВАЛИДАЦИЯ URL
+        if len(api_url) > 500:
             await message.answer("⚠️ Слишком длинный URL (макс. 500 символов).")
             return
-        await state.update_data(api_url=message.text.strip(), step="api_key")
+        if not URL_REGEX.match(api_url):
+            await message.answer(
+                "⚠️ Некорректный формат URL.\n"
+                "URL должен начинаться с <code>http://</code> или <code>https://</code>\n"
+                "Пример: <code>http://127.0.0.1:4001</code>",
+                parse_mode="HTML"
+            )
+            return
+        await state.update_data(api_url=api_url, step="api_key")
         await message.answer(
             "🔑 Введите API ключ сервера:",
             reply_markup=get_back_button("admin_servers")
         )
     elif step == "api_key":
-        await state.update_data(api_key=message.text.strip(), step="max_clients")
+        api_key = message.text.strip()
+        if not api_key or len(api_key) < 8:
+            await message.answer("⚠️ API ключ слишком короткий (минимум 8 символов).")
+            return
+        await state.update_data(api_key=api_key, step="max_clients")
         await message.answer(
             "👥 Введите максимальное количество клиентов (число > 0):",
             reply_markup=get_back_button("admin_servers")
@@ -126,10 +150,65 @@ async def process_add_server(message: Message, state: FSMContext):
             max_clients = int(message.text.strip())
             if max_clients <= 0:
                 raise ValueError
+            if max_clients > 10000:
+                await message.answer("⚠️ Слишком большое число (макс. 10000).")
+                return
         except ValueError:
             await message.answer("⚠️ Введите число больше 0:")
             return
         all_data = await state.get_data()
+        
+        # 🔥 ПРОВЕРКА ДОСТУПНОСТИ СЕРВЕРА (Healthcheck)
+        check_msg = await message.answer(
+            "🔍 <b>Проверяю доступность сервера...</b>\n"
+            "Ожидайте, это может занять несколько секунд.",
+            parse_mode="HTML"
+        )
+        
+        client = AmneziaClient(all_data["api_url"], all_data["api_key"])
+        is_healthy = await client.healthcheck()
+        
+        if not is_healthy:
+            await check_msg.edit_text(
+                "❌ <b>Сервер недоступен!</b>\n\n"
+                "Не удалось подключиться к Amnezia API по указанному адресу.\n\n"
+                "Возможные причины:\n"
+                "• Неверный URL или API ключ\n"
+                "• Сервер выключен или недоступен\n"
+                "• Файрвол блокирует соединение\n"
+                "• Amnezia API не запущен\n\n"
+                "Проверьте данные и попробуйте снова.",
+                parse_mode="HTML"
+            )
+            await state.clear()
+            return
+        
+        # Дополнительная проверка — получение инфо о сервере
+        server_info = await client.get_server_info()
+        if not server_info:
+            await check_msg.edit_text(
+                "❌ <b>Ошибка подключения к API!</b>\n\n"
+                "Сервер отвечает на healthcheck, но не удалось получить информацию.\n"
+                "Возможно, неверный API ключ.",
+                parse_mode="HTML"
+            )
+            await state.clear()
+            return
+        
+        # Проверка протокола
+        protocols = server_info.get("protocols", [])
+        if "amneziawg2" not in protocols:
+            available = ", ".join(protocols) if protocols else "неизвестно"
+            await check_msg.edit_text(
+                f"⚠️ <b>Протокол amneziawg2 не поддерживается!</b>\n\n"
+                f"Доступные протоколы на сервере: <code>{html.escape(available)}</code>\n\n"
+                f"Этот бот работает только с протоколом <b>amneziawg2</b>.",
+                parse_mode="HTML"
+            )
+            await state.clear()
+            return
+        
+        # Всё ок — сохраняем сервер
         session = await get_session()
         try:
             server = await create_server(
@@ -141,9 +220,12 @@ async def process_add_server(message: Message, state: FSMContext):
                 session, message.from_user.id, "ADD_SERVER", "Server", server.id, all_data["name"]
             )
             safe_name = html.escape(all_data["name"])
-            await message.answer(
-                f"✅ Сервер добавлен!\n{all_data['country_flag']} <b>{safe_name}</b>\n"
-                f"Протокол: amneziawg2\nМакс клиентов: {max_clients}",
+            await check_msg.edit_text(
+                f"✅ <b>Сервер добавлен и проверен!</b>\n\n"
+                f"{all_data['country_flag']} <b>{safe_name}</b>\n"
+                f"Протокол: amneziawg2\n"
+                f"Макс клиентов: {max_clients}\n"
+                f"API: <code>{html.escape(all_data['api_url'])}</code>",
                 reply_markup=get_back_button("admin_servers"), parse_mode="HTML"
             )
             logging.info(f"Admin {message.from_user.id} added server: {server.id}")
