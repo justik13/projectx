@@ -1,6 +1,9 @@
 import asyncio
-from cachetools import TTLCache
+
 from aiogram.types import CallbackQuery
+from cachetools import TTLCache
+
+from bot import texts
 
 
 class ThrottlingMiddleware:
@@ -13,11 +16,9 @@ class ThrottlingMiddleware:
         if not user_id:
             return await handler(event, data)
 
-        # Для CallbackQuery используем глобальный ключ
-        # Это предотвращает Race Conditions при быстром клике по разным кнопкам
         if isinstance(event, CallbackQuery):
             action_key = "callback"
-        elif hasattr(event, 'text'):
+        elif hasattr(event, "text"):
             action_key = f"msg:{event.text or ''}"
         else:
             action_key = None
@@ -28,9 +29,9 @@ class ThrottlingMiddleware:
         key = f"{user_id}:{action_key}"
 
         if key in self._last_call:
-            if hasattr(event, 'answer'):
+            if hasattr(event, "answer"):
                 try:
-                    await event.answer("⏳ Слишком часто!", show_alert=False)
+                    await event.answer(texts.ERROR_TOO_FREQUENT, show_alert=False)
                 except Exception:
                     pass
             return
