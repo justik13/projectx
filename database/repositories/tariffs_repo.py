@@ -49,14 +49,12 @@ async def delete_tariff(session: AsyncSession, tariff: Tariff) -> None:
 
 
 async def get_tariff_count(session: AsyncSession) -> int:
-    """🔥 НОВОЕ: подсчет количества тарифов"""
     stmt = select(func.count(Tariff.id))
     result = await session.execute(stmt)
     return result.scalar_one()
 
 
 async def get_tariffs_paginated(session: AsyncSession, page: int = 1, per_page: int = 10) -> list[Tariff]:
-    """🔥 НОВОЕ: пагинация тарифов"""
     offset = (page - 1) * per_page
     result = await session.execute(
         select(Tariff).order_by(Tariff.sort_order, Tariff.duration_days).offset(offset).limit(per_page)

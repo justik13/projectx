@@ -1,4 +1,4 @@
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import User
 from datetime import datetime, timedelta, timezone
@@ -40,10 +40,12 @@ async def extend_subscription(session: AsyncSession, user: User, days: int) -> U
         current_end = user.subscription_end
     else:
         current_end = now
+
     if days >= 36500:
         new_end = datetime(2100, 1, 1)
     else:
         new_end = current_end + timedelta(days=days)
+
     return await update_user(session, user, subscription_end=new_end)
 
 
@@ -86,7 +88,7 @@ async def get_users_paginated(session: AsyncSession, page: int = 1, per_page: in
 
 
 async def get_active_users(session: AsyncSession) -> list[User]:
-    """🔥 ИСПРАВЛЕНО: исключает пользователей, заблокировавших бота"""
+    """Исключает пользователей, заблокировавших бота"""
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
     result = await session.execute(
         select(User).where(
@@ -105,8 +107,7 @@ async def get_user_referrals(session: AsyncSession, telegram_id: int) -> list[Us
 
 
 async def mark_user_bot_blocked(session: AsyncSession, telegram_id: int) -> None:
-    """🔥 НОВОЕ: помечает пользователя как заблокировавшего бота"""
-    from sqlalchemy import update
+    """Помечает пользователя как заблокировавшего бота"""
     await session.execute(
         update(User).where(User.telegram_id == telegram_id).values(is_bot_blocked=True)
     )

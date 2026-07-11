@@ -75,22 +75,22 @@ async def get_total_free_ips(session: AsyncSession) -> int:
         select(func.sum(Server.max_clients)).where(Server.is_active == True)
     )
     total_capacity = result.scalar() or 0
+
     active_server_ids = select(Server.id).where(Server.is_active == True).scalar_subquery()
     stmt = select(func.count(VPNProfile.id)).where(VPNProfile.server_id.in_(active_server_ids))
     result = await session.execute(stmt)
     used_profiles = result.scalar() or 0
+
     return max(0, total_capacity - used_profiles)
 
 
 async def get_server_count(session: AsyncSession) -> int:
-    """🔥 НОВОЕ: подсчет количества серверов"""
     stmt = select(func.count(Server.id))
     result = await session.execute(stmt)
     return result.scalar_one()
 
 
 async def get_servers_paginated(session: AsyncSession, page: int = 1, per_page: int = 10) -> list[Server]:
-    """🔥 НОВОЕ: пагинация серверов"""
     offset = (page - 1) * per_page
     result = await session.execute(
         select(Server).order_by(Server.name).offset(offset).limit(per_page)

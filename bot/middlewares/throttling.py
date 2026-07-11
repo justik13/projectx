@@ -13,7 +13,7 @@ class ThrottlingMiddleware:
         if not user_id:
             return await handler(event, data)
 
-        # 🔥 ИСПРАВЛЕНО: Для CallbackQuery используем глобальный ключ
+        # Для CallbackQuery используем глобальный ключ
         # Это предотвращает Race Conditions при быстром клике по разным кнопкам
         if isinstance(event, CallbackQuery):
             action_key = "callback"
@@ -26,6 +26,7 @@ class ThrottlingMiddleware:
             return await handler(event, data)
 
         key = f"{user_id}:{action_key}"
+
         if key in self._last_call:
             if hasattr(event, 'answer'):
                 try:
@@ -33,6 +34,6 @@ class ThrottlingMiddleware:
                 except Exception:
                     pass
             return
-        
+
         self._last_call[key] = asyncio.get_running_loop().time()
         return await handler(event, data)

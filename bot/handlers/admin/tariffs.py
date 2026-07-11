@@ -1,11 +1,13 @@
 import logging
 import math
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from database.connection import get_session
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from database.repositories.tariffs_repo import (
     get_all_tariffs, get_tariff_by_id, create_tariff, update_tariff, delete_tariff,
     get_tariff_count, get_tariffs_paginated
@@ -28,7 +30,7 @@ def is_admin(telegram_id: int) -> bool:
 async def _build_tariffs_list_text_and_kb(tariffs, page: int, total_pages: int, total: int) -> tuple[str, InlineKeyboardBuilder]:
     text = (
         f"🛠 Админка › 💰 <b>Тарифы</b>\n"
-        f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
+        f"(стр. {page}/{total_pages}) · Всего: {total}\n"
     )
     builder = InlineKeyboardBuilder()
 
@@ -45,6 +47,7 @@ async def _build_tariffs_list_text_and_kb(tariffs, page: int, total_pages: int, 
         nav_buttons.append(("⬅️", f"admin_tariffs_page:{page - 1}"))
     if page < total_pages:
         nav_buttons.append(("➡️", f"admin_tariffs_page:{page + 1}"))
+
     for btn_text, btn_data in nav_buttons:
         builder.button(text=btn_text, callback_data=btn_data)
 
@@ -55,44 +58,40 @@ async def _build_tariffs_list_text_and_kb(tariffs, page: int, total_pages: int, 
 
 
 @router.callback_query(F.data == "admin_tariffs")
-async def show_tariffs_list(callback: CallbackQuery):
+async def show_tariffs_list(callback: CallbackQuery, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
-    session = await get_session()
+
+    total_tariffs = await get_tariff_count(session)
+    total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
+    tariffs = await get_tariffs_paginated(session, page=1, per_page=TARIFFS_PER_PAGE)
+
+    text, kb = await _build_tariffs_list_text_and_kb(tariffs, 1, total_pages, total_tariffs)
     try:
-        total_tariffs = await get_tariff_count(session)
-        total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
-        tariffs = await get_tariffs_paginated(session, page=1, per_page=TARIFFS_PER_PAGE)
-        text, kb = await _build_tariffs_list_text_and_kb(tariffs, 1, total_pages, total_tariffs)
-        try:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
-        except TelegramBadRequest:
-            pass
-        await callback.answer()
-    finally:
-        await session.close()
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("admin_tariffs_page:"))
-async def tariffs_pagination(callback: CallbackQuery):
+async def tariffs_pagination(callback: CallbackQuery, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+
     page = int(callback.data.split(":")[1])
-    session = await get_session()
+    total_tariffs = await get_tariff_count(session)
+    total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
+    tariffs = await get_tariffs_paginated(session, page=page, per_page=TARIFFS_PER_PAGE)
+
+    text, kb = await _build_tariffs_list_text_and_kb(tariffs, page, total_pages, total_tariffs)
     try:
-        total_tariffs = await get_tariff_count(session)
-        total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
-        tariffs = await get_tariffs_paginated(session, page=page, per_page=TARIFFS_PER_PAGE)
-        text, kb = await _build_tariffs_list_text_and_kb(tariffs, page, total_pages, total_tariffs)
-        try:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
-        except TelegramBadRequest:
-            pass
-        await callback.answer()
-    finally:
-        await session.close()
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_tariff_add")
@@ -100,9 +99,10 @@ async def start_add_tariff(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+
     await state.clear()
     await callback.message.edit_text(
-        "🛠 Админка › 💰 Тарифы › ➕ <b>Новый тариф</b>\n\n"
+        "🛠 Админка › 💰 Тарифы › ➕ <b>Новый тариф</b>\n"
         "⏱ Введите количество дней (число):",
         reply_markup=get_back_button("admin_tariffs")
     )
@@ -112,13 +112,15 @@ async def start_add_tariff(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(AdminStates.adding_tariff)
-async def process_add_tariff(message: Message, state: FSMContext):
+async def process_add_tariff(message: Message, state: FSMContext, session: AsyncSession):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     if not message.text:
         await message.answer("⚠️ Ожидается текстовый ввод.")
         return
+
     if message.text.startswith("/"):
         await state.clear()
         return
@@ -134,6 +136,7 @@ async def process_add_tariff(message: Message, state: FSMContext):
         except ValueError:
             await message.answer("⚠️ Введите число больше 0:")
             return
+
         await state.update_data(duration_days=days, step="price_rub")
         await message.answer(
             f"💵 Введите цену в рублях для {days} дней:",
@@ -148,6 +151,7 @@ async def process_add_tariff(message: Message, state: FSMContext):
         except ValueError:
             await message.answer("⚠️ Введите положительное число:")
             return
+
         await state.update_data(price_rub=price_rub, step="price_stars")
         await message.answer(
             "⭐ Введите цену в Stars:",
@@ -164,148 +168,142 @@ async def process_add_tariff(message: Message, state: FSMContext):
             return
 
         all_data = await state.get_data()
-        session = await get_session()
-        try:
-            tariff = await create_tariff(
-                session, duration_days=all_data["duration_days"],
-                price_rub=all_data["price_rub"], price_stars=price_stars
-            )
-            await AuditService.log_action(
-                session, message.from_user.id, "ADD_TARIFF", "Tariff", tariff.id,
-                f"{all_data['duration_days']} days, {all_data['price_rub']} RUB, {price_stars} Stars"
-            )
+        tariff = await create_tariff(
+            session, duration_days=all_data["duration_days"],
+            price_rub=all_data["price_rub"], price_stars=price_stars
+        )
 
-            await message.answer(
-                f"✅ Тариф добавлен!\n\n"
-                f"⏱ <b>{all_data['duration_days']} дней</b>\n"
-                f"💵 {all_data['price_rub']} ₽ / ⭐ {price_stars}",
-                reply_markup=get_back_button("admin_tariffs"), parse_mode="HTML"
-            )
-            logger.info(f"Admin {message.from_user.id} added tariff {tariff.id}")
-            await state.clear()
-        finally:
-            await session.close()
+        await AuditService.log_action(
+            session, message.from_user.id, "ADD_TARIFF", "Tariff", tariff.id,
+            f"{all_data['duration_days']} days, {all_data['price_rub']} RUB, {price_stars} Stars"
+        )
+
+        await message.answer(
+            f"✅ Тариф добавлен!\n"
+            f"⏱ <b>{all_data['duration_days']} дней</b>\n"
+            f"💵 {all_data['price_rub']} ₽ / ⭐ {price_stars}",
+            reply_markup=get_back_button("admin_tariffs"), parse_mode="HTML"
+        )
+        logger.info(f"Admin {message.from_user.id} added tariff {tariff.id}")
+        await state.clear()
 
 
 @router.callback_query(F.data.startswith("admin_tariff_card:"))
-async def show_tariff_card(callback: CallbackQuery, state: FSMContext):
+async def show_tariff_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-    session = await get_session()
+    tariff = await get_tariff_by_id(session, tariff_id)
+
+    if not tariff:
+        await callback.answer("❌ Тариф не найден", show_alert=True)
+        return
+
+    status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
+    text = (
+        f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n"
+        f"<b>ID:</b> {tariff.id}\n"
+        f"<b>Дней:</b> {tariff.duration_days}\n"
+        f"<b>Цена ₽:</b> {tariff.price_rub}\n"
+        f"<b>Цена ⭐:</b> {tariff.price_stars}\n"
+        f"<b>Статус:</b> {status}\n"
+    )
+
     try:
-        tariff = await get_tariff_by_id(session, tariff_id)
-        if not tariff:
-            await callback.answer("❌ Тариф не найден", show_alert=True)
-            return
-
-        status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
-        text = (
-            f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n\n"
-            f"<b>ID:</b> {tariff.id}\n"
-            f"<b>Дней:</b> {tariff.duration_days}\n"
-            f"<b>Цена ₽:</b> {tariff.price_rub}\n"
-            f"<b>Цена ⭐:</b> {tariff.price_stars}\n"
-            f"<b>Статус:</b> {status}\n"
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
+            parse_mode="HTML"
         )
-
-        try:
-            await callback.message.edit_text(
-                text,
-                reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
-                parse_mode="HTML"
-            )
-        except TelegramBadRequest:
-            pass
-        await callback.answer()
-    finally:
-        await session.close()
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("admin_tariff_toggle:"))
-async def toggle_tariff(callback: CallbackQuery, state: FSMContext):
+async def toggle_tariff(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-    session = await get_session()
+    tariff = await get_tariff_by_id(session, tariff_id)
+
+    if not tariff:
+        await callback.answer("❌ Тариф не найден", show_alert=True)
+        return
+
+    new_status = not tariff.is_active
+    await update_tariff(session, tariff, is_active=new_status)
+
+    await AuditService.log_action(
+        session, callback.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
+        f"toggled to {'active' if new_status else 'inactive'}"
+    )
+
+    action = "включен" if new_status else "выключен"
+    await callback.answer(f"✅ Тариф {action}", show_alert=True)
+    logger.info(f"Admin {callback.from_user.id} toggled tariff {tariff_id} to {new_status}")
+
+    tariff = await get_tariff_by_id(session, tariff_id)
+    status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
+
+    text = (
+        f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n"
+        f"<b>ID:</b> {tariff.id}\n"
+        f"<b>Дней:</b> {tariff.duration_days}\n"
+        f"<b>Цена ₽:</b> {tariff.price_rub}\n"
+        f"<b>Цена ⭐:</b> {tariff.price_stars}\n"
+        f"<b>Статус:</b> {status}\n"
+    )
+
     try:
-        tariff = await get_tariff_by_id(session, tariff_id)
-        if not tariff:
-            await callback.answer("❌ Тариф не найден", show_alert=True)
-            return
-
-        new_status = not tariff.is_active
-        await update_tariff(session, tariff, is_active=new_status)
-
-        await AuditService.log_action(
-            session, callback.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
-            f"toggled to {'active' if new_status else 'inactive'}"
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
+            parse_mode="HTML"
         )
-
-        action = "включен" if new_status else "выключен"
-        await callback.answer(f"✅ Тариф {action}", show_alert=True)
-        logger.info(f"Admin {callback.from_user.id} toggled tariff {tariff_id} to {new_status}")
-
-        tariff = await get_tariff_by_id(session, tariff_id)
-        status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
-        text = (
-            f"🛠 Админка › 💰 Тарифы › <b>Тариф</b>\n\n"
-            f"<b>ID:</b> {tariff.id}\n"
-            f"<b>Дней:</b> {tariff.duration_days}\n"
-            f"<b>Цена ₽:</b> {tariff.price_rub}\n"
-            f"<b>Цена ⭐:</b> {tariff.price_stars}\n"
-            f"<b>Статус:</b> {status}\n"
-        )
-
-        try:
-            await callback.message.edit_text(
-                text,
-                reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
-                parse_mode="HTML"
-            )
-        except TelegramBadRequest:
-            pass
-    finally:
-        await session.close()
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(F.data.startswith("admin_tariff_delete:"))
-async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext):
+async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-    session = await get_session()
+    tariff = await get_tariff_by_id(session, tariff_id)
+
+    if not tariff:
+        await callback.answer("❌ Тариф не найден", show_alert=True)
+        return
+
+    await update_tariff(session, tariff, is_active=False)
+
+    await AuditService.log_action(
+        session, callback.from_user.id, "DELETE_TARIFF", "Tariff", tariff_id,
+        f"{tariff.duration_days} days"
+    )
+
+    await callback.answer("✅ Тариф отключен", show_alert=True)
+    logger.info(f"Admin {callback.from_user.id} disabled tariff {tariff_id}")
+
+    total_tariffs = await get_tariff_count(session)
+    total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
+    tariffs = await get_tariffs_paginated(session, page=1, per_page=TARIFFS_PER_PAGE)
+
+    text, kb = await _build_tariffs_list_text_and_kb(tariffs, 1, total_pages, total_tariffs)
     try:
-        tariff = await get_tariff_by_id(session, tariff_id)
-        if not tariff:
-            await callback.answer("❌ Тариф не найден", show_alert=True)
-            return
-
-        await update_tariff(session, tariff, is_active=False)
-        await AuditService.log_action(
-            session, callback.from_user.id, "DELETE_TARIFF", "Tariff", tariff_id,
-            f"{tariff.duration_days} days"
-        )
-
-        await callback.answer("✅ Тариф отключен", show_alert=True)
-        logger.info(f"Admin {callback.from_user.id} disabled tariff {tariff_id}")
-
-        total_tariffs = await get_tariff_count(session)
-        total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
-        tariffs = await get_tariffs_paginated(session, page=1, per_page=TARIFFS_PER_PAGE)
-        text, kb = await _build_tariffs_list_text_and_kb(tariffs, 1, total_pages, total_tariffs)
-        try:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
-        except TelegramBadRequest:
-            pass
-    finally:
-        await session.close()
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(F.data.startswith("admin_tariff_edit_days:"))
@@ -313,12 +311,14 @@ async def start_edit_tariff_days(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     await state.update_data(tariff_id=tariff_id)
     await state.set_state(AdminStates.editing_tariff_days)
+
     await callback.message.edit_text(
-        "🛠 Админка › 💰 Тарифы › ⏱ <b>Изменить дни</b>\n\n"
+        "🛠 Админка › 💰 Тарифы › ⏱ <b>Изменить дни</b>\n"
         "⏱ Введите новое количество дней:",
         reply_markup=get_back_button("admin_tariffs")
     )
@@ -326,13 +326,15 @@ async def start_edit_tariff_days(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(AdminStates.editing_tariff_days)
-async def process_edit_tariff_days(message: Message, state: FSMContext):
+async def process_edit_tariff_days(message: Message, state: FSMContext, session: AsyncSession):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     if not message.text:
         await message.answer("⚠️ Ожидается текстовый ввод. Отправьте число дней:")
         return
+
     if message.text.startswith("/"):
         await state.clear()
         await message.answer("⚠️ Операция прервана.")
@@ -348,28 +350,26 @@ async def process_edit_tariff_days(message: Message, state: FSMContext):
 
     data = await state.get_data()
     tariff_id = data["tariff_id"]
-    session = await get_session()
-    try:
-        tariff = await get_tariff_by_id(session, tariff_id)
-        if not tariff:
-            await message.answer("❌ Тариф не найден", show_alert=True)
-            await state.clear()
-            return
 
-        await update_tariff(session, tariff, duration_days=days)
-        await AuditService.log_action(
-            session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
-            f"days: {tariff.duration_days} -> {days}"
-        )
-
-        await message.answer(
-            f"✅ Дни тарифа изменены на {days} дней",
-            reply_markup=get_back_button("admin_tariffs")
-        )
-        logger.info(f"Admin {message.from_user.id} updated tariff {tariff_id} days to {days}")
+    tariff = await get_tariff_by_id(session, tariff_id)
+    if not tariff:
+        await message.answer("❌ Тариф не найден", show_alert=True)
         await state.clear()
-    finally:
-        await session.close()
+        return
+
+    await update_tariff(session, tariff, duration_days=days)
+
+    await AuditService.log_action(
+        session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
+        f"days: {tariff.duration_days} -> {days}"
+    )
+
+    await message.answer(
+        f"✅ Дни тарифа изменены на {days} дней",
+        reply_markup=get_back_button("admin_tariffs")
+    )
+    logger.info(f"Admin {message.from_user.id} updated tariff {tariff_id} days to {days}")
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("admin_tariff_edit_rub:"))
@@ -377,12 +377,14 @@ async def start_edit_tariff_rub(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     await state.update_data(tariff_id=tariff_id)
     await state.set_state(AdminStates.editing_tariff_rub)
+
     await callback.message.edit_text(
-        "🛠 Админка › 💰 Тарифы › 💵 <b>Изменить цену ₽</b>\n\n"
+        "🛠 Админка › 💰 Тарифы › 💵 <b>Изменить цену ₽</b>\n"
         "💵 Введите новую цену в рублях:",
         reply_markup=get_back_button("admin_tariffs")
     )
@@ -390,13 +392,15 @@ async def start_edit_tariff_rub(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(AdminStates.editing_tariff_rub)
-async def process_edit_tariff_rub(message: Message, state: FSMContext):
+async def process_edit_tariff_rub(message: Message, state: FSMContext, session: AsyncSession):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     if not message.text:
         await message.answer("⚠️ Ожидается текстовый ввод. Отправьте цену в рублях:")
         return
+
     if message.text.startswith("/"):
         await state.clear()
         return
@@ -411,29 +415,27 @@ async def process_edit_tariff_rub(message: Message, state: FSMContext):
 
     data = await state.get_data()
     tariff_id = data["tariff_id"]
-    session = await get_session()
-    try:
-        tariff = await get_tariff_by_id(session, tariff_id)
-        if not tariff:
-            await message.answer("❌ Тариф не найден", show_alert=True)
-            await state.clear()
-            return
 
-        old_price = tariff.price_rub
-        await update_tariff(session, tariff, price_rub=price_rub)
-        await AuditService.log_action(
-            session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
-            f"RUB: {old_price} -> {price_rub}"
-        )
-
-        await message.answer(
-            f"✅ Цена в рублях изменена на {price_rub} ₽",
-            reply_markup=get_back_button("admin_tariffs")
-        )
-        logger.info(f"Admin {message.from_user.id} updated tariff {tariff_id} price rub to {price_rub}")
+    tariff = await get_tariff_by_id(session, tariff_id)
+    if not tariff:
+        await message.answer("❌ Тариф не найден", show_alert=True)
         await state.clear()
-    finally:
-        await session.close()
+        return
+
+    old_price = tariff.price_rub
+    await update_tariff(session, tariff, price_rub=price_rub)
+
+    await AuditService.log_action(
+        session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
+        f"RUB: {old_price} -> {price_rub}"
+    )
+
+    await message.answer(
+        f"✅ Цена в рублях изменена на {price_rub} ₽",
+        reply_markup=get_back_button("admin_tariffs")
+    )
+    logger.info(f"Admin {message.from_user.id} updated tariff {tariff_id} price rub to {price_rub}")
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("admin_tariff_edit_stars:"))
@@ -441,12 +443,14 @@ async def start_edit_tariff_stars(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     await state.update_data(tariff_id=tariff_id)
     await state.set_state(AdminStates.editing_tariff_stars)
+
     await callback.message.edit_text(
-        "🛠 Админка › 💰 Тарифы › ⭐ <b>Изменить цену Stars</b>\n\n"
+        "🛠 Админка › 💰 Тарифы › ⭐ <b>Изменить цену Stars</b>\n"
         "⭐ Введите новую цену в Stars:",
         reply_markup=get_back_button("admin_tariffs")
     )
@@ -454,13 +458,15 @@ async def start_edit_tariff_stars(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(AdminStates.editing_tariff_stars)
-async def process_edit_tariff_stars(message: Message, state: FSMContext):
+async def process_edit_tariff_stars(message: Message, state: FSMContext, session: AsyncSession):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     if not message.text:
         await message.answer("⚠️ Ожидается текстовый ввод. Отправьте количество Stars:")
         return
+
     if message.text.startswith("/"):
         await state.clear()
         return
@@ -475,26 +481,24 @@ async def process_edit_tariff_stars(message: Message, state: FSMContext):
 
     data = await state.get_data()
     tariff_id = data["tariff_id"]
-    session = await get_session()
-    try:
-        tariff = await get_tariff_by_id(session, tariff_id)
-        if not tariff:
-            await message.answer("❌ Тариф не найден", show_alert=True)
-            await state.clear()
-            return
 
-        old_price = tariff.price_stars
-        await update_tariff(session, tariff, price_stars=price_stars)
-        await AuditService.log_action(
-            session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
-            f"Stars: {old_price} -> {price_stars}"
-        )
-
-        await message.answer(
-            f"✅ Цена в Stars изменена на {price_stars} ⭐",
-            reply_markup=get_back_button("admin_tariffs")
-        )
-        logger.info(f"Admin {message.from_user.id} updated tariff {tariff_id} price stars to {price_stars}")
+    tariff = await get_tariff_by_id(session, tariff_id)
+    if not tariff:
+        await message.answer("❌ Тариф не найден", show_alert=True)
         await state.clear()
-    finally:
-        await session.close()
+        return
+
+    old_price = tariff.price_stars
+    await update_tariff(session, tariff, price_stars=price_stars)
+
+    await AuditService.log_action(
+        session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
+        f"Stars: {old_price} -> {price_stars}"
+    )
+
+    await message.answer(
+        f"✅ Цена в Stars изменена на {price_stars} ⭐",
+        reply_markup=get_back_button("admin_tariffs")
+    )
+    logger.info(f"Admin {message.from_user.id} updated tariff {tariff_id} price stars to {price_stars}")
+    await state.clear()

@@ -13,7 +13,7 @@ router = Router()
     StateFilter("*")
 )
 async def fsm_media_guard(message: Message, state: FSMContext):
-    """🔥 НОВОЕ: защита от стикеров/фото во время активного FSM"""
+    """Защита от стикеров/фото во время активного FSM"""
     await state.clear()
     await message.answer(
         "⚠️ <b>Операция прервана.</b>\n"
@@ -37,9 +37,11 @@ async def handle_unknown_text(message: Message):
     """Обработчик для любых текстовых сообщений, которые не распознаны."""
     if message.text and message.text.startswith("/"):
         return
+
     main_menu_buttons = [
         "👤 Профиль", "🔌 Подключение", "💳 Оплата", "💬 Поддержка", "🛠 Админка"
     ]
     if message.text in main_menu_buttons:
         return
+
     await message.answer(FALLBACK_UNKNOWN_TEXT)
