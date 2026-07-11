@@ -25,6 +25,15 @@ success() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; }
 error() { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
 
+# 🛡️ Утилита для безопасной записи переменных в .env (защита от инъекций $, `, \)
+write_env_var() {
+    local key=$1
+    local value=$2
+    # Экранируем одинарные кавычки, если они вдруг есть в значении
+    value="${value//\'/\'\\\'\'}"
+    echo "${key}='${value}'" >> "$PROJECT_DIR/.env"
+}
+
 check_root() {
     if [ "$EUID" -ne 0 ]; then
         error "Запустите от имени root: sudo bash deploy.sh"
@@ -35,6 +44,12 @@ check_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         log "ОС: $PRETTY_NAME"
+        # 🔥 FIX P0: Явная проверка поддерживаемых ОС
+        if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
+            error "Скрипт поддерживает только Ubuntu и Debian. Обнаружена ОС: $ID"
+        fi
+    else
+        error "Не удалось определить операционную систему (отсутствует /etc/os-release)."
     fi
 }
 
@@ -42,7 +57,8 @@ install_dependencies() {
     log "Обновление пакетов..."
     apt-get update -qq
     log "Установка системных зависимостей..."
-    apt-get install -y -qq \
+    # 🔥 FIX P0: Обработка ошибок apt-get + добавлен rsync
+    if ! apt-get install -y -qq \
         python3 \
         python3-venv \
         python3-pip \
@@ -51,10 +67,13 @@ install_dependencies() {
         curl \
         wget \
         sqlite3 \
+        rsync \
         build-essential \
         cron \
         logrotate \
-        > /dev/null 2>&1
+        > /dev/null 2>&1; then
+        error "Не удалось установить системные зависимости. Проверьте интернет и apt-репозитории."
+    fi
 
     log "Создание системного пользователя projectx..."
     if ! id "projectx" &>/dev/null; then
@@ -68,10 +87,21 @@ install_dependencies() {
 
 migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
-        log "Изоляция кодовой базы: перенос проекта в безопасную директорию $PROJECT_DIR..."
+        log "Изоляция кодовой базы: синхронизация проекта в безопасную директорию $PROJECT_DIR..."
         mkdir -p "$PROJECT_DIR"
-        cp -r "$START_DIR"/. "$PROJECT_DIR/"
-        success "Проект успешно перенесен в $PROJECT_DIR"
+        # 🔥 FIX P0: Используем rsync с жесткими исключениями, чтобы не затереть БД и .env
+        if ! rsync -a --delete \
+            --exclude='.env' \
+            --exclude='bot_data.db' \
+            --exclude='bot_data.db-wal' \
+            --exclude='bot_data.db-shm' \
+            --exclude='.git' \
+            --exclude='venv/' \
+            --exclude='__pycache__/' \
+            "$START_DIR/" "$PROJECT_DIR/"; then
+            error "Ошибка синхронизации файлов. Убедитесь, что rsync установлен."
+        fi
+        success "Проект успешно синхронизирован в $PROJECT_DIR"
     fi
     cd "$PROJECT_DIR"
 }
@@ -107,27 +137,34 @@ setup_env() {
         fi
     fi
 
-    # 🔥 FIX P0: Генерируем валидный url-safe base64 Fernet-ключ через встроенный Python (без внешних зависимостей)
-    log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
-    DB_ENCRYPTION_KEY=$(python3 -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
-    success "Ключ шифрования успешно сгенерирован"
-
     echo ""
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
     echo -e "${YELLOW}  Настройка конфигурации бота${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
+    
     echo -e "${BLUE}[1/4]${NC} Telegram Bot Token (получить у @BotFather)"
     read -p "Введите BOT_TOKEN: " BOT_TOKEN
     [ -z "$BOT_TOKEN" ] && error "BOT_TOKEN не может быть пустым"
+    # 🔥 FIX P0: Валидация формата токена
+    if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then
+        error "Неверный формат BOT_TOKEN. Ожидается формат 123456789:ABCdefGHI..."
+    fi
+
     echo ""
     echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
     read -p "Введите ADMIN_IDS: " ADMIN_IDS
     [ -z "$ADMIN_IDS" ] && error "ADMIN_IDS не может быть пустым"
+    # 🔥 FIX P0: Валидация формата ID
+    if [[ ! "$ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        error "Неверный формат ADMIN_IDS. Ожидались только числовые ID через запятую (например: 123456789,987654321)"
+    fi
+
     echo ""
     echo -e "${BLUE}[3/4]${NC} Username поддержки (без знака @)"
     read -p "Введите SUPPORT_USERNAME [support]: " SUPPORT_USERNAME
     SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
+
     echo ""
     echo -e "${BLUE}[4/4]${NC} Бонус рефереру за первую оплату (в днях)"
     read -p "Введите REFERRAL_BONUS_DAYS [3]: " REFERRAL_BONUS_DAYS
@@ -135,17 +172,25 @@ setup_env() {
     read -p "Лимит устройств по умолчанию [3]: " DEFAULT_DEVICE_LIMIT
     DEFAULT_DEVICE_LIMIT=${DEFAULT_DEVICE_LIMIT:-3}
 
-    cat > "$PROJECT_DIR/.env" << EOF
+    # 🔥 FIX P0: Генерируем ключ через встроенный secrets (без cryptography)
+    log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
+    DB_ENCRYPTION_KEY=$(python3 -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+    success "Ключ шифрования успешно сгенерирован"
+
+    # 🔥 FIX P0: Безопасная запись .env (защита от инъекций $, `, \)
+    cat > "$PROJECT_DIR/.env" << 'HEADER'
 # ProjectX Bot Configuration
-# Создано автоматически: $(date)
-BOT_TOKEN=$BOT_TOKEN
-ADMIN_IDS=$ADMIN_IDS
-SUPPORT_USERNAME=$SUPPORT_USERNAME
-REFERRAL_BONUS_DAYS=$REFERRAL_BONUS_DAYS
-DEFAULT_DEVICE_LIMIT=$DEFAULT_DEVICE_LIMIT
-DB_ENCRYPTION_KEY=$DB_ENCRYPTION_KEY
-DB_PATH=./bot_data.db
-EOF
+# Создано автоматически
+HEADER
+    
+    write_env_var "BOT_TOKEN" "$BOT_TOKEN"
+    write_env_var "ADMIN_IDS" "$ADMIN_IDS"
+    write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
+    write_env_var "REFERRAL_BONUS_DAYS" "$REFERRAL_BONUS_DAYS"
+    write_env_var "DEFAULT_DEVICE_LIMIT" "$DEFAULT_DEVICE_LIMIT"
+    write_env_var "DB_ENCRYPTION_KEY" "$DB_ENCRYPTION_KEY"
+    write_env_var "DB_PATH" "./bot_data.db"
+
     chmod 600 "$PROJECT_DIR/.env"
     success ".env файл создан и защищён"
 }
@@ -164,7 +209,8 @@ asyncio.run(init_db())
 
 setup_systemd() {
     log "Настройка и изоляция systemd сервиса..."
-    systemctl is-active --quiet "$SERVICE_NAME" && systemctl stop "$SERVICE_NAME"
+    # 🔥 FIX: Игнорируем ошибку, если сервис еще не запущен (защита от set -e)
+    systemctl is-active --quiet "$SERVICE_NAME" && systemctl stop "$SERVICE_NAME" || true
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
@@ -203,7 +249,6 @@ setup_backup() {
     log "Настройка регламентного автобэкапа базы данных и ключей..."
     mkdir -p "$BACKUP_DIR"
 
-    # 🔥 FIX P0: Бэкапим И БД, И .env (ключи шифрования)!
     cat > /usr/local/bin/projectx-backup.sh << EOF
 #!/bin/bash
 BACKUP_DIR="$BACKUP_DIR"
@@ -232,8 +277,9 @@ EOF
     chmod +x /usr/local/bin/projectx-backup.sh
 
     CRON_JOB="0 3 * * * /usr/local/bin/projectx-backup.sh >> /var/log/projectx-backup.log 2>&1"
-    crontab -l 2>/dev/null | grep -v "projectx-backup" | crontab -
-    (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+    # 🔥 FIX: Безопасное добавление в cron (игнорируем ошибку, если crontab пуст)
+    (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "$CRON_JOB") | crontab -
+    
     /usr/local/bin/projectx-backup.sh || true
     success "Автобэкап успешно настроен (ежедневно в 3:00, ротация 30 дней)"
 }
@@ -244,8 +290,9 @@ setup_monitoring() {
 #!/bin/bash
 SERVICE_NAME="$SERVICE_NAME"
 BOT_TOKEN_FILE="$PROJECT_DIR/.env"
-ADMIN_IDS=\$(grep "^ADMIN_IDS=" "\$BOT_TOKEN_FILE" | cut -d'=' -f2 | cut -d',' -f1)
-BOT_TOKEN=\$(grep "^BOT_TOKEN=" "\$BOT_TOKEN_FILE" | cut -d'=' -f2)
+# 🔥 FIX P0: Безопасный парсинг .env (cut -d'=' -f2- + удаление кавычек)
+ADMIN_IDS=\$(grep "^ADMIN_IDS=" "\$BOT_TOKEN_FILE" | cut -d'=' -f2- | tr -d '"' | tr -d "'" | cut -d',' -f1)
+BOT_TOKEN=\$(grep "^BOT_TOKEN=" "\$BOT_TOKEN_FILE" | cut -d'=' -f2- | tr -d '"' | tr -d "'")
 
 if ! systemctl is-active --quiet "\$SERVICE_NAME"; then
     systemctl restart "\$SERVICE_NAME"
@@ -260,8 +307,8 @@ EOF
     chmod +x /usr/local/bin/projectx-healthcheck.sh
 
     CRON_HEALTH="*/5 * * * * /usr/local/bin/projectx-healthcheck.sh"
-    crontab -l 2>/dev/null | grep -v "projectx-healthcheck" | crontab -
-    (crontab -l 2>/dev/null; echo "$CRON_HEALTH") | crontab -
+    # 🔥 FIX: Безопасное добавление в cron
+    (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "$CRON_HEALTH") | crontab -
     success "Мониторинг доступности настроен (проверка каждые 5 минут)"
 }
 
