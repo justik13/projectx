@@ -111,3 +111,11 @@ FALLBACK_UNKNOWN_TEXT = (
 
 TOS_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19"
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-04-01-26"
+
+DOWNLOAD_CONF_FALLBACK = (
+    "⚠️ <b>Не удалось автоматически собрать .conf файл</b> для устройства "
+    "<b>{device_name}</b>.\n\n"
+    "Используйте ключ ниже для ручного импорта в приложение AmneziaVPN:\n\n"
+    "<code>{raw_config}</code>\n\n"
+    "<i>💡 Нажмите на моноширинный текст, чтобы скопировать.</i>"
+)

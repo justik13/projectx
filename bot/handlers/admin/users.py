@@ -47,7 +47,7 @@ async def show_users_list(callback: CallbackQuery, state: FSMContext):
         total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
         users = await get_users_paginated(session, page=1, per_page=USERS_PER_PAGE)
         text, kb = await _build_users_list_text_and_kb(users, 1, total_pages, total_users)
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         await callback.answer()
     finally:
         await session.close()
@@ -66,7 +66,7 @@ async def users_pagination(callback: CallbackQuery, state: FSMContext):
         total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
         users = await get_users_paginated(session, page=page, per_page=USERS_PER_PAGE)
         text, kb = await _build_users_list_text_and_kb(users, page, total_pages, total_users)
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         await callback.answer()
     finally:
         await session.close()
