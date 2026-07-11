@@ -1,7 +1,6 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
-from database.connection import get_session
 from database.repositories.users_repo import get_all_users, get_active_users, mark_user_bot_blocked
 from bot.keyboards import get_broadcast_confirm_keyboard, get_back_button
 from bot.states import AdminStates
@@ -10,6 +9,8 @@ import logging
 import asyncio
 from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, TelegramBadRequest
 from services.audit_service import AuditService
+from database.connection import session_scope
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = Router()
 
@@ -40,7 +41,6 @@ async def process_broadcast_message(message: Message, state: FSMContext):
         await state.clear()
         return
         
-    # 🔥 ИЗ ВАРИАНТА 2: Поддержка медиа (фото/документы)
     broadcast_text = message.text or message.caption
     if not broadcast_text:
         await message.answer("⚠️ Отправьте текст или фото/документ с описанием.")
@@ -78,7 +78,6 @@ async def _send_broadcast_to_users(
     content_type: str,
     label: str
 ):
-    """🔥 Вспомогательная функция для отправки рассылки с обработкой 403"""
     total_count = len(user_ids)
     success_count = 0
     fail_count = 0
@@ -87,7 +86,6 @@ async def _send_broadcast_to_users(
 
     for uid in user_ids:
         try:
-            # 🔥 ИСПРАВЛЕНО: переменные теперь приходят из аргументов
             if content_type == "photo" and media_id:
                 await callback.bot.send_photo(uid, media_id, caption=broadcast_text, parse_mode="HTML")
             elif content_type == "document" and media_id:
@@ -115,11 +113,8 @@ async def _send_broadcast_to_users(
             fail_count += 1
             logging.info(f"User {uid} blocked the bot")
             try:
-                session = await get_session()
-                try:
+                async with session_scope() as session:
                     await mark_user_bot_blocked(session, uid)
-                finally:
-                    await session.close()
             except Exception as e:
                 logging.error(f"Failed to mark user {uid} as bot_blocked: {e}")
         except Exception as e:
@@ -138,71 +133,64 @@ async def _send_broadcast_to_users(
         f"success={success_count}, fail={fail_count}"
     )
 
-    session = await get_session()
+    # Audit log
     try:
-        await AuditService.log_action(
-            session, callback.from_user.id, "BROADCAST",
-            details=f"to {label}: {success_count} success, {fail_count} fail"
-        )
-    finally:
-        await session.close()
+        async with session_scope() as session:
+            await AuditService.log_action(
+                session, callback.from_user.id, "BROADCAST",
+                details=f"to {label}: {success_count} success, {fail_count} fail"
+            )
+    except Exception as e:
+        logging.error(f"Failed to log broadcast action: {e}")
 
 
 @router.callback_query(F.data == "broadcast_send_all", AdminStates.confirming_broadcast)
-async def broadcast_to_all(callback: CallbackQuery, state: FSMContext):
+async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     data = await state.get_data()
     broadcast_text = data.get("broadcast_text")
-    media_id = data.get("media_id")          # 🔥 Достаём из state
-    content_type = data.get("content_type")  # 🔥 Достаём из state
+    media_id = data.get("media_id")
+    content_type = data.get("content_type")
     
     if not broadcast_text:
         await callback.answer("❌ Текст сообщения пуст", show_alert=True)
         await state.clear()
         return
 
-    session = await get_session()
-    try:
-        users = await get_all_users(session)
-        user_ids = [user.telegram_id for user in users if not user.is_bot_blocked]
-    finally:
-        await session.close()
+    users = await get_all_users(session)
+    user_ids = [user.telegram_id for user in users if not user.is_bot_blocked]
 
     await _send_broadcast_to_users(
         callback, user_ids, broadcast_text, 
-        media_id, content_type, "Всего"  # 🔥 Передаём media_id и content_type
+        media_id, content_type, "Всего"
     )
     await state.clear()
     await callback.answer()
 
 
 @router.callback_query(F.data == "broadcast_send_active", AdminStates.confirming_broadcast)
-async def broadcast_to_active(callback: CallbackQuery, state: FSMContext):
+async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     data = await state.get_data()
     broadcast_text = data.get("broadcast_text")
-    media_id = data.get("media_id")          # 🔥 Достаём из state
-    content_type = data.get("content_type")  # 🔥 Достаём из state
+    media_id = data.get("media_id")
+    content_type = data.get("content_type")
     
     if not broadcast_text:
         await callback.answer("❌ Текст сообщения пуст", show_alert=True)
         await state.clear()
         return
 
-    session = await get_session()
-    try:
-        users = await get_active_users(session)
-        user_ids = [user.telegram_id for user in users]
-    finally:
-        await session.close()
+    users = await get_active_users(session)
+    user_ids = [user.telegram_id for user in users]
 
     await _send_broadcast_to_users(
         callback, user_ids, broadcast_text, 
-        media_id, content_type, "Активных"  # 🔥 Передаём media_id и content_type
+        media_id, content_type, "Активных"
     )
     await state.clear()
     await callback.answer()
