@@ -40,6 +40,7 @@ class SubscriptionService:
         telegram_id: int,
         days: int,
         new_device_limit: Optional[int] = None,
+        new_tariff_id: Optional[int] = None,
     ) -> Optional[User]:
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user:
@@ -56,9 +57,11 @@ class SubscriptionService:
         user.notified_1d = False
         user.notified_2h = False
 
-        # Обновляем лимит устройств если передан
         if new_device_limit is not None:
             user.device_limit = new_device_limit
+
+        if new_tariff_id is not None:
+            user.current_tariff_id = new_tariff_id
 
         await session.commit()
         return user

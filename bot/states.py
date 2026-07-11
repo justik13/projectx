@@ -17,8 +17,8 @@ class AdminStates(StatesGroup):
     confirming_broadcast = State()
     adding_server = State()
     editing_server = State()
-    adding_tariff = State()
+    # tariff creation REMOVED — tariffs are hardcoded
     editing_tariff_days = State()
-    editing_tariff_device_limit = State()  # ← НОВОЕ
+    editing_tariff_device_limit = State()
     editing_tariff_rub = State()
     editing_tariff_stars = State()

@@ -14,7 +14,9 @@ def _get_tariff_group_name(device_limit: int) -> str:
         return f"🏢 Бизнес ({device_limit} устр.)"
 
 
-def get_payment_tariff_keyboard(tariffs: list) -> InlineKeyboardMarkup:
+def get_payment_tariff_keyboard(
+    tariffs: list, current_tariff_id: int | None = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
     # Группируем тарифы по device_limit
@@ -27,15 +29,16 @@ def get_payment_tariff_keyboard(tariffs: list) -> InlineKeyboardMarkup:
 
     # Сортируем группы по device_limit
     for limit in sorted(grouped.keys()):
-        # Заголовок группы (некликабельная кнопка-разделитель)
         group_name = _get_tariff_group_name(limit)
         builder.button(text=group_name, callback_data="noop_group_header")
 
-        # Тарифы внутри группы (сортировка по duration_days)
         for tariff in sorted(grouped[limit], key=lambda t: t.duration_days):
-            device_limit = getattr(tariff, 'device_limit', 2)
+            # Пометка текущего тарифа
+            is_current = (current_tariff_id is not None and tariff.id == current_tariff_id)
+            badge = " ✅" if is_current else ""
+
             builder.button(
-                text=f"⏱ {tariff.duration_days} дн. — {tariff.price_rub}₽ / {tariff.price_stars}⭐",
+                text=f"⏱ {tariff.duration_days} дн. — {tariff.price_rub}₽ / {tariff.price_stars}⭐{badge}",
                 callback_data=f"select_tariff:{tariff.id}",
             )
 

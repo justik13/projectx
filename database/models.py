@@ -18,6 +18,9 @@ class User(Base):
     tos_accepted: Mapped[bool] = mapped_column(Boolean, default=True)
     subscription_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     device_limit: Mapped[int] = mapped_column(Integer, default=2)
+    current_tariff_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True
+    )
     referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     referral_days: Mapped[int] = mapped_column(Integer, default=0)
     last_payment_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
@@ -34,6 +37,7 @@ class User(Base):
 
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
+    current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
 
 
 class VPNProfile(Base):
@@ -87,7 +91,7 @@ class Tariff(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
-    device_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)  # ← НОВОЕ ПОЛЕ
+    device_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     price_rub: Mapped[int] = mapped_column(Integer, nullable=False)
     price_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

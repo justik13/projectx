@@ -1,5 +1,4 @@
 import logging
-
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -17,6 +16,7 @@ from database.models import User
 from database.repositories.payments_repo import get_user_payments
 from database.repositories.profiles_repo import get_user_profiles
 from database.repositories.users_repo import get_user_by_telegram_id, get_user_referrals
+from database.repositories.tariffs_repo import get_tariff_by_id
 from services.subscription import SubscriptionService
 from utils.formatters import format_datetime, format_days_left, format_traffic
 from utils.telegram import safe, safe_delete_message
@@ -25,18 +25,34 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# Рендер карточки профиля (используется и для message, и для callback)
-# ============================================================
+def _get_tariff_display_name(device_limit: int) -> str:
+    """Человекочитаемое название тарифа по device_limit."""
+    if device_limit <= 2:
+        return "📱 Базовый"
+    elif device_limit <= 5:
+        return "👨‍👩‍👧‍👦 Семейный"
+    elif device_limit <= 10:
+        return "🚀 Pro"
+    else:
+        return "🏢 Бизнес"
+
 
 async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
     total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
-
     has_access = await SubscriptionService.check_access(session, user.telegram_id)
-
     referrals_count = len(await get_user_referrals(session, user.telegram_id))
+
+    # Определяем название текущего тарифа
+    tariff_name = "—"
+    if user.current_tariff_id:
+        tariff = await get_tariff_by_id(session, user.current_tariff_id)
+        if tariff:
+            dl = getattr(tariff, 'device_limit', user.device_limit)
+            tariff_name = f"{_get_tariff_display_name(dl)} ({dl} устр.)"
+    elif user.device_limit:
+        tariff_name = f"{_get_tariff_display_name(user.device_limit)} ({user.device_limit} устр.)"
 
     rendered = texts.PROFILE_TEXT.format(
         name=safe(user.first_name or "Пользователь"),
@@ -51,6 +67,7 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         total_traffic=format_traffic(total_traffic),
         referrals_count=referrals_count,
         referral_days=user.referral_days,
+        tariff_name=tariff_name,
     )
 
     if edit:
@@ -62,10 +79,6 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         await target.answer(rendered, reply_markup=get_profile_keyboard(), parse_mode="HTML")
 
 
-# ============================================================
-# Роуты
-# ============================================================
-
 @router.message(F.text == "👤 Профиль")
 async def show_profile(
     message: Message, state: FSMContext,
@@ -73,11 +86,9 @@ async def show_profile(
 ):
     await state.clear()
     await safe_delete_message(message)
-
     if not db_user:
         await message.answer(texts.ERROR_USER_NOT_FOUND)
         return
-
     await _render_profile(message, db_user, session, edit=False)
 
 
@@ -87,18 +98,12 @@ async def back_to_profile(
     db_user: User | None = None, session: AsyncSession = None,
 ):
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-
     await _render_profile(callback.message, db_user, session, edit=True)
     await callback.answer()
 
-
-# ============================================================
-# История платежей
-# ============================================================
 
 @router.callback_query(F.data == "user_history")
 async def show_history(
@@ -106,7 +111,6 @@ async def show_history(
     db_user: User | None = None, session: AsyncSession = None,
 ):
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
@@ -122,7 +126,6 @@ async def show_history(
             date = format_datetime(p.paid_at or p.created_at)
             currency = "⭐" if p.currency == "stars" else "₽"
             rendered += f"{status} {date} | {p.amount} {currency}\n"
-
         if len(payments) > 10:
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
 
@@ -133,17 +136,12 @@ async def show_history(
     )
 
 
-# ============================================================
-# Рефералы
-# ============================================================
-
 @router.callback_query(F.data == "referral")
 async def show_referral(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
 ):
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
@@ -171,7 +169,6 @@ async def show_referrals_list(
     db_user: User | None = None, session: AsyncSession = None,
 ):
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
