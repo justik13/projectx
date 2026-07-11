@@ -76,65 +76,6 @@ migrate_to_opt() {
     cd "$PROJECT_DIR"
 }
 
-setup_env() {
-    log "Настройка .env файла..."
-    if [ -f "$PROJECT_DIR/.env" ]; then
-        warn "Файл .env уже существует"
-        read -p "Перезаписать его новым конфигуратором? (y/N): " overwrite
-        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
-            success "Используется существующий .env"
-            return
-        fi
-    fi
-
-    # 🔥 FIX P0: Генерируем валидный url-safe base64 Fernet-ключ через Python
-    log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
-    DB_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>/dev/null || python3 -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
-    success "Ключ шифрования успешно сгенерирован"
-
-    echo ""
-    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}  Настройка конфигурации бота${NC}"
-    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-
-    echo -e "${BLUE}[1/4]${NC} Telegram Bot Token (получить у @BotFather)"
-    read -p "Введите BOT_TOKEN: " BOT_TOKEN
-    [ -z "$BOT_TOKEN" ] && error "BOT_TOKEN не может быть пустым"
-    echo ""
-
-    echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
-    read -p "Введите ADMIN_IDS: " ADMIN_IDS
-    [ -z "$ADMIN_IDS" ] && error "ADMIN_IDS не может быть пустым"
-    echo ""
-
-    echo -e "${BLUE}[3/4]${NC} Username поддержки (без знака @)"
-    read -p "Введите SUPPORT_USERNAME [support]: " SUPPORT_USERNAME
-    SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
-    echo ""
-
-    echo -e "${BLUE}[4/4]${NC} Бонус рефереру за первую оплату (в днях)"
-    read -p "Введите REFERRAL_BONUS_DAYS [3]: " REFERRAL_BONUS_DAYS
-    REFERRAL_BONUS_DAYS=${REFERRAL_BONUS_DAYS:-3}
-    read -p "Лимит устройств по умолчанию [3]: " DEFAULT_DEVICE_LIMIT
-    DEFAULT_DEVICE_LIMIT=${DEFAULT_DEVICE_LIMIT:-3}
-
-    cat > "$PROJECT_DIR/.env" << EOF
-# ProjectX Bot Configuration
-# Создано автоматически: $(date)
-BOT_TOKEN=$BOT_TOKEN
-ADMIN_IDS=$ADMIN_IDS
-SUPPORT_USERNAME=$SUPPORT_USERNAME
-REFERRAL_BONUS_DAYS=$REFERRAL_BONUS_DAYS
-DEFAULT_DEVICE_LIMIT=$DEFAULT_DEVICE_LIMIT
-DB_ENCRYPTION_KEY=$DB_ENCRYPTION_KEY
-DB_PATH=./bot_data.db
-EOF
-
-    chmod 600 "$PROJECT_DIR/.env"
-    success ".env файл создан и защищён"
-}
-
 setup_venv() {
     log "Настройка Python виртуального окружения..."
     if [ ! -d "$VENV_DIR" ]; then
@@ -155,6 +96,60 @@ setup_venv() {
     fi
 }
 
+setup_env() {
+    log "Настройка .env файла..."
+    if [ -f "$PROJECT_DIR/.env" ]; then
+        warn "Файл .env уже существует"
+        read -p "Перезаписать его новым конфигуратором? (y/N): " overwrite
+        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
+            success "Используется существующий .env"
+            return
+        fi
+    fi
+
+    # 🔥 FIX P0: Генерируем валидный url-safe base64 Fernet-ключ через встроенный Python (без внешних зависимостей)
+    log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
+    DB_ENCRYPTION_KEY=$(python3 -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+    success "Ключ шифрования успешно сгенерирован"
+
+    echo ""
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}  Настройка конфигурации бота${NC}"
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${BLUE}[1/4]${NC} Telegram Bot Token (получить у @BotFather)"
+    read -p "Введите BOT_TOKEN: " BOT_TOKEN
+    [ -z "$BOT_TOKEN" ] && error "BOT_TOKEN не может быть пустым"
+    echo ""
+    echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
+    read -p "Введите ADMIN_IDS: " ADMIN_IDS
+    [ -z "$ADMIN_IDS" ] && error "ADMIN_IDS не может быть пустым"
+    echo ""
+    echo -e "${BLUE}[3/4]${NC} Username поддержки (без знака @)"
+    read -p "Введите SUPPORT_USERNAME [support]: " SUPPORT_USERNAME
+    SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
+    echo ""
+    echo -e "${BLUE}[4/4]${NC} Бонус рефереру за первую оплату (в днях)"
+    read -p "Введите REFERRAL_BONUS_DAYS [3]: " REFERRAL_BONUS_DAYS
+    REFERRAL_BONUS_DAYS=${REFERRAL_BONUS_DAYS:-3}
+    read -p "Лимит устройств по умолчанию [3]: " DEFAULT_DEVICE_LIMIT
+    DEFAULT_DEVICE_LIMIT=${DEFAULT_DEVICE_LIMIT:-3}
+
+    cat > "$PROJECT_DIR/.env" << EOF
+# ProjectX Bot Configuration
+# Создано автоматически: $(date)
+BOT_TOKEN=$BOT_TOKEN
+ADMIN_IDS=$ADMIN_IDS
+SUPPORT_USERNAME=$SUPPORT_USERNAME
+REFERRAL_BONUS_DAYS=$REFERRAL_BONUS_DAYS
+DEFAULT_DEVICE_LIMIT=$DEFAULT_DEVICE_LIMIT
+DB_ENCRYPTION_KEY=$DB_ENCRYPTION_KEY
+DB_PATH=./bot_data.db
+EOF
+    chmod 600 "$PROJECT_DIR/.env"
+    success ".env файл создан и защищён"
+}
+
 init_database() {
     log "Инициализация асинхронной базы данных SQLite..."
     cd "$PROJECT_DIR"
@@ -170,6 +165,7 @@ asyncio.run(init_db())
 setup_systemd() {
     log "Настройка и изоляция systemd сервиса..."
     systemctl is-active --quiet "$SERVICE_NAME" && systemctl stop "$SERVICE_NAME"
+
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
@@ -197,6 +193,7 @@ ProtectHome=true
 [Install]
 WantedBy=multi-user.target
 EOF
+
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     success "Systemd сервис успешно настроен и добавлен в автозапуск"
@@ -205,7 +202,7 @@ EOF
 setup_backup() {
     log "Настройка регламентного автобэкапа базы данных и ключей..."
     mkdir -p "$BACKUP_DIR"
-    
+
     # 🔥 FIX P0: Бэкапим И БД, И .env (ключи шифрования)!
     cat > /usr/local/bin/projectx-backup.sh << EOF
 #!/bin/bash
@@ -218,20 +215,22 @@ if [ -f "\$DB_FILE" ]; then
     # Бэкап БД
     sqlite3 "\$DB_FILE" ".backup '\$BACKUP_DIR/bot_data_\$DATE.db'"
     gzip "\$BACKUP_DIR/bot_data_\$DATE.db"
-    
+
     # 🔥 КРИТИЧНО: Бэкап ключей шифрования (Fernet)
     if [ -f "\$ENV_FILE" ]; then
         cp "\$ENV_FILE" "\$BACKUP_DIR/env_\$DATE.backup"
         gzip "\$BACKUP_DIR/env_\$DATE.backup"
     fi
-    
+
     # Ротация (30 дней)
     find "\$BACKUP_DIR" -name "bot_data_*.db.gz" -mtime +30 -delete
     find "\$BACKUP_DIR" -name "env_*.backup.gz" -mtime +30 -delete
+
     echo "[\$(date)] Backup completed successfully."
 fi
 EOF
     chmod +x /usr/local/bin/projectx-backup.sh
+
     CRON_JOB="0 3 * * * /usr/local/bin/projectx-backup.sh >> /var/log/projectx-backup.log 2>&1"
     crontab -l 2>/dev/null | grep -v "projectx-backup" | crontab -
     (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
@@ -259,6 +258,7 @@ if ! systemctl is-active --quiet "\$SERVICE_NAME"; then
 fi
 EOF
     chmod +x /usr/local/bin/projectx-healthcheck.sh
+
     CRON_HEALTH="*/5 * * * * /usr/local/bin/projectx-healthcheck.sh"
     crontab -l 2>/dev/null | grep -v "projectx-healthcheck" | crontab -
     (crontab -l 2>/dev/null; echo "$CRON_HEALTH") | crontab -
@@ -316,22 +316,29 @@ main() {
     echo ""
     mkdir -p /var/log
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
+
     check_root
     check_os
     install_dependencies
     migrate_to_opt
-    setup_env
+    
+    # 🔥 FIX P0: Сначала ставим venv и зависимости, потом генерируем .env
     setup_venv
+    setup_env
+    
     init_database
+    
     chown -R projectx:projectx "$PROJECT_DIR"
     chmod 600 "$PROJECT_DIR/.env"
     log "Конфиденциальные права на файлы обновлены для пользователя projectx"
+    
     setup_systemd
     setup_backup
     setup_monitoring
     setup_logrotate
     start_bot
     show_status
+
     echo ""
     echo -e "${GREEN}✨ Деплой завершён успешно!${NC}"
 }
