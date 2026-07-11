@@ -45,6 +45,7 @@ async def get_session() -> AsyncSession:
 
 @asynccontextmanager
 async def session_scope():
+    """Контекстный менеджер для автоматического управления сессией БД"""
     session = await get_session()
     try:
         yield session

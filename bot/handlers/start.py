@@ -2,11 +2,11 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
-from database.connection import get_session
+from sqlalchemy.ext.asyncio import AsyncSession
 from database.repositories.users_repo import get_user_by_telegram_id
 from services.subscription import SubscriptionService
 from bot.texts import WELCOME_TEXT, HELP_TEXT
-from bot.keyboards import get_main_menu, get_help_keyboard
+from bot.keyboards.common import get_main_menu, get_help_keyboard
 from config.settings import get_settings
 import logging
 import re
@@ -25,29 +25,32 @@ def parse_referral_id(command_args: str) -> int | None:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, command: Command):
+async def cmd_start(
+    message: Message,
+    state: FSMContext,
+    command: Command,
+    session: AsyncSession  # ← Инжектируется через DBSessionMiddleware
+):
     await state.clear()
     telegram_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
     ref_id = parse_referral_id(command.args) if command.args else None
-    session = await get_session()
-    try:
-        user = await get_user_by_telegram_id(session, telegram_id)
-        if not user:
-            user = await SubscriptionService.process_onboarding(
-                session, telegram_id, username, first_name, ref_id
-            )
-            logging.info(f"New user created: {telegram_id} (referred by {ref_id})")
-        settings = get_settings()
-        is_admin = telegram_id in settings.ADMIN_IDS
-        await message.answer(
-            WELCOME_TEXT,
-            reply_markup=get_main_menu(is_admin=is_admin),
-            parse_mode="HTML"
+
+    user = await get_user_by_telegram_id(session, telegram_id)
+    if not user:
+        user = await SubscriptionService.process_onboarding(
+            session, telegram_id, username, first_name, ref_id
         )
-    finally:
-        await session.close()
+        logging.info(f"New user created: {telegram_id} (referred by {ref_id})")
+
+    settings = get_settings()
+    is_admin = telegram_id in settings.ADMIN_IDS
+    await message.answer(
+        WELCOME_TEXT,
+        reply_markup=get_main_menu(is_admin=is_admin),
+        parse_mode="HTML"
+    )
 
 
 @router.message(Command("help"))
@@ -62,11 +65,6 @@ async def cmd_help(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "back_to_main_menu")
 async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
-    """
-    Возврат в главное меню.
-    Просто удаляет текущее inline-сообщение, оставляя Reply-клавиатуру.
-    НЕ дублирует Welcome текст.
-    """
     await state.clear()
     try:
         await callback.message.delete()
