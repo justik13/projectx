@@ -1,7 +1,7 @@
 from aiogram import Router, F
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 
 from bot.constants import REPLY_MENU_BUTTONS
 from bot import texts
