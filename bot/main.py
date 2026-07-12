@@ -1,6 +1,5 @@
 import asyncio
 import logging
-
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuButtonCommands
@@ -24,11 +23,9 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # Глобальный обработчик исключений (единая точка)
 # ============================================================
-
 async def global_error_handler(event: ErrorEvent) -> bool:
     """Ловит любые необработанные исключения и отвечает пользователю унифицированно."""
     logger.critical(f"Unhandled exception: {event.exception}", exc_info=True)
-
     try:
         if event.update.callback_query:
             await event.update.callback_query.answer(
@@ -40,18 +37,16 @@ async def global_error_handler(event: ErrorEvent) -> bool:
             )
     except Exception:
         pass
-
     return True
 
 
 # ============================================================
 # Конфигурация и запуск
 # ============================================================
-
 async def setup_bot_commands(bot: Bot):
+    # 🔧 ФИКС: Оставлена только /start. /help удалена по RF compliance & UX
     commands = [
         BotCommand(command="start", description="🚀 Запустить бота"),
-        BotCommand(command="help", description="❓ Помощь и FAQ"),
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
@@ -65,13 +60,11 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     # Порядок middleware важен
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
-
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
-
-    dp.message.middleware(ThrottlingMiddleware(limit=1.0))
-    dp.callback_query.middleware(ThrottlingMiddleware(limit=0.5))
-
+    # 🔧 ФИКС: Снижен троттлинг — 0.3с для текста, 0.1с для кнопок
+    dp.message.middleware(ThrottlingMiddleware(limit=0.3))
+    dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
     dp.message.middleware(ChatActionMiddleware())
 
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
@@ -101,11 +94,11 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
 async def main():
     settings = get_settings()
-
     try:
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
+
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
@@ -120,7 +113,6 @@ async def main():
 
         logger.info("Запуск polling...")
         await dp.start_polling(bot)
-
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:

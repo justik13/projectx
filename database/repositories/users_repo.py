@@ -112,3 +112,9 @@ async def mark_user_bot_blocked(session: AsyncSession, telegram_id: int) -> None
         update(User).where(User.telegram_id == telegram_id).values(is_bot_blocked=True)
     )
     await session.commit()
+
+async def count_users_with_tariff(session: AsyncSession, tariff_id: int) -> int:
+    """Подсчитывает количество пользователей с указанным current_tariff_id"""
+    stmt = select(func.count(User.id)).where(User.current_tariff_id == tariff_id)
+    result = await session.execute(stmt)
+    return result.scalar_one() or 0

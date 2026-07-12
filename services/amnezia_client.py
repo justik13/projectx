@@ -102,3 +102,9 @@ class AmneziaClient:
                 break
             current_skip += len(clients)
         return all_clients
+    
+    async def delete_client(self, client_id: str) -> bool:
+        """Удаляет клиента с сервера (используется при массовом удалении)"""
+        data = {"clientId": client_id, "protocol": AMNEZIA_PROTOCOL}
+        result = await self._request("DELETE", "/clients", json=data)
+        return result is not None

@@ -1,5 +1,6 @@
 import logging
 import math
+
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -14,14 +15,15 @@ from database.repositories.tariffs_repo import (
     get_tariff_count,
     get_tariffs_paginated,
     update_tariff,
+    delete_tariff,
 )
+from database.repositories.users_repo import count_users_with_tariff
 from services.audit_service import AuditService
 from utils.admin import is_admin
 from utils.telegram import safe_edit_text
 
 router = Router()
 logger = logging.getLogger(__name__)
-
 TARIFFS_PER_PAGE = 10
 
 
@@ -33,10 +35,9 @@ async def _build_tariffs_list_text_and_kb(
 ) -> tuple[str, InlineKeyboardBuilder]:
     rendered = (
         f"🛠 Админка › 💰 <b>Тарифы</b>\n"
-        f"(стр. {page}/{total_pages}) · Всего: {total}\n"
+        f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
     )
     builder = InlineKeyboardBuilder()
-
     if not tariffs:
         rendered += "_Тарифов пока нет_\n"
     else:
@@ -57,7 +58,6 @@ async def _build_tariffs_list_text_and_kb(
     if page < total_pages:
         builder.button(text="➡️", callback_data=f"admin_tariffs_page:{page + 1}")
 
-    # Кнопки "Добавить" НЕТ — тарифы хардкоднуты
     builder.button(text="← В админку", callback_data="admin_menu")
     builder.adjust(1)
     return rendered, builder
@@ -125,11 +125,9 @@ async def show_tariff_card(callback: CallbackQuery, state: FSMContext, session: 
 
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff:
         await callback.answer(texts.ERROR_TARIFF_NOT_FOUND, show_alert=True)
         return
-
     await _show_tariff_card(callback, tariff)
     await callback.answer()
 
@@ -143,14 +141,12 @@ async def toggle_tariff(callback: CallbackQuery, state: FSMContext, session: Asy
 
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff:
         await callback.answer(texts.ERROR_TARIFF_NOT_FOUND, show_alert=True)
         return
 
     new_status = not tariff.is_active
     await update_tariff(session, tariff, is_active=new_status)
-
     await AuditService.log_action(
         session, callback.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
         f"toggled to {'active' if new_status else 'inactive'}",
@@ -165,6 +161,48 @@ async def toggle_tariff(callback: CallbackQuery, state: FSMContext, session: Asy
 
 
 # ============================================================
+# 🔧 НОВОЕ: Удаление тарифа с проверкой на активных пользователей
+# ============================================================
+@router.callback_query(F.data.startswith("admin_tariff_delete:"))
+async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
+        return
+    await state.clear()
+
+    tariff_id = int(callback.data.split(":")[1])
+    tariff = await get_tariff_by_id(session, tariff_id)
+    if not tariff:
+        await callback.answer(texts.ERROR_TARIFF_NOT_FOUND, show_alert=True)
+        return
+
+    # Проверяем, используется ли тариф активными клиентами
+    user_count = await count_users_with_tariff(session, tariff_id)
+    if user_count > 0:
+        await callback.message.edit_text(
+            texts.ERROR_TARIFF_IN_USE.format(user_count=user_count),
+            reply_markup=get_back_button(f"admin_tariff_card:{tariff_id}"),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    # Тариф не используется — удаляем
+    device_limit = getattr(tariff, 'device_limit', 2)
+    await delete_tariff(session, tariff)
+    await AuditService.log_action(
+        session, callback.from_user.id, "DELETE_TARIFF", "Tariff", tariff_id,
+        f"{tariff.duration_days}d/{device_limit}dev/{tariff.price_rub}rub",
+    )
+    await callback.answer(
+        f"✅ Тариф ({tariff.duration_days} дн., {device_limit} устр.) удалён",
+        show_alert=True,
+    )
+    logger.info(f"Admin {callback.from_user.id} deleted tariff {tariff_id}")
+    await _show_tariffs_list(callback, session, page=1)
+
+
+# ============================================================
 # Редактирование полей тарифа
 # ============================================================
 async def _start_edit_tariff(
@@ -174,6 +212,7 @@ async def _start_edit_tariff(
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
+
     tariff_id = int(callback.data.split(":")[1])
     await state.update_data(tariff_id=tariff_id)
     await state.set_state(field_state)
@@ -217,7 +256,6 @@ async def _apply_tariff_int_edit(
     data = await state.get_data()
     tariff_id = data["tariff_id"]
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff:
         await message.answer(texts.ERROR_TARIFF_NOT_FOUND)
         await state.clear()
@@ -225,7 +263,6 @@ async def _apply_tariff_int_edit(
 
     old_value = getattr(tariff, field_name)
     await update_tariff(session, tariff, **{field_name: new_value})
-
     await AuditService.log_action(
         session, message.from_user.id, "EDIT_TARIFF", "Tariff", tariff_id,
         audit_detail_fn(old_value, new_value),

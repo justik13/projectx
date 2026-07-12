@@ -96,3 +96,18 @@ async def get_servers_paginated(session: AsyncSession, page: int = 1, per_page: 
         select(Server).order_by(Server.name).offset(offset).limit(per_page)
     )
     return result.scalars().all()
+
+async def get_server_by_api_url(session: AsyncSession, api_url: str) -> Optional[Server]:
+    """Проверяет, существует ли сервер с указанным api_url"""
+    stmt = select(Server).where(Server.api_url == api_url)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def delete_profiles_by_server_id(session: AsyncSession, server_id: int) -> int:
+    """Массово удаляет все VPN-профили указанного сервера из БД"""
+    from sqlalchemy import delete as sql_delete
+    stmt = sql_delete(VPNProfile).where(VPNProfile.server_id == server_id)
+    result = await session.execute(stmt)
+    await session.commit()
+    return result.rowcount
