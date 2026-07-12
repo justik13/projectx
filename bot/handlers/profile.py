@@ -4,7 +4,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.keyboards import get_back_button, get_history_keyboard, get_profile_keyboard, get_referral_keyboard
 from bot import texts
 from config.settings import get_settings
@@ -34,7 +33,6 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
     referrals_count = len(await get_user_referrals(session, user.telegram_id))
 
     if has_access:
-        # 🔧 ФИКС: Лимит устройств берём СТРОГО из текущего тарифа
         tariff_name = "—"
         device_limit = 0
         if user.current_tariff_id:
@@ -58,7 +56,6 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         )
         kb = get_profile_keyboard(is_active=True)
     else:
-        # 🔧 ФИКС: Для неактивных — упрощённый профиль без мусора
         rendered = texts.PROFILE_TEXT_INACTIVE.format(
             name=safe(user.first_name or "Пользователь"),
             username=safe(user.username or "—"),
@@ -104,7 +101,6 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-
     payments = await get_user_payments(session, db_user.id)
     if not payments:
         rendered = texts.HISTORY_HEADER + texts.HISTORY_EMPTY
@@ -117,7 +113,6 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
             rendered += f"{status} {date} | {p.amount} {currency}\n"
         if len(payments) > 10:
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
-
     await callback.message.edit_text(rendered, reply_markup=get_history_keyboard(), parse_mode="HTML")
 
 @router.callback_query(F.data == "referral")
@@ -126,11 +121,9 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-
     bot_info = await callback.bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{db_user.telegram_id}"
     invited_count = len(await get_user_referrals(session, db_user.telegram_id))
-
     await callback.message.edit_text(
         texts.REFERRAL_TEXT.format(
             bonus_days=get_settings().REFERRAL_BONUS_DAYS,
@@ -148,23 +141,17 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-
     referrals = await get_user_referrals(session, db_user.telegram_id)
     bonus_days = get_settings().REFERRAL_BONUS_DAYS
-
     if not referrals:
         rendered = texts.REFERRAL_LIST_EMPTY
     else:
         rendered = texts.REFERRAL_LIST_HEADER
-        # 🔧 ФИКС: Ограничиваем вывод 20 записями для защиты от лимита Telegram
         for referral in referrals[:20]:
             safe_user = f"@{safe(referral.username)}" if referral.username else f"ID: {referral.telegram_id}"
             rendered += f"• {safe_user} — {bonus_days} бонусных дней\n"
-        
         if len(referrals) > 20:
             rendered += f"\n<i>... и еще {len(referrals) - 20} рефералов</i>"
-            
         rendered += texts.REFERRAL_LIST_FOOTER.format(count=len(referrals))
-
     await callback.message.edit_text(rendered, reply_markup=get_back_button("referral"), parse_mode="HTML")
     await callback.answer()

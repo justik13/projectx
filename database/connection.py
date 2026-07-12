@@ -71,7 +71,6 @@ async def _run_migrations(conn):
             user_columns = {col['name'] for col in inspector.get_columns('users')}
             if 'device_limit' not in user_columns:
                 logging.info("🔄 Migration: adding device_limit to users...")
-                # 🔧 ФИКС: Дефолт = 0 (нет подписки = нет устройств)
                 sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0"))
                 logging.info("✅ Migration: device_limit added to users")
             

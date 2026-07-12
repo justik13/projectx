@@ -18,21 +18,12 @@ def get_hub_keyboard(is_admin: bool = False, is_active: bool = False) -> InlineK
     return builder.as_markup()
 
 def get_back_button(callback_data: str = "back_to_main_menu") -> InlineKeyboardMarkup:
-    """
-    Универсальная кнопка возврата.
-    - Если callback_data == "back_to_main_menu" → текст "← В главное меню"
-    - Иначе → текст "← Назад"
-    """
     builder = InlineKeyboardBuilder()
-    if callback_data == "back_to_main_menu":
-        text = "← В главное меню"
-    else:
-        text = "← Назад"
+    text = "← В главное меню" if callback_data == "back_to_main_menu" else "← Назад"
     builder.button(text=text, callback_data=callback_data)
     return builder.as_markup()
 
 def get_back_with_home_button(back_callback: str = "back_to_main_menu") -> InlineKeyboardMarkup:
-    """Двойная кнопка: Назад + В главное меню — для глубоко вложенных экранов."""
     builder = InlineKeyboardBuilder()
     builder.button(text="← Назад", callback_data=back_callback)
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")

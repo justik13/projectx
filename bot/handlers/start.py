@@ -6,7 +6,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.keyboards.common import get_hub_keyboard
 from bot import texts
 from config.settings import get_settings
@@ -18,13 +17,10 @@ from utils.telegram import safe
 router = Router()
 logger = logging.getLogger(__name__)
 
-
 def parse_referral_id(command_args: str) -> int | None:
-    if not command_args:
-        return None
+    if not command_args: return None
     match = re.match(r"ref_(\d+)", command_args)
     return int(match.group(1)) if match else None
-
 
 async def render_hub(target, user: User, session: AsyncSession, *, edit: bool):
     is_active = await SubscriptionService.check_access(session, user.telegram_id)
@@ -32,24 +28,26 @@ async def render_hub(target, user: User, session: AsyncSession, *, edit: bool):
     name = safe(user.first_name or "Пользователь")
     text = texts.HUB_HEADER.format(name=name)
     kb = get_hub_keyboard(is_admin=is_admin, is_active=is_active)
-
     if edit:
-        try:
-            await target.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest:
-            pass
+        try: await target.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except TelegramBadRequest: pass
     else:
         await target.answer(text, reply_markup=kb, parse_mode="HTML")
-
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, command: Command, session: AsyncSession):
     await state.clear()
+    # 🧹 Чистота чата: удаляем входящую команду /start, чтобы не было спама
+    try: await message.delete()
+    except Exception: pass
+
     telegram_id = message.from_user.id
     ref_id = parse_referral_id(command.args) if command.args else None
-
     user = await get_user_by_telegram_id(session, telegram_id)
+    is_new = False
+
     if not user:
+        is_new = True
         await SubscriptionService.process_onboarding(
             session, telegram_id, message.from_user.username,
             message.from_user.first_name, ref_id,
@@ -57,14 +55,14 @@ async def cmd_start(message: Message, state: FSMContext, command: Command, sessi
         logger.info(f"New user created: {telegram_id} (referred by {ref_id})")
         user = await get_user_by_telegram_id(session, telegram_id)
 
+    # ⚖️ Оферта показывается только при первой регистрации
+    if is_new:
+        await message.answer(texts.WELCOME_TEXT, parse_mode="HTML")
+
     await render_hub(message, user, session, edit=False)
 
-
 @router.callback_query(F.data == "back_to_main_menu")
-async def back_to_main_menu(
-    callback: CallbackQuery, state: FSMContext,
-    db_user: User | None = None, session: AsyncSession = None,
-):
+async def back_to_main_menu(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await state.clear()
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)

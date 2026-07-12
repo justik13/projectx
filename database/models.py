@@ -8,35 +8,24 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tos_accepted: Mapped[bool] = mapped_column(Boolean, default=True)
     subscription_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-    
-    # 🔧 ФИКС: device_limit теперь = 0 по умолчанию (нет подписки = нет устройств)
-    # Реальный лимит берётся из tariffs.device_limit через user.current_tariff_id
-    device_limit: Mapped[int] = mapped_column(Integer, default=0)
-    
-    current_tariff_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True
-    )
+    device_limit: Mapped[int] = mapped_column(Integer, default=0)  # 🔧 0 по умолчанию
+    current_tariff_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
     referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     referral_days: Mapped[int] = mapped_column(Integer, default=0)
     last_payment_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False),
-        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     notified_3d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_1d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_2h: Mapped[bool] = mapped_column(Boolean, default=False)
-
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
