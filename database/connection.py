@@ -22,12 +22,11 @@ DEFAULT_TARIFFS = [
     {"duration_days": 90, "device_limit": 10, "price_rub": 850, "price_stars": 850, "sort_order": 31},
 ]
 
-
 async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
     db_url = f"sqlite+aiosqlite:///{settings.DB_PATH}"
-
+    
     _engine = create_async_engine(
         db_url, echo=False,
         connect_args={"check_same_thread": False, "timeout": 30},
@@ -51,31 +50,31 @@ async def init_db():
 
     # Сидинг дефолтных тарифов (если таблица пустая)
     await _seed_default_tariffs()
-
+    
     logging.info(f"Database initialized at {settings.DB_PATH}")
     return _engine, _sessionmaker
-
 
 async def _run_migrations(conn):
     """Автоматические миграции для существующих БД."""
     try:
         def check_and_migrate(sync_conn):
             inspector = inspect(sync_conn)
-
+            
             # Миграция 1: device_limit в tariffs
             tariff_columns = {col['name'] for col in inspector.get_columns('tariffs')}
             if 'device_limit' not in tariff_columns:
                 logging.info("🔄 Migration: adding device_limit to tariffs...")
                 sync_conn.execute(text("ALTER TABLE tariffs ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 2"))
                 logging.info("✅ Migration: device_limit added to tariffs")
-
+            
             # Миграция 2: device_limit в users
             user_columns = {col['name'] for col in inspector.get_columns('users')}
             if 'device_limit' not in user_columns:
                 logging.info("🔄 Migration: adding device_limit to users...")
-                sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 2"))
+                # 🔧 ФИКС: Дефолт = 0 (нет подписки = нет устройств)
+                sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0"))
                 logging.info("✅ Migration: device_limit added to users")
-
+            
             # Миграция 3: current_tariff_id в users
             if 'current_tariff_id' not in user_columns:
                 logging.info("🔄 Migration: adding current_tariff_id to users...")
@@ -86,14 +85,12 @@ async def _run_migrations(conn):
     except Exception as e:
         logging.warning(f"Migration check failed (safe to ignore on fresh DB): {e}")
 
-
 async def _seed_default_tariffs():
     """Создаёт дефолтные тарифы, если таблица пустая."""
     session = await get_session()
     try:
         result = await session.execute(select(func.count(Tariff.id)))
         count = result.scalar_one()
-
         if count == 0:
             logging.info("🌱 Seeding default tariffs...")
             for t in DEFAULT_TARIFFS:
@@ -116,13 +113,11 @@ async def _seed_default_tariffs():
     finally:
         await session.close()
 
-
 async def get_session() -> AsyncSession:
     global _sessionmaker
     if _sessionmaker is None:
         await init_db()
     return _sessionmaker()
-
 
 @asynccontextmanager
 async def session_scope():
@@ -136,7 +131,6 @@ async def session_scope():
         raise
     finally:
         await session.close()
-
 
 async def close_db():
     global _engine

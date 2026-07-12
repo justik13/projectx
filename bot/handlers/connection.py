@@ -13,6 +13,7 @@ from database.models import User
 from database.repositories.profiles_repo import get_profile_by_id, get_user_profiles, get_user_profiles_count, update_profile
 from database.repositories.servers_repo import get_available_servers, get_server_by_id
 from database.repositories.users_repo import get_user_by_telegram_id
+from database.repositories.tariffs_repo import get_tariff_by_id
 from services.device_service import DeviceService
 from services.subscription import SubscriptionService
 from utils.config_builder import build_amneziawg_config
@@ -25,10 +26,22 @@ logger = logging.getLogger(__name__)
 
 DEVICE_NAME_REGEX = re.compile(r"^[a-zA-Z0-9\s_-]+$")
 
+async def _get_effective_device_limit(user: User, session: AsyncSession) -> int:
+    """🔧 Получает лимит устройств СТРОГО из активного тарифа."""
+    if user.current_tariff_id:
+        tariff = await get_tariff_by_id(session, user.current_tariff_id)
+        if tariff:
+            return tariff.device_limit
+    return 0  # Нет тарифа — нет лимита
+
 async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardBuilder]:
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
-    rendered = texts.CONNECTION_LIST_HEADER.format(count=profiles_count, limit=user.device_limit)
+    
+    # 🔧 ФИКС: Лимит берём из тарифа
+    device_limit = await _get_effective_device_limit(user, session)
+    
+    rendered = texts.CONNECTION_LIST_HEADER.format(count=profiles_count, limit=device_limit)
     builder = InlineKeyboardBuilder()
 
     if profiles_count == 0:
@@ -48,7 +61,7 @@ async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[
                 traffic_up=format_traffic(profile.traffic_up), traffic_total=traffic_total,
             )
 
-    if profiles_count < user.device_limit:
+    if profiles_count < device_limit:
         builder.button(text="➕ Добавить устройство", callback_data="add_device")
 
     builder.adjust(1)
@@ -334,8 +347,12 @@ async def enter_device_name(message: Message, state: FSMContext, session: AsyncS
         await state.clear()
         return
 
-    if await get_user_profiles_count(session, user.id) >= user.device_limit:
-        await message.answer(texts.ERROR_DEVICE_LIMIT_REACHED.format(limit=user.device_limit), parse_mode="HTML")
+    # 🔧 ФИКС: Проверяем лимит СТРОГО по тарифу, а не по user.device_limit
+    device_limit = await _get_effective_device_limit(user, session)
+    profiles_count = await get_user_profiles_count(session, user.id)
+    
+    if profiles_count >= device_limit:
+        await message.answer(texts.ERROR_DEVICE_LIMIT_REACHED.format(limit=device_limit), parse_mode="HTML")
         await state.clear()
         return
 

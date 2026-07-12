@@ -3,10 +3,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from datetime import datetime, timezone
 from utils.encryption import EncryptedString
 
-
 class Base(DeclarativeBase):
     pass
-
 
 class User(Base):
     __tablename__ = "users"
@@ -17,7 +15,11 @@ class User(Base):
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tos_accepted: Mapped[bool] = mapped_column(Boolean, default=True)
     subscription_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-    device_limit: Mapped[int] = mapped_column(Integer, default=2)
+    
+    # 🔧 ФИКС: device_limit теперь = 0 по умолчанию (нет подписки = нет устройств)
+    # Реальный лимит берётся из tariffs.device_limit через user.current_tariff_id
+    device_limit: Mapped[int] = mapped_column(Integer, default=0)
+    
     current_tariff_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True
     )
@@ -38,7 +40,6 @@ class User(Base):
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
-
 
 class VPNProfile(Base):
     __tablename__ = "vpn_profiles"
@@ -67,7 +68,6 @@ class VPNProfile(Base):
     user = relationship("User", back_populates="profiles")
     server = relationship("Server")
 
-
 class Server(Base):
     __tablename__ = "servers"
 
@@ -85,7 +85,6 @@ class Server(Base):
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
 
-
 class Tariff(Base):
     __tablename__ = "tariffs"
 
@@ -100,7 +99,6 @@ class Tariff(Base):
         DateTime(timezone=False),
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-
 
 class Payment(Base):
     __tablename__ = "payments"
@@ -123,7 +121,6 @@ class Payment(Base):
 
     user = relationship("User", back_populates="payments")
     tariff = relationship("Tariff")
-
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
