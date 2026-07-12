@@ -27,8 +27,3 @@ AMNEZIA_PROTOCOL = "amneziawg2"
 
 # Pagination
 ITEMS_PER_PAGE = 10
-
-# UI
-REPLY_MENU_BUTTONS = [
-    "👤 Профиль", "🔌 Подключение", "💳 Оплата", "💬 Поддержка", "🛠 Админка"
-]

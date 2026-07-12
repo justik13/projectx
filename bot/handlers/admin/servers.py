@@ -11,7 +11,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.constants import REPLY_MENU_BUTTONS
 from bot.keyboards import get_admin_server_card_keyboard, get_back_button
 from bot.states import AdminStates
 from bot import texts
@@ -170,7 +169,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
         await message.answer(texts.ERROR_TEXT_REQUIRED)
         return
 
-    if message.text.startswith("/") or message.text in REPLY_MENU_BUTTONS:
+    if message.text.startswith("/"):
         await state.clear()
         await message.answer(
             texts.ERROR_OPERATION_CANCELLED,
@@ -455,7 +454,7 @@ async def process_edit_server(message: Message, state: FSMContext, session: Asyn
         await message.answer(texts.ERROR_TEXT_REQUIRED)
         return
 
-    if message.text.startswith("/") or message.text in REPLY_MENU_BUTTONS:
+    if message.text.startswith("/"):
         await state.clear()
         await message.answer(
             texts.ERROR_OPERATION_CANCELLED,
