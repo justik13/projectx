@@ -23,7 +23,7 @@ def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_tariff_duration_keyboard(tariffs: list) -> InlineKeyboardMarkup:
+def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showcase") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     tariffs_sorted = sorted(tariffs, key=lambda t: t.duration_days)
     for t in tariffs_sorted:
@@ -33,13 +33,15 @@ def get_tariff_duration_keyboard(tariffs: list) -> InlineKeyboardMarkup:
         elif t.duration_days >= 30:
             text += " 🌟"
         builder.button(text=text, callback_data=f"select_tariff:{t.id}")
-    builder.button(text="← К выбору тарифа", callback_data="payment_showcase")
+    if back_to == "subscription":
+        builder.button(text="← Назад", callback_data="menu_subscription")
+    else:
+        builder.button(text="← К выбору тарифа", callback_data="payment_showcase")
     builder.adjust(1)
     return builder.as_markup()
 
 
 def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
-    """Клавиатура продления — БЕЗ кнопки 'Сменить тариф'"""
     builder = InlineKeyboardBuilder()
     tariffs_sorted = sorted(tariffs, key=lambda t: t.duration_days)
     for t in tariffs_sorted:
@@ -49,8 +51,7 @@ def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
         elif t.duration_days >= 30:
             text += " 🌟"
         builder.button(text=text, callback_data=f"select_tariff:{t.id}")
-    # Убрана кнопка "Сменить тариф" — она есть в хабе подписки
-    builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
+    builder.button(text="← Назад", callback_data="menu_subscription")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -67,7 +68,6 @@ def get_change_tariff_keyboard(
         if limit not in grouped:
             grouped[limit] = []
         grouped[limit].append(t)
-
     for limit in sorted(grouped.keys()):
         group_name = _get_tariff_group_name(limit)
         if limit == current_limit:
@@ -75,8 +75,6 @@ def get_change_tariff_keyboard(
         elif limit > current_limit:
             group_name += " 🔼"
         builder.button(text=group_name, callback_data=f"select_tariff_type:{limit}")
-    
-    # ИСПРАВЛЕНО: Назад ведет в "Ваша подписка", а не в "Продление"
     builder.button(text="← Назад", callback_data="menu_subscription")
     builder.adjust(1)
     return builder.as_markup()
@@ -86,7 +84,6 @@ def get_payment_method_keyboard(tariff_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⭐ Telegram Stars", callback_data=f"pay_stars:{tariff_id}")
     builder.button(text="🏦 СБП / Карта", callback_data=f"pay_sbp:{tariff_id}")
-    # ИСПРАВЛЕНО: Назад ведет обратно к выбору тарифа
     builder.button(text="← Назад", callback_data=f"select_tariff:{tariff_id}")
     builder.adjust(1)
     return builder.as_markup()

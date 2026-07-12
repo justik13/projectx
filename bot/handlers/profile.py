@@ -4,7 +4,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.keyboards import get_back_button, get_history_keyboard, get_profile_keyboard, get_referral_keyboard
 from bot import texts
 from config.settings import get_settings
@@ -34,7 +33,6 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
     total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
     has_access = await SubscriptionService.check_access(session, user.telegram_id)
     referrals_count = len(await get_user_referrals(session, user.telegram_id))
-
     if has_access:
         tariff_name = "—"
         device_limit = 0
@@ -43,21 +41,16 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
             if tariff:
                 device_limit = tariff.device_limit
                 tariff_name = f"{_get_tariff_display_name(device_limit)} ({device_limit} устр.)"
-
         rendered = texts.PROFILE_TEXT_ACTIVE.format(
             name=safe(user.first_name or "Пользователь"),
             username=safe(user.username or "—"),
             telegram_id=user.telegram_id,
-            valid_until=format_datetime(user.subscription_end),
-            days_left=format_days_left(user.subscription_end),
             tariff_name=tariff_name,
             devices_count=profiles_count,
-            device_limit=device_limit,
             total_traffic=format_traffic(total_traffic),
             referrals_count=referrals_count,
             referral_days=user.referral_days,
         )
-        # ИСПОЛЬЗУЕМ клавиатуру БЕЗ дублирующей кнопки "Моя подписка"
         kb = get_profile_keyboard(is_active=True)
     else:
         rendered = texts.PROFILE_TEXT_INACTIVE.format(
@@ -71,12 +64,9 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         builder.button(text="🚀 Купить доступ", callback_data="menu_buy")
         builder.button(text="🎁 Пригласить друга", callback_data="referral")
         builder.button(text="🧾 История оплат", callback_data="user_history")
-        builder.button(text="📄 Условия сервиса", url=texts.TOS_AGREEMENT_URL)
-        builder.button(text="🔒 Политика", url=texts.PRIVACY_POLICY_URL)
         builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
-        builder.adjust(1, 1, 1, 2, 1)
+        builder.adjust(1, 1, 1, 1)
         kb = builder.as_markup()
-
     if edit:
         try: await target.edit_text(rendered, reply_markup=kb, parse_mode="HTML")
         except Exception: pass
@@ -86,26 +76,27 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
 
 @router.callback_query(F.data == "menu_profile")
 async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
+    await callback.answer()
     await state.clear()
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
     await _render_profile(callback.message, db_user, session, edit=True)
-    await callback.answer()
 
 
 @router.callback_query(F.data == "back_to_profile")
 async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
+    await callback.answer()
     await state.clear()
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
     await _render_profile(callback.message, db_user, session, edit=True)
-    await callback.answer()
 
 
 @router.callback_query(F.data == "user_history")
 async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
+    await callback.answer()
     await state.clear()
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
@@ -127,6 +118,7 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
 
 @router.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
+    await callback.answer()
     await state.clear()
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
@@ -143,11 +135,11 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
         ),
         reply_markup=get_referral_keyboard(referral_link), parse_mode="HTML",
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "referrals_list")
 async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
+    await callback.answer()
     await state.clear()
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
@@ -165,4 +157,3 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
             rendered += f"\n<i>... и еще {len(referrals) - 20} рефералов</i>"
         rendered += texts.REFERRAL_LIST_FOOTER.format(count=len(referrals))
     await callback.message.edit_text(rendered, reply_markup=get_back_button("referral"), parse_mode="HTML")
-    await callback.answer()

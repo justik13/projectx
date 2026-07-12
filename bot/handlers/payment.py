@@ -6,7 +6,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.keyboards import (
     get_back_button, get_payment_method_keyboard, get_tariff_showcase_keyboard,
     get_tariff_duration_keyboard, get_renew_keyboard, get_change_tariff_keyboard,
@@ -43,31 +42,31 @@ async def hub_menu_payment(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
 ):
+    await callback.answer()
     await state.clear()
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-
     is_active = await _is_subscription_active(db_user)
     if is_active:
         await _show_hub(callback.message, db_user, session)
     else:
         await _show_showcase(callback.message, session)
-    await callback.answer()
 
 
 async def _show_showcase(target, session: AsyncSession):
     tariffs = await get_active_tariffs(session)
     if not tariffs:
-        await target.edit_text(texts.PAYMENT_NO_TARIFFS, reply_markup=get_back_button("back_to_main_menu"))
+        try:
+            await target.edit_text(texts.PAYMENT_NO_TARIFFS, reply_markup=get_back_button("back_to_main_menu"))
+        except TelegramBadRequest:
+            await target.answer(texts.PAYMENT_NO_TARIFFS, reply_markup=get_back_button("back_to_main_menu"))
         return
-
     grouped: dict[int, list] = {}
     for t in tariffs:
         limit = getattr(t, 'device_limit', 2)
         if limit not in grouped: grouped[limit] = []
         grouped[limit].append(t)
-
     kb = get_tariff_showcase_keyboard(grouped)
     try:
         await target.edit_text(texts.PAYMENT_SHOWCASE_HEADER, reply_markup=kb, parse_mode="HTML")
@@ -88,11 +87,8 @@ async def _show_hub(target, user: User, session: AsyncSession):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Продлить доступ", callback_data="payment_quick_renew")
     builder.button(text="⚙️ Сменить тариф", callback_data="payment_change_tariff")
-    builder.button(text="📄 Условия сервиса", url=texts.TOS_AGREEMENT_URL)
-    builder.button(text="🔒 Политика", url=texts.PRIVACY_POLICY_URL)
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
-    builder.adjust(1, 1, 2, 1)
-
+    builder.adjust(1, 1, 1)
     try:
         await target.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
     except TelegramBadRequest:
@@ -106,9 +102,9 @@ async def show_tariff_showcase_callback(callback: CallbackQuery, session: AsyncS
 
 
 @router.callback_query(F.data.startswith("select_tariff_type:"))
-async def select_tariff_type(callback: CallbackQuery, session: AsyncSession):
-    device_limit = int(callback.data.split(":")[1])
+async def select_tariff_type(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
+    device_limit = int(callback.data.split(":")[1])
     tariffs = await get_active_tariffs(session)
     type_tariffs = [t for t in tariffs if getattr(t, 'device_limit', 2) == device_limit]
     if not type_tariffs:
@@ -116,10 +112,11 @@ async def select_tariff_type(callback: CallbackQuery, session: AsyncSession):
             texts.PAYMENT_NO_TARIFFS, reply_markup=get_back_button("payment_showcase"),
         )
         return
-
     desc = texts.PAYMENT_TARIFF_DESCRIPTION.get(device_limit, "")
     text = desc + texts.PAYMENT_DURATION_HEADER
-    kb = get_tariff_duration_keyboard(type_tariffs)
+    data = await state.get_data()
+    source = data.get("source", "showcase")
+    kb = get_tariff_duration_keyboard(type_tariffs, back_to=source)
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -135,7 +132,6 @@ async def show_quick_renew(callback: CallbackQuery, db_user: User, session: Asyn
             reply_markup=get_back_button("menu_subscription"),
         )
         return
-
     tariff_name = _get_tariff_display_name(current_limit)
     text = texts.PAYMENT_QUICK_RENEW_HEADER.format(
         tariff_name=tariff_name,
@@ -146,7 +142,7 @@ async def show_quick_renew(callback: CallbackQuery, db_user: User, session: Asyn
 
 
 @router.callback_query(F.data == "payment_change_tariff")
-async def show_change_tariff(callback: CallbackQuery, db_user: User, session: AsyncSession):
+async def show_change_tariff(callback: CallbackQuery, state: FSMContext, db_user: User, session: AsyncSession):
     await callback.answer()
     tariffs = await get_active_tariffs(session)
     if not tariffs:
@@ -155,7 +151,6 @@ async def show_change_tariff(callback: CallbackQuery, db_user: User, session: As
             reply_markup=get_back_button("menu_subscription"),
         )
         return
-
     current_limit = db_user.device_limit
     tariff_name = _get_tariff_display_name(current_limit)
     is_active = await _is_subscription_active(db_user)
@@ -165,6 +160,7 @@ async def show_change_tariff(callback: CallbackQuery, db_user: User, session: As
     )
     kb = get_change_tariff_keyboard(tariffs, current_limit, is_subscription_active=is_active)
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await state.update_data(source="subscription")
 
 
 @router.callback_query(F.data.startswith("select_tariff:"))
@@ -172,12 +168,12 @@ async def select_tariff(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
 ):
+    await callback.answer()
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff or not tariff.is_active:
         await callback.answer(texts.ERROR_TARIFF_UNAVAILABLE, show_alert=True)
         return
-
     device_limit = getattr(tariff, 'device_limit', 2)
     if db_user and await _is_subscription_active(db_user):
         current_limit = db_user.device_limit
@@ -192,9 +188,7 @@ async def select_tariff(
                 reply_markup=get_back_button("payment_change_tariff"),
                 parse_mode="HTML",
             )
-            await callback.answer()
             return
-
     tariff_name = _get_tariff_display_name(device_limit)
     text = texts.PAYMENT_CHECKOUT_TEXT.format(
         tariff_name=tariff_name,
@@ -202,11 +196,9 @@ async def select_tariff(
         price_rub=tariff.price_rub,
         price_stars=tariff.price_stars,
     )
-    # Передаем tariff_id через callback_data, а не через state
     await callback.message.edit_text(
         text, reply_markup=get_payment_method_keyboard(tariff.id), parse_mode="HTML",
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("pay_stars:"))
@@ -214,6 +206,7 @@ async def pay_stars(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
 ):
+    await callback.answer("💳 Отправляю инвойс...")
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff or not db_user:
@@ -222,17 +215,12 @@ async def pay_stars(
     if tariff.price_stars <= 0:
         await callback.answer(texts.ERROR_TARIFF_INVALID_PRICE, show_alert=True)
         return
-
     payment = await create_payment(
         session=session, user_id=db_user.id,
         tariff_id=tariff.id, amount=tariff.price_stars, currency="stars",
     )
-
-    # НЕ очищаем state — он понадобится для back_to_payment
     await state.update_data(tariff_id=tariff.id, payment_id=payment.id)
-
     try:
-        # Отправляем инвойс и сохраняем message_id
         invoice_msg = await callback.bot.send_invoice(
             chat_id=callback.from_user.id,
             title=f"Подписка на {tariff.duration_days} дней ({getattr(tariff, 'device_limit', 2)} устр.)",
@@ -243,8 +231,19 @@ async def pay_stars(
             currency="XTR",
             start_parameter="network-access-stars",
         )
-        # Сохраняем message_id для последующего удаления
-        await state.update_data(invoice_message_id=invoice_msg.message_id)
+        # Сообщение с кнопкой отмены
+        cancel_builder = InlineKeyboardBuilder()
+        cancel_builder.button(text="❌ Отменить оплату", callback_data="cancel_invoice")
+        cancel_msg = await callback.bot.send_message(
+            chat_id=callback.from_user.id,
+            text="💳 <b>Инвойс отправлен выше.</b>\nНажмите кнопку ниже для отмены.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML",
+        )
+        await state.update_data(
+            invoice_message_id=invoice_msg.message_id,
+            cancel_message_id=cancel_msg.message_id,
+        )
     except TelegramAPIError as e:
         logger.error(f"Failed to send invoice: {e}")
         await callback.message.edit_text(
@@ -255,8 +254,6 @@ async def pay_stars(
         payment.status = "failed"
         await session.commit()
         return
-
-    await callback.answer("💳 Инвойс отправлен")
 
 
 @router.pre_checkout_query()
@@ -270,7 +267,6 @@ async def process_successful_payment(message: Message, state: FSMContext, sessio
     payload = message.successful_payment.invoice_payload
     if not payload.startswith("stars_payment:"): return
     payment_id = int(payload.split(":")[1])
-
     if await PaymentService.handle_successful_payment(session, payment_id):
         user = await get_user_by_telegram_id(session, message.from_user.id)
         profiles = await get_user_profiles(session, user.id)
@@ -282,7 +278,6 @@ async def process_successful_payment(message: Message, state: FSMContext, sessio
             texts.PAYMENT_SUCCESS_RENEW.format(tariff_name=tariff_name, valid_until=valid_until)
             if profiles else texts.PAYMENT_SUCCESS_NEW.format(tariff_name=tariff_name, valid_until=valid_until)
         )
-        # Удаляем сообщение с инвойсом
         try:
             await message.delete()
         except Exception:
@@ -294,6 +289,7 @@ async def process_successful_payment(message: Message, state: FSMContext, sessio
 
 @router.callback_query(F.data.startswith("pay_sbp:"))
 async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+    await callback.answer()
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     builder = InlineKeyboardBuilder()
@@ -305,7 +301,6 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSess
         reply_markup=builder.as_markup(), parse_mode="HTML",
     )
     await state.update_data(tariff_id=tariff.id, payment_method="sbp", amount=tariff.price_rub)
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("confirm_payment_sbp:"))
@@ -313,18 +308,17 @@ async def confirm_payment_sbp(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
 ):
+    await callback.answer("⏳ Обрабатываю оплату...")
     await state.clear()
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     payment = await create_payment(
         session=session, user_id=db_user.id,
         tariff_id=tariff.id, amount=tariff.price_rub, currency="rub",
     )
-
     if await PaymentService.handle_successful_payment(session, payment.id):
         fresh_user = await get_user_by_telegram_id(session, callback.from_user.id)
         profiles = await get_user_profiles(session, fresh_user.id)
@@ -350,87 +344,58 @@ async def confirm_payment_sbp(
 
 @router.callback_query(F.data == "back_to_payment")
 async def back_to_payment(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
-    await state.clear()
-    
-    # Пытаемся получить tariff_id из state или из callback_data предыдущего экрана
-    data = await state.get_data()
-    tariff_id = data.get("tariff_id")
-    
-    # Если state пустой, возвращаемся в меню подписки
-    if not tariff_id:
-        await callback.answer()
-        # Возвращаемся к хабу подписки
-        db_user = data.get("db_user")
-        if db_user:
-            await _show_hub(callback.message, db_user, session)
-        else:
-            await callback.message.edit_text(
-                texts.ERROR_OPERATION_CANCELLED,
-                reply_markup=get_back_button("menu_subscription"),
-            )
-        return
-
-    tariff = await get_tariff_by_id(session, tariff_id)
-    if not tariff:
-        await callback.answer(texts.ERROR_TARIFF_NOT_FOUND, show_alert=True)
-        return
-
-    device_limit = getattr(tariff, 'device_limit', 2)
-    tariff_name = _get_tariff_display_name(device_limit)
-    text = texts.PAYMENT_CHECKOUT_TEXT.format(
-        tariff_name=tariff_name,
-        duration_days=tariff.duration_days,
-        price_rub=tariff.price_rub,
-        price_stars=tariff.price_stars,
-    )
-    
-    # Удаляем инвойс если он был отправлен
-    invoice_message_id = data.get("invoice_message_id")
-    if invoice_message_id:
-        try:
-            await callback.bot.delete_message(callback.from_user.id, invoice_message_id)
-        except Exception:
-            pass
-
-    try:
-        await callback.message.edit_text(
-            text, reply_markup=get_payment_method_keyboard(tariff.id), parse_mode="HTML",
-        )
-    except TelegramBadRequest:
-        pass
     await callback.answer()
+    await state.clear()
+    db_user_tg_id = callback.from_user.id
+    user = await get_user_by_telegram_id(session, db_user_tg_id)
+    if user:
+        await _show_hub(callback.message, user, session)
+    else:
+        await callback.message.edit_text(
+            texts.ERROR_OPERATION_CANCELLED,
+            reply_markup=get_back_button("menu_subscription"),
+        )
 
 
 @router.callback_query(F.data == "cancel_invoice")
 async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
-    """Отмена инвойса Stars"""
+    """Отмена инвойса Stars — удаляет и инвойс, и сообщение отмены"""
+    await callback.answer("❌ Инвойс отменен")
     data = await state.get_data()
     invoice_message_id = data.get("invoice_message_id")
+    cancel_message_id = data.get("cancel_message_id")
     tariff_id = data.get("tariff_id")
-    
     # Удаляем инвойс
     if invoice_message_id:
         try:
             await callback.bot.delete_message(callback.from_user.id, invoice_message_id)
         except Exception:
             pass
-    
+    # Удаляем сообщение отмены
+    if cancel_message_id:
+        try:
+            await callback.bot.delete_message(callback.from_user.id, cancel_message_id)
+        except Exception:
+            pass
     await state.clear()
-    
     # Возвращаемся к выбору тарифа или в меню подписки
     if tariff_id:
-        await callback.message.edit_text(
-            texts.PAYMENT_CHECKOUT_TEXT.format(
-                tariff_name="...",
-                duration_days=0,
-                price_rub=0,
-                price_stars=0,
-            ),
-            reply_markup=get_back_button(f"select_tariff:{tariff_id}"),
-        )
+        tariff = await get_tariff_by_id(session, tariff_id)
+        if tariff:
+            device_limit = getattr(tariff, 'device_limit', 2)
+            tariff_name = _get_tariff_display_name(device_limit)
+            text = texts.PAYMENT_CHECKOUT_TEXT.format(
+                tariff_name=tariff_name,
+                duration_days=tariff.duration_days,
+                price_rub=tariff.price_rub,
+                price_stars=tariff.price_stars,
+            )
+            await callback.message.answer(
+                text, reply_markup=get_payment_method_keyboard(tariff.id), parse_mode="HTML",
+            )
+            return
+    user = await get_user_by_telegram_id(session, callback.from_user.id)
+    if user and await _is_subscription_active(user):
+        await _show_hub(callback.message, user, session)
     else:
-        await callback.message.edit_text(
-            "❌ Инвойс отменен",
-            reply_markup=get_back_button("menu_subscription"),
-        )
-    await callback.answer("Инвойс отменен")
+        await _show_showcase(callback.message, session)
