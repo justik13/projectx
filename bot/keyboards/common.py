@@ -1,6 +1,5 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
 from config.settings import get_settings
 
 
@@ -23,7 +22,11 @@ def get_hub_keyboard(is_admin: bool = False, is_active: bool = False) -> InlineK
 
 def get_back_button(callback_data: str = "back_to_main_menu") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="← В главное меню", callback_data=callback_data)
+    if callback_data == "back_to_main_menu":
+        text = "← В главное меню"
+    else:
+        text = "← Назад"
+    builder.button(text=text, callback_data=callback_data)
     return builder.as_markup()
 
 

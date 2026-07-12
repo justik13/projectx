@@ -14,11 +14,11 @@ def get_admin_server_card_keyboard(server_id: int, is_active: bool) -> InlineKey
     return builder.as_markup()
 
 
-# 🔧 НОВОЕ: Клавиатура подтверждения удаления сервера
 def get_server_delete_confirm_keyboard(server_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Да, удалить полностью", callback_data=f"confirm_server_delete:{server_id}")
     builder.button(text="❌ Отмена", callback_data=f"admin_server_card:{server_id}")
+    builder.button(text="← К списку серверов", callback_data="admin_servers")  # 🔧 ДОБАВЛЕНО
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
-    builder.adjust(1, 1, 1)
+    builder.adjust(1, 1, 1, 1)
     return builder.as_markup()
