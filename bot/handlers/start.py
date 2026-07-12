@@ -44,6 +44,7 @@ async def cmd_start(message: Message, state: FSMContext, command: Command, sessi
     text = texts.HUB_HEADER.format(name=name)
     kb = get_hub_keyboard(is_admin=is_admin, is_active=is_active)
     
+    # ✅ render_hub теперь использует именованные параметры внутри
     await render_hub(message.bot, message.chat.id, text, kb)
 
 @router.callback_query(F.data == "back_to_main_menu")
@@ -61,4 +62,5 @@ async def back_to_main_menu(callback: CallbackQuery, state: FSMContext, db_user:
     text = texts.HUB_HEADER.format(name=name)
     kb = get_hub_keyboard(is_admin=is_admin, is_active=is_active)
     
+    # ✅ render_hub теперь использует именованные параметры внутри
     await render_hub(callback.bot, callback.message.chat.id, text, kb)

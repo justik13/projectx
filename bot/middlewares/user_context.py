@@ -1,63 +1,72 @@
-"""
-UserContextMiddleware с оптимизированным кэшированием.
-Кэширует plain dict вместо ORM объектов — устраняет задержки session.merge.
-"""
 import logging
-from cachetools import TTLCache
+from typing import Any, Callable, Dict
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
-from bot import texts
-from config.settings import get_settings
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from database.models import User
 from database.repositories.users_repo import get_user_by_telegram_id
 
 logger = logging.getLogger(__name__)
 
-# Кэш на 3 секунды — убирает SELECT при быстрых кликах
-_user_cache = TTLCache(maxsize=5000, ttl=3.0)
 
 class UserContextMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        user_id = None
-        if isinstance(event, Message):
-            user_id = event.from_user.id
-        elif isinstance(event, CallbackQuery):
-            user_id = event.from_user.id
-
-        if not user_id:
-            return await handler(event, data)
-
-        session = data.get("session")
+    """
+    Загружает пользователя в контекст запроса.
+    ✅ ИСПРАВЛЕНО: использует selectinload для eager loading полей,
+    чтобы избежать DetachedInstanceError при доступе к атрибутам после закрытия сессии.
+    """
+    async def __call__(
+        self,
+        handler: Callable,
+        event: Message | CallbackQuery,
+        data: Dict[str, Any],
+    ) -> Any:
+        session: AsyncSession = data.get("session")
         if not session:
             return await handler(event, data)
-
-        try:
-            # Проверяем кэш
-            if user_id in _user_cache:
-                user = _user_cache[user_id]
-            else:
-                user = await get_user_by_telegram_id(session, user_id)
-                if user:
-                    _user_cache[user_id] = user
-
+            
+        # Определяем telegram_id из разных типов событий
+        telegram_id = None
+        if isinstance(event, Message):
+            telegram_id = event.from_user.id
+        elif isinstance(event, CallbackQuery):
+            telegram_id = event.from_user.id
+            
+        if not telegram_id:
+            return await handler(event, data)
+        
+        # ✅ ИСПРАВЛЕНО: eager loading полей, которые могут понадобиться позже
+        # Это предотвращает DetachedInstanceError при доступе к user.is_banned и другим полям
+        stmt = (
+            select(User)
+            .where(User.telegram_id == telegram_id)
+            .options(
+                selectinload(User.tariff),
+                selectinload(User.profiles),
+                selectinload(User.payments),
+            )
+        )
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+        
+        if user:
+            # ✅ ИСПРАВЛЕНО: явная загрузка всех полей, которые могут быть lazy
+            # Это гарантирует, что они доступны даже после закрытия сессии
+            await session.refresh(user, attribute_names=[
+                'is_banned', 'is_bot_blocked', 'current_tariff_id',
+                'subscription_end', 'device_limit', 'referral_days'
+            ])
             data["db_user"] = user
-
-            # Проверка бана
-            if user and user.is_banned:
-                support_username = get_settings().SUPPORT_USERNAME.lstrip("@")
-                kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text=f"💬 Поддержка @{support_username}",
-                        url=f"https://t.me/{support_username}"
-                    )
-                ]])
-                
-                if isinstance(event, Message):
-                    await event.answer(texts.ERROR_BANNED_MESSAGE, reply_markup=kb)
-                elif isinstance(event, CallbackQuery):
-                    await event.answer(texts.ERROR_BANNED_ALERT, show_alert=True)
-                return  # Обрываем цепочку
-
-        except Exception as e:
-            logger.error(f"UserContextMiddleware error: {e}", exc_info=True)
-
+            
+            # Проверка бана — теперь работает без ошибок
+            if user.is_banned:
+                if isinstance(event, CallbackQuery):
+                    await event.answer("⛔️ Доступ заблокирован", show_alert=True)
+                    return
+                elif isinstance(event, Message):
+                    await event.answer("⛔️ У вас заблокирован доступ к сервису.")
+                    return
+        
         return await handler(event, data)
