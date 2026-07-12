@@ -1,13 +1,4 @@
 # Amnezia API
-
-![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)
-![Fastify](https://img.shields.io/badge/fastify-5.x-000000?logo=fastify&logoColor=white)
-![TypeScript](https://img.shields.io/badge/typescript-6.x-3178C6?logo=typescript&logoColor=white)
-[![CI](https://github.com/kyoresuas/amnezia-api/actions/workflows/ci.yml/badge.svg)](https://github.com/kyoresuas/amnezia-api/actions/workflows/ci.yml)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
-
-[Русский](README.md) · **English**
-
 REST API for remote management of an **Amnezia**-based VPN server. It turns Amnezia's CLI management (AmneziaWG, AmneziaWG 2.0, Xray) into a convenient HTTP interface with typed schemas and Swagger out of the box.
 
 Great for building your own infrastructure on top of Amnezia: an admin panel, a Telegram bot, billing, or balancing across multiple servers — without SSH-ing into the box.
@@ -222,17 +213,167 @@ There you can review all schemas, parameters, request examples and responses.
 └─ .env [developer config]
 ```
 
-</details>
+---
 
-## Ecosystem
 
-- [amnezia-panel](https://github.com/slowy19/amnezia-panel) — a web management panel built on top of Amnezia API.
+# Amnezia API - Полная документация (Extended Edition)
 
-## Contact
+REST API для удалённого управления VPN-сервером на базе **Amnezia**. Превращает CLI-управление Amnezia (AmneziaWG, AmneziaWG 2.0, Xray) в удобный HTTP-интерфейс с типизированными схемами и Swagger из коробки.
 
-- **Telegram:** @stercuss
-- **Email:** hey@kyoresuas.com
+Подходит для построения собственной инфраструктуры: админ-панель, Telegram-бот, биллинг или балансировка по нескольким серверам — без ручного захода на сервер по SSH.
 
-## License
+## 🏗️ Архитектура и важные особенности (Под капотом)
 
-MIT — see `LICENSE`.
+### 1. Stateless и отсутствие Базы Данных
+В API **нет встроенной базы данных** (ни PostgreSQL, ни SQLite). API выступает в роли умной прослойки (Reverse Proxy/Adapter) между вашим бэкендом и Docker-контейнерами Amnezia.
+- Все данные о клиентах, ключах и статусах читаются и записываются **напрямую в конфигурационные файлы** на хосте через `docker.sock`.
+- **Важно:** Если вы удалите Docker-контейнер Amnezia или очистите его `volumes`, все клиенты будут безвозвратно потеряны. Регулярно делайте бэкапы через `GET /server/backup`.
+
+### 2. Безопасность и Reverse Proxy (Nginx)
+По умолчанию API **не доступно из интернета напрямую**.
+- В `docker-compose.yml` порт пробрасывается как `127.0.0.1:4001:4001`.
+- Скрипт `setup.sh` автоматически устанавливает **Nginx** и настраивает его как Reverse Proxy (слушает 80 порт и проксирует на `127.0.0.1:4001`).
+- **Рекомендация:** Для продакшена настройте SSL (например, через Certbot/Let's Encrypt) поверх Nginx. Открывать порт `4001` в фаерволе (`ufw`) не нужно и опасно.
+
+### 3. Особенности работы с Xray
+Для сбора статистики по протоколу Xray API использует внутренний Stats API самого Xray.
+- При первой установке `setup.sh` автоматически модифицирует `server.json` внутри контейнера `amnezia-xray`, включая нужные эндпоинты.
+- Статистика собирается одним эффективным запросом (`statsquery`), а не сотнями `docker exec`, что снижает нагрузку на CPU.
+
+---
+
+## 🚀 Основные возможности
+
+- **Три протокола в одном API** — AmneziaWG, AmneziaWG 2.0 и Xray через единый набор маршрутов.
+- **Управление клиентами** — создание, список, обновление и удаление пиров; готовый конфиг для импорта в приложение.
+- **Пауза пользователей** — временное отключение доступа (`status: disabled`) без удаления ключа. Пользователю не придется заново сканировать QR-код при возобновлении (`status: active`).
+- **QR-коды конфигов** — генерация серии QR (`POST /clients/qr`) в формате клиента Amnezia (большие конфиги автоматически разбиваются на несколько картинок).
+- **Срок действия доступа** — поле `expiresAt` у клиента и встроенная фоновая задача (cron), автоматически отключающая истёкших клиентов.
+- **Статистика по каждому пиру** — трафик (отдано/принято), последнее рукопожатие, online-статус, endpoint и разрешенные IP.
+- **Метрики сервера** — CPU, RAM, диск, сеть, load average, uptime и статистика Docker-контейнеров VPN.
+- **Балансировка (Multi-Node)** — вес сервера (`SERVER_WEIGHT`), регион и лимит клиентов в ответе `/server` для умной маршрутизации между нодами.
+- **Swagger UI** на `/docs` со схемами, примерами и валидацией запросов.
+
+## 📋 Поддерживаемые протоколы
+
+| Протокол | Значение `protocol` |
+|----------|---------------------|
+| AmneziaWG | `amneziawg` |
+| AmneziaWG 2.0 | `amneziawg2` |
+| Xray | `xray` |
+
+---
+
+---
+
+## ⚙️ Конфигурация (.env)
+
+Файл `.env` генерируется автоматически из `.env.example` при первом запуске.
+
+| Переменная | Описание |
+|------------|----------|
+| `FASTIFY_ROUTES` | Хост и порт API внутри контейнера (например, `0.0.0.0:4001`) |
+| `FASTIFY_API_KEY` | **Секретный ключ** доступа к API (заголовок `x-api-key`) |
+| `PROTOCOLS_ENABLED` | Включенные протоколы: `amneziawg,amneziawg2,xray` |
+| `SERVER_ID` | Уникальный идентификатор сервера |
+| `SERVER_NAME` | Название сервера (отображается в клиенте) |
+| `SERVER_REGION` | Регион/зона/лейбл сервера (для логики биллинга) |
+| `SERVER_WEIGHT` | Вес сервера для балансировки (рекомендуется `1..1000`) |
+| `SERVER_MAX_PEERS` | Максимальное число клиентов на сервере |
+| `SERVER_PUBLIC_HOST` | Внешний IP/домен для `Endpoint` (подставляется в конфиги) |
+| `DOCKER_API_VERSION` | Версия Docker API (по умолчанию `1.41`) |
+
+---
+
+## 🔐 Аутентификация
+
+Все маршруты (кроме `/healthz`, `/metrics`, `/docs`) защищены preHandler-ом и требуют заголовок:
+```http
+x-api-key: <ВАШ_FASTIFY_API_KEY>
+```
+
+---
+
+## 📡 API Endpoints (Шпаргалка)
+
+### Управление клиентами
+
+| Метод | Маршрут | Назначение |
+|-------|---------|------------|
+| `GET` | `/clients` | Список клиентов с трафиком и статусами |
+| `POST` | `/clients` | Создать клиента и получить конфиг |
+| `PATCH` | `/clients` | Обновить клиента (статус, срок действия) |
+| `POST` | `/clients/qr` | QR-коды конфига (формат клиента Amnezia) |
+| `DELETE` | `/clients` | Удалить клиента |
+
+### Управление сервером
+
+| Метод | Маршрут | Назначение |
+|-------|---------|------------|
+| `GET` | `/server` | Информация о сервере, весах и лимитах |
+| `GET` | `/server/load` | Метрики нагрузки (CPU/RAM/диск/сеть) |
+| `GET` | `/server/backup` | Выгрузить бэкап конфигурации (JSON) |
+| `POST` | `/server/backup` | Импортировать бэкап конфигурации |
+| `POST` | `/server/reboot` | Перезагрузить сервер |
+
+### Служебные
+
+| Метод | Маршрут | Назначение |
+|-------|---------|------------|
+| `GET` | `/healthz` | Healthcheck (для Docker/CI) |
+| `GET` | `/metrics` | Метрики Prometheus (открыт без ключа) |
+
+---
+
+## 📖 Примеры использования (cURL)
+
+### ➕ Создание клиента
+```bash
+curl -X POST http://<ваш_сервер>/clients \
+-H "x-api-key: <API_KEY>" \
+-H "Content-Type: application/json" \
+-d '{
+  "clientName": "User1",
+  "protocol": "amneziawg2",
+  "expiresAt": null
+}'
+```
+
+### ⏸️ Пауза / Возобновление / Срок действия
+```bash
+curl -X PATCH http://<ваш_сервер>/clients \
+-H "x-api-key: <API_KEY>" \
+-H "Content-Type: application/json" \
+-d '{
+  "clientId": "PF77ZXRl1yAkFzhBq/zQNlDPD73XXTq+Zs2PgtjLKVA=",
+  "protocol": "amneziawg2",
+  "status": "disabled",
+  "expiresAt": 1735689600
+}'
+```
+
+### 📱 Генерация QR-кодов
+```bash
+curl -X POST http://<ваш_сервер>/clients/qr \
+-H "x-api-key: <API_KEY>" \
+-H "Content-Type: application/json" \
+-d '{ "config": "vpn://3fa85f64-5717-4562-b3fc-2c963f66afa6..." }'
+```
+*Ответ: массив PNG (Data URI). Сканируйте по очереди в приложении Amnezia.*
+
+---
+
+---
+
+## 🐛 Troubleshooting (Решение проблем)
+
+1. **API не отвечает из интернета, но работает локально:**
+   - Это нормально. API слушает `127.0.0.1:4001`. Убедитесь, что Nginx запущен (`systemctl status nginx`) и проксирует трафик. Настраивайте DNS и SSL на уровне Nginx.
+2. **Статистика по Xray показывает нули:**
+   - Убедитесь, что `setup.sh` был запущен до конца. Он должен был пропатчить `server.json` внутри контейнера `amnezia-xray` и перезапустить его.
+3. **Ошибка "Permission denied" при работе с Docker:**
+   - В `docker-compose.yml` используется `group_add: "${DOCKER_GID:-999}"`. Убедитесь, что пользователь, запускающий API, имеет права на чтение `/var/run/docker.sock`.
+4. **Клиенты пропали после перезагрузки сервера:**
+   - Если вы используете Docker-режим, убедитесь, что контейнеры Amnezia настроены на `restart: unless-stopped`. API stateless, он читает конфиги из файлов Amnezia при каждом запросе.
+
+---
