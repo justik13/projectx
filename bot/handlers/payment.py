@@ -28,8 +28,7 @@ logger = logging.getLogger(__name__)
 def _get_tariff_display_name(device_limit: int) -> str:
     if device_limit <= 2: return "📱 Для себя"
     elif device_limit <= 5: return "👨‍👩‍👧‍👦 Семейный"
-    elif device_limit <= 10: return "🚀 Pro"
-    else: return "🏢 Бизнес"
+    else: return "🚀 Pro"
 
 
 async def _is_subscription_active(user: User) -> bool:
@@ -215,8 +214,7 @@ async def pay_stars(
         # 2) ✅ Отправляем ОТДЕЛЬНОЕ сообщение с кнопкой отмены
         cancel_builder = InlineKeyboardBuilder()
         cancel_builder.button(text="❌ Отменить оплату", callback_data="cancel_invoice")
-        cancel_builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
-        cancel_builder.adjust(1, 1)
+        cancel_builder.adjust(1)
 
         cancel_msg = await callback.bot.send_message(
             chat_id=callback.from_user.id,

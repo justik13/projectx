@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 def _get_tariff_display_name(device_limit: int) -> str:
     if device_limit <= 2: return "📱 Базовый"
     elif device_limit <= 5: return "👨‍👩‍👧‍👦 Семейный"
-    elif device_limit <= 10: return "🚀 Pro"
-    else: return "🏢 Бизнес"
+    else: return "🚀 Pro"
 
 
 async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
