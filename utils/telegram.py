@@ -1,6 +1,6 @@
 import html
 import logging
-from typing import Optional, Union
+from typing import Optional
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 from aiogram.types import InlineKeyboardMarkup, InputFile
 from cachetools import TTLCache
@@ -24,7 +24,7 @@ async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardM
     msg_id = _hub_cache.get(chat_id)
     if msg_id:
         try:
-            # ✅ ИСПРАВЛЕНО: именованные параметры для aiogram 3.x
+            # ✅ Именованные параметры для aiogram 3.x (фикс business_connection_id)
             await bot.edit_message_text(
                 text=text,
                 chat_id=chat_id,
@@ -42,7 +42,6 @@ async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardM
             except Exception: 
                 pass
             
-    # ✅ ИСПРАВЛЕНО: именованные параметры
     msg = await bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -61,7 +60,6 @@ async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str
         except Exception: 
             pass
             
-    # ✅ ИСПРАВЛЕНО: именованные параметры
     msg = await bot.send_document(
         chat_id=chat_id,
         document=document,
@@ -81,7 +79,6 @@ async def send_hub_invoice(bot, chat_id: int, **kwargs) -> int:
         except Exception: 
             pass
             
-    # ✅ ИСПРАВЛЕНО: именованные параметры (kwargs уже именованные)
     msg = await bot.send_invoice(chat_id=chat_id, **kwargs)
     _hub_cache[chat_id] = msg.message_id
     return msg.message_id
@@ -89,6 +86,20 @@ async def send_hub_invoice(bot, chat_id: int, **kwargs) -> int:
 async def safe_edit_text(message, text: str, **kwargs) -> bool:
     try:
         await message.edit_text(text=text, **kwargs)
+        return True
+    except Exception:
+        return False
+
+async def safe_delete_message(message) -> bool:
+    try:
+        await message.delete()
+        return True
+    except Exception:
+        return False
+
+async def safe_answer(callback, text: Optional[str] = None, show_alert: bool = False) -> bool:
+    try:
+        await callback.answer(text, show_alert=show_alert)
         return True
     except Exception:
         return False

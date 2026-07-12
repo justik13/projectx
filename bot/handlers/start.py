@@ -24,7 +24,9 @@ def parse_referral_id(command_args: str) -> int | None:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, command: Command, session: AsyncSession):
     await state.clear()
-    # CleanChatMiddleware уже удалил сообщение /start
+    # CleanChatMiddleware уже удалил сообщение /start, но на всякий случай
+    try: await message.delete()
+    except Exception: pass
     
     telegram_id = message.from_user.id
     ref_id = parse_referral_id(command.args) if command.args else None
@@ -44,7 +46,7 @@ async def cmd_start(message: Message, state: FSMContext, command: Command, sessi
     text = texts.HUB_HEADER.format(name=name)
     kb = get_hub_keyboard(is_admin=is_admin, is_active=is_active)
     
-    # ✅ render_hub теперь использует именованные параметры внутри
+    # ✅ Всегда рендерим хаб через Single Message Hub
     await render_hub(message.bot, message.chat.id, text, kb)
 
 @router.callback_query(F.data == "back_to_main_menu")
@@ -62,5 +64,4 @@ async def back_to_main_menu(callback: CallbackQuery, state: FSMContext, db_user:
     text = texts.HUB_HEADER.format(name=name)
     kb = get_hub_keyboard(is_admin=is_admin, is_active=is_active)
     
-    # ✅ render_hub теперь использует именованные параметры внутри
     await render_hub(callback.bot, callback.message.chat.id, text, kb)
