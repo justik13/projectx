@@ -20,7 +20,13 @@ def get_hub_keyboard(is_admin: bool = False, is_active: bool = False) -> InlineK
     return builder.as_markup()
 
 
+# 🔧 ИСПРАВЛЕНО: Теперь текст кнопки зависит от callback_data
 def get_back_button(callback_data: str = "back_to_main_menu") -> InlineKeyboardMarkup:
+    """
+    Универсальная кнопка возврата.
+    - Если callback_data == "back_to_main_menu" → текст "← В главное меню"
+    - Иначе → текст "← Назад"
+    """
     builder = InlineKeyboardBuilder()
     if callback_data == "back_to_main_menu":
         text = "← В главное меню"

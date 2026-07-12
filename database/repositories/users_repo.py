@@ -3,7 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import User
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
-from config.settings import get_settings
 
 
 async def get_user_by_telegram_id(session: AsyncSession, telegram_id: int) -> Optional[User]:
@@ -14,10 +13,11 @@ async def get_user_by_telegram_id(session: AsyncSession, telegram_id: int) -> Op
 
 async def create_user(session: AsyncSession, telegram_id: int, username: str = None,
                       first_name: str = None, referred_by: int = None) -> User:
-    settings = get_settings()
+    # 🔧 ФИКС: Убрали settings.DEFAULT_DEVICE_LIMIT — используем дефолт модели (2)
     user = User(
         telegram_id=telegram_id, username=username, first_name=first_name,
-        referred_by=referred_by, device_limit=settings.DEFAULT_DEVICE_LIMIT
+        referred_by=referred_by,
+        # device_limit возьмётся из модели User (default=2)
     )
     session.add(user)
     await session.commit()
@@ -40,12 +40,10 @@ async def extend_subscription(session: AsyncSession, user: User, days: int) -> U
         current_end = user.subscription_end
     else:
         current_end = now
-
     if days >= 36500:
         new_end = datetime(2100, 1, 1)
     else:
         new_end = current_end + timedelta(days=days)
-
     return await update_user(session, user, subscription_end=new_end)
 
 
@@ -112,6 +110,7 @@ async def mark_user_bot_blocked(session: AsyncSession, telegram_id: int) -> None
         update(User).where(User.telegram_id == telegram_id).values(is_bot_blocked=True)
     )
     await session.commit()
+
 
 async def count_users_with_tariff(session: AsyncSession, tariff_id: int) -> int:
     """Подсчитывает количество пользователей с указанным current_tariff_id"""

@@ -1,6 +1,5 @@
 import logging
 import re
-
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -59,10 +58,6 @@ async def cmd_start(message: Message, state: FSMContext, command: Command, sessi
         user = await get_user_by_telegram_id(session, telegram_id)
 
     await render_hub(message, user, session, edit=False)
-
-
-# 🔧 ФИКС: Хендлер /help полностью удалён.
-# Вся помощь и FAQ доступны через кнопки Хаба → «💬 Поддержка» → «❓ Частые вопросы»
 
 
 @router.callback_query(F.data == "back_to_main_menu")

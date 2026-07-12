@@ -14,7 +14,7 @@ class UserContextMiddleware(BaseMiddleware):
     """
     Проверка бана и подгрузка контекста пользователя.
     🔧 ФИКС: Использует сессию от DBSessionMiddleware (из data['session']),
-    а не создаёт свою собственную. Это устраняет утечки сессий и зависания.
+    а не создаёт свою собственную. Устраняет утечки сессий и зависания.
     """
 
     async def __call__(self, handler, event, data):

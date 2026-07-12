@@ -2,7 +2,9 @@ import logging
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from bot.keyboards import get_back_button, get_history_keyboard, get_profile_keyboard, get_referral_keyboard
 from bot import texts
 from config.settings import get_settings
@@ -18,30 +20,31 @@ from utils.telegram import safe
 router = Router()
 logger = logging.getLogger(__name__)
 
+
 def _get_tariff_display_name(device_limit: int) -> str:
     if device_limit <= 2: return "📱 Базовый"
     elif device_limit <= 5: return "👨‍👩‍👧‍👦 Семейный"
     elif device_limit <= 10: return "🚀 Pro"
     else: return "🏢 Бизнес"
 
-async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
-    from bot.keyboards import get_back_button
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
     total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
     has_access = await SubscriptionService.check_access(session, user.telegram_id)
     referrals_count = len(await get_user_referrals(session, user.telegram_id))
 
+    # 🔧 ФИКС: Тариф показываем ТОЛЬКО при активной подписке
     tariff_name = "—"
-    if user.current_tariff_id:
-        tariff = await get_tariff_by_id(session, user.current_tariff_id)
-        if tariff:
-            dl = getattr(tariff, 'device_limit', user.device_limit)
-            tariff_name = f"{_get_tariff_display_name(dl)} ({dl} устр.)"
-    elif user.device_limit:
-        tariff_name = f"{_get_tariff_display_name(user.device_limit)} ({user.device_limit} устр.)"
+    if has_access:
+        if user.current_tariff_id:
+            tariff = await get_tariff_by_id(session, user.current_tariff_id)
+            if tariff:
+                dl = getattr(tariff, 'device_limit', user.device_limit)
+                tariff_name = f"{_get_tariff_display_name(dl)} ({dl} устр.)"
+        elif user.device_limit:
+            tariff_name = f"{_get_tariff_display_name(user.device_limit)} ({user.device_limit} устр.)"
 
     rendered = texts.PROFILE_TEXT.format(
         name=safe(user.first_name or "Пользователь"),
@@ -59,7 +62,7 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         tariff_name=tariff_name,
     )
 
-    # 🔧 ФИКС: Для неактивных пользователей добавляем кнопку "Купить доступ"
+    # 🔧 ФИКС: Для неактивных пользователей — кастомная клавиатура с кнопкой "Купить доступ"
     if has_access:
         kb = get_profile_keyboard(is_active=True)
     else:
@@ -72,12 +75,11 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         kb = builder.as_markup()
 
     if edit:
-        try:
-            await target.edit_text(rendered, reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            pass
+        try: await target.edit_text(rendered, reply_markup=kb, parse_mode="HTML")
+        except Exception: pass
     else:
         await target.answer(rendered, reply_markup=kb, parse_mode="HTML")
+
 
 @router.callback_query(F.data == "menu_profile")
 async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
@@ -88,6 +90,7 @@ async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: 
     await _render_profile(callback.message, db_user, session, edit=True)
     await callback.answer()
 
+
 @router.callback_query(F.data == "back_to_profile")
 async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await state.clear()
@@ -96,6 +99,7 @@ async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: U
         return
     await _render_profile(callback.message, db_user, session, edit=True)
     await callback.answer()
+
 
 @router.callback_query(F.data == "user_history")
 async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
@@ -117,6 +121,7 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
     await callback.message.edit_text(rendered, reply_markup=get_history_keyboard(), parse_mode="HTML")
 
+
 @router.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await state.clear()
@@ -126,8 +131,17 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
     bot_info = await callback.bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{db_user.telegram_id}"
     invited_count = len(await get_user_referrals(session, db_user.telegram_id))
-    await callback.message.edit_text(texts.REFERRAL_TEXT.format(bonus_days=get_settings().REFERRAL_BONUS_DAYS, referral_link=referral_link, invited_count=invited_count, bonus_total=db_user.referral_days), reply_markup=get_referral_keyboard(referral_link), parse_mode="HTML")
+    await callback.message.edit_text(
+        texts.REFERRAL_TEXT.format(
+            bonus_days=get_settings().REFERRAL_BONUS_DAYS,
+            referral_link=referral_link,
+            invited_count=invited_count,
+            bonus_total=db_user.referral_days,
+        ),
+        reply_markup=get_referral_keyboard(referral_link), parse_mode="HTML",
+    )
     await callback.answer()
+
 
 @router.callback_query(F.data == "referrals_list")
 async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):

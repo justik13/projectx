@@ -49,6 +49,7 @@ check_os() {
 install_dependencies() {
     log "Обновление пакетов..."
     apt-get update -qq
+
     log "Установка системных зависимостей..."
     if ! apt-get install -y -qq \
         python3 \
@@ -74,6 +75,7 @@ install_dependencies() {
     else
         warn "Системный пользователь projectx уже существует"
     fi
+
     success "Системные зависимости установлены"
 }
 
@@ -81,6 +83,7 @@ migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
         log "Изоляция кодовой базы: синхронизация проекта в безопасную директорию $PROJECT_DIR..."
         mkdir -p "$PROJECT_DIR"
+
         if ! rsync -a --delete \
             --exclude='.env' \
             --exclude='bot_data.db' \
@@ -92,6 +95,7 @@ migrate_to_opt() {
             "$START_DIR/" "$PROJECT_DIR/"; then
             error "Ошибка синхронизации файлов. Убедитесь, что rsync установлен."
         fi
+
         success "Проект успешно синхронизирован в $PROJECT_DIR"
     fi
     cd "$PROJECT_DIR"
@@ -105,9 +109,12 @@ setup_venv() {
     else
         warn "Виртуальное окружение уже существует"
     fi
+
     source "$VENV_DIR/bin/activate"
+
     log "Обновление pip..."
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
+
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
         log "Установка зависимостей проекта..."
         pip install -r "$PROJECT_DIR/requirements.txt" > /dev/null 2>&1
@@ -133,7 +140,7 @@ setup_env() {
     echo -e "${YELLOW}  Настройка конфигурации бота${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
-    
+
     echo -e "${BLUE}[1/4]${NC} Telegram Bot Token (получить у @BotFather)"
     read -p "Введите BOT_TOKEN: " BOT_TOKEN
     [ -z "$BOT_TOKEN" ] && error "BOT_TOKEN не может быть пустым"
@@ -158,8 +165,8 @@ setup_env() {
     echo -e "${BLUE}[4/4]${NC} Бонус рефереру за первую оплату (в днях)"
     read -p "Введите REFERRAL_BONUS_DAYS [3]: " REFERRAL_BONUS_DAYS
     REFERRAL_BONUS_DAYS=${REFERRAL_BONUS_DAYS:-3}
-    read -p "Лимит устройств по умолчанию [2]: " DEFAULT_DEVICE_LIMIT
-    DEFAULT_DEVICE_LIMIT=${DEFAULT_DEVICE_LIMIT:-2}
+
+    # 🔧 ФИКС: УДАЛЁН запрос DEFAULT_DEVICE_LIMIT — хардкод в коде (2 устр.)
 
     log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
     DB_ENCRYPTION_KEY=$(python3 -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
@@ -167,12 +174,12 @@ setup_env() {
 
     cat > "$PROJECT_DIR/.env" << 'HEADER'
 HEADER
-    
+
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
     write_env_var "REFERRAL_BONUS_DAYS" "$REFERRAL_BONUS_DAYS"
-    write_env_var "DEFAULT_DEVICE_LIMIT" "$DEFAULT_DEVICE_LIMIT"
+    # 🔧 ФИКС: УДАЛЁН write_env_var "DEFAULT_DEVICE_LIMIT"
     write_env_var "DB_ENCRYPTION_KEY" "$DB_ENCRYPTION_KEY"
     write_env_var "DB_PATH" "./bot_data.db"
 
@@ -184,11 +191,13 @@ init_database() {
     log "Инициализация асинхронной базы данных SQLite..."
     cd "$PROJECT_DIR"
     source "$VENV_DIR/bin/activate"
+
     python3 -c "
 import asyncio
 from database.connection import init_db
 asyncio.run(init_db())
 " 2>&1 | tee -a "$LOG_FILE"
+
     success "База данных успешно инициализирована"
 }
 
@@ -255,17 +264,20 @@ if [ -f "\$DB_FILE" ]; then
     echo "[\$(date)] Backup completed successfully."
 fi
 EOF
+
     chmod +x /usr/local/bin/projectx-backup.sh
 
     CRON_JOB="0 3 * * * /usr/local/bin/projectx-backup.sh >> /var/log/projectx-backup.log 2>&1"
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "$CRON_JOB") | crontab -
-    
+
     /usr/local/bin/projectx-backup.sh || true
+
     success "Автобэкап успешно настроен (ежедневно в 3:00, ротация 30 дней)"
 }
 
 setup_monitoring() {
     log "Настройка пятиминутного автовосстановления (Healthcheck)..."
+
     cat > /usr/local/bin/projectx-healthcheck.sh << EOF
 #!/bin/bash
 SERVICE_NAME="$SERVICE_NAME"
@@ -275,23 +287,28 @@ BOT_TOKEN=\$(grep "^BOT_TOKEN=" "\$BOT_TOKEN_FILE" | cut -d'=' -f2- | tr -d '"' 
 
 if ! systemctl is-active --quiet "\$SERVICE_NAME"; then
     systemctl restart "\$SERVICE_NAME"
+
     if [ -n "\$BOT_TOKEN" ] && [ -n "\$ADMIN_IDS" ]; then
         curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN/sendMessage" \
             -d "chat_id=\$ADMIN_IDS" \
             -d "text=⚠️ Бот упал и был перезапущен автоматически (\$(date))" > /dev/null
     fi
+
     echo "[\$(date)] Bot crashed, self-healing triggered." >> /var/log/projectx-healthcheck.log
 fi
 EOF
+
     chmod +x /usr/local/bin/projectx-healthcheck.sh
 
     CRON_HEALTH="*/5 * * * * /usr/local/bin/projectx-healthcheck.sh"
     (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "$CRON_HEALTH") | crontab -
+
     success "Мониторинг доступности настроен (проверка каждые 5 минут)"
 }
 
 setup_logrotate() {
     log "Настройка ротации лог-файлов..."
+
     cat > /etc/logrotate.d/projectx << EOF
 /var/log/projectx-*.log {
     daily
@@ -303,6 +320,7 @@ setup_logrotate() {
     create 0640 root root
 }
 EOF
+
     success "Ротация системных логов настроена"
 }
 
@@ -310,6 +328,7 @@ start_bot() {
     log "Запуск службы бота..."
     systemctl start "$SERVICE_NAME"
     sleep 3
+
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         success "Бот успешно запущен в фоновом режиме!"
         echo ""
@@ -339,6 +358,7 @@ main() {
     echo -e "${GREEN}  🚀 ProjectX Bot — Автоматический деплой (Production)${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
+
     mkdir -p /var/log
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 
@@ -346,16 +366,14 @@ main() {
     check_os
     install_dependencies
     migrate_to_opt
-    
     setup_venv
     setup_env
-    
     init_database
-    
+
     chown -R projectx:projectx "$PROJECT_DIR"
     chmod 600 "$PROJECT_DIR/.env"
     log "Конфиденциальные права на файлы обновлены для пользователя projectx"
-    
+
     setup_systemd
     setup_backup
     setup_monitoring
