@@ -25,12 +25,15 @@ def _get_tariff_display_name(device_limit: int) -> str:
     else: return "🏢 Бизнес"
 
 async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
+    from bot.keyboards import get_back_button
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
     total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
     has_access = await SubscriptionService.check_access(session, user.telegram_id)
     referrals_count = len(await get_user_referrals(session, user.telegram_id))
-    
+
     tariff_name = "—"
     if user.current_tariff_id:
         tariff = await get_tariff_by_id(session, user.current_tariff_id)
@@ -39,13 +42,40 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
             tariff_name = f"{_get_tariff_display_name(dl)} ({dl} устр.)"
     elif user.device_limit:
         tariff_name = f"{_get_tariff_display_name(user.device_limit)} ({user.device_limit} устр.)"
-    
-    rendered = texts.PROFILE_TEXT.format(name=safe(user.first_name or "Пользователь"), username=safe(user.username or "—"), telegram_id=user.telegram_id, status_emoji=("🟢" if has_access else "🔴"), status_text=("Активен" if has_access else "Неактивен"), valid_until=format_datetime(user.subscription_end), days_left=format_days_left(user.subscription_end), devices_count=profiles_count, device_limit=user.device_limit, total_traffic=format_traffic(total_traffic), referrals_count=referrals_count, referral_days=user.referral_days, tariff_name=tariff_name)
-    
-    kb = get_profile_keyboard(is_active=has_access)
+
+    rendered = texts.PROFILE_TEXT.format(
+        name=safe(user.first_name or "Пользователь"),
+        username=safe(user.username or "—"),
+        telegram_id=user.telegram_id,
+        status_emoji=("🟢" if has_access else "🔴"),
+        status_text=("Активен" if has_access else "Неактивен"),
+        valid_until=format_datetime(user.subscription_end),
+        days_left=format_days_left(user.subscription_end),
+        devices_count=profiles_count,
+        device_limit=user.device_limit,
+        total_traffic=format_traffic(total_traffic),
+        referrals_count=referrals_count,
+        referral_days=user.referral_days,
+        tariff_name=tariff_name,
+    )
+
+    # 🔧 ФИКС: Для неактивных пользователей добавляем кнопку "Купить доступ"
+    if has_access:
+        kb = get_profile_keyboard(is_active=True)
+    else:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🚀 Купить доступ", callback_data="menu_buy")
+        builder.button(text="🎁 Пригласить друга", callback_data="referral")
+        builder.button(text="🧾 История оплат", callback_data="user_history")
+        builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
+        builder.adjust(1, 1, 1, 1)
+        kb = builder.as_markup()
+
     if edit:
-        try: await target.edit_text(rendered, reply_markup=kb, parse_mode="HTML")
-        except Exception: pass
+        try:
+            await target.edit_text(rendered, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            pass
     else:
         await target.answer(rendered, reply_markup=kb, parse_mode="HTML")
 

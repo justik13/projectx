@@ -1,20 +1,21 @@
 import logging
-
 from aiogram import BaseMiddleware
 from aiogram.types import (
     CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
-
 from bot import texts
 from config.settings import get_settings
-from database.connection import get_session
 from database.repositories.users_repo import get_user_by_telegram_id
 
 logger = logging.getLogger(__name__)
 
 
 class UserContextMiddleware(BaseMiddleware):
-    """Проверка бана и подгрузка контекста пользователя."""
+    """
+    Проверка бана и подгрузка контекста пользователя.
+    🔧 ФИКС: Использует сессию от DBSessionMiddleware (из data['session']),
+    а не создаёт свою собственную. Это устраняет утечки сессий и зависания.
+    """
 
     async def __call__(self, handler, event, data):
         if isinstance(event, Message):
@@ -27,7 +28,12 @@ class UserContextMiddleware(BaseMiddleware):
         if not user_id:
             return await handler(event, data)
 
-        session = await get_session()
+        # 🔧 ФИКС: Берём сессию из DBSessionMiddleware
+        session = data.get("session")
+        if not session:
+            logger.warning("UserContextMiddleware: no session in data, skipping user load")
+            return await handler(event, data)
+
         try:
             user = await get_user_by_telegram_id(session, user_id)
             data["db_user"] = user
@@ -40,7 +46,6 @@ class UserContextMiddleware(BaseMiddleware):
                         url=f"https://t.me/{support_username}",
                     )]],
                 )
-
                 if isinstance(event, Message):
                     await event.answer(
                         texts.ERROR_BANNED_MESSAGE, reply_markup=keyboard,
@@ -54,13 +59,11 @@ class UserContextMiddleware(BaseMiddleware):
                         )
                     except Exception:
                         pass
-
                 return  # обрываем цепочку обработки
 
         except Exception as e:
             logger.error(f"Critical error in UserContextMiddleware: {e}", exc_info=True)
             raise
-        finally:
-            await session.close()
 
+        # 🔧 ФИКС: НЕ закрываем сессию здесь — её закроет DBSessionMiddleware
         return await handler(event, data)

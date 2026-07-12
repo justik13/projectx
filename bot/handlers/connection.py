@@ -45,18 +45,40 @@ async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[
     return rendered, builder
 
 async def _render_connections(target, user: User, session: AsyncSession, *, edit: bool):
+    from bot.keyboards import get_back_button  # импорт внутри для избежания circular
+
     if not user:
-        if edit: await target.edit_text(texts.ERROR_USER_NOT_FOUND)
-        else: await target.answer(texts.ERROR_USER_NOT_FOUND)
+        kb = get_back_button("back_to_main_menu")
+        if edit:
+            await target.edit_text(texts.ERROR_USER_NOT_FOUND, reply_markup=kb)
+        else:
+            await target.answer(texts.ERROR_USER_NOT_FOUND, reply_markup=kb)
         return
+
     if not await SubscriptionService.check_access(session, user.telegram_id):
-        if edit: await target.edit_text(texts.ERROR_NO_SUBSCRIPTION, parse_mode="HTML")
-        else: await target.answer(texts.ERROR_NO_SUBSCRIPTION, parse_mode="HTML")
+        # 🔧 ФИКС: Добавляем кнопки "Купить доступ" и "В главное меню"
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🚀 Купить доступ", callback_data="menu_buy")
+        builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
+        builder.adjust(1)
+        kb = builder.as_markup()
+
+        if edit:
+            await target.edit_text(texts.ERROR_NO_SUBSCRIPTION, reply_markup=kb, parse_mode="HTML")
+        else:
+            await target.answer(texts.ERROR_NO_SUBSCRIPTION, reply_markup=kb, parse_mode="HTML")
         return
+
     rendered, builder = await _build_connections_screen(user, session)
+    # 🔧 ФИКС: Всегда добавляем кнопку "В главное меню" внизу
+    builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
+    builder.adjust(1)
+
     if edit:
-        try: await target.edit_text(rendered, reply_markup=builder.as_markup(), parse_mode="HTML")
-        except Exception: pass
+        try:
+            await target.edit_text(rendered, reply_markup=builder.as_markup(), parse_mode="HTML")
+        except Exception:
+            pass
     else:
         await target.answer(rendered, reply_markup=builder.as_markup(), parse_mode="HTML")
 

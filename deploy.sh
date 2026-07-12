@@ -158,8 +158,8 @@ setup_env() {
     echo -e "${BLUE}[4/4]${NC} Бонус рефереру за первую оплату (в днях)"
     read -p "Введите REFERRAL_BONUS_DAYS [3]: " REFERRAL_BONUS_DAYS
     REFERRAL_BONUS_DAYS=${REFERRAL_BONUS_DAYS:-3}
-    read -p "Лимит устройств по умолчанию [3]: " DEFAULT_DEVICE_LIMIT
-    DEFAULT_DEVICE_LIMIT=${DEFAULT_DEVICE_LIMIT:-3}
+    read -p "Лимит устройств по умолчанию [2]: " DEFAULT_DEVICE_LIMIT
+    DEFAULT_DEVICE_LIMIT=${DEFAULT_DEVICE_LIMIT:-2}
 
     log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
     DB_ENCRYPTION_KEY=$(python3 -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
