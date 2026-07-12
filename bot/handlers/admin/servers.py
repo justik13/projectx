@@ -2,7 +2,6 @@ import asyncio
 import logging
 import math
 import re
-
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -32,6 +31,7 @@ from utils.telegram import safe
 
 router = Router()
 logger = logging.getLogger(__name__)
+
 SERVERS_PER_PAGE = 10
 
 URL_REGEX = re.compile(
@@ -44,7 +44,6 @@ URL_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-
 # ============================================================
 # Общие хелперы
 # ============================================================
@@ -56,8 +55,9 @@ async def _build_servers_list_text_and_kb(
         f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
     )
     builder = InlineKeyboardBuilder()
+
     if not servers:
-        rendered += "_Серверов пока нет_\n"
+        rendered += "<i>Серверов пока нет</i>\n"
     else:
         for server in servers:
             flag = server.country_flag or "🌍"
@@ -77,7 +77,6 @@ async def _build_servers_list_text_and_kb(
     builder.adjust(1)
     return rendered, builder
 
-
 async def _show_servers_list(callback: CallbackQuery, session: AsyncSession, page: int = 1):
     """Единая функция показа списка серверов — переиспользуется после операций."""
     total_servers = await get_server_count(session)
@@ -87,7 +86,6 @@ async def _show_servers_list(callback: CallbackQuery, session: AsyncSession, pag
         servers, page, total_pages, total_servers,
     )
     await callback.message.edit_text(rendered, reply_markup=kb.as_markup(), parse_mode="HTML")
-
 
 async def _bulk_update_peer_status(
     profiles_data, api_url: str, api_key: str, status: str,
@@ -107,7 +105,6 @@ async def _bulk_update_peer_status(
         return_exceptions=True,
     )
     return not any(isinstance(r, Exception) or r is False for r in results)
-
 
 async def _bulk_delete_peers_from_api(
     profiles_data, api_url: str, api_key: str,
@@ -138,7 +135,6 @@ async def _bulk_delete_peers_from_api(
     )
     return success, fail
 
-
 # ============================================================
 # Список серверов и пагинация
 # ============================================================
@@ -151,7 +147,6 @@ async def show_servers_list(callback: CallbackQuery, state: FSMContext, session:
     await _show_servers_list(callback, session, page=1)
     await callback.answer()
 
-
 @router.callback_query(F.data.startswith("admin_servers_page:"))
 async def servers_pagination(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
@@ -161,7 +156,6 @@ async def servers_pagination(callback: CallbackQuery, state: FSMContext, session
     page = int(callback.data.split(":")[1])
     await _show_servers_list(callback, session, page=page)
     await callback.answer()
-
 
 # ============================================================
 # Создание сервера (с защитой от дублирования api_url)
@@ -179,7 +173,6 @@ async def start_add_server(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.adding_server)
     await state.update_data(step="name")
     await callback.answer()
-
 
 @router.message(AdminStates.adding_server)
 async def process_add_server(message: Message, state: FSMContext, session: AsyncSession):
@@ -210,14 +203,12 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             texts.ADMIN_SERVER_FLAG_PROMPT,
             reply_markup=get_back_button("admin_servers"),
         )
-
     elif step == "flag":
         await state.update_data(country_flag=message.text.strip(), step="api_url")
         await message.answer(
             texts.ADMIN_SERVER_URL_PROMPT,
             reply_markup=get_back_button("admin_servers"),
         )
-
     elif step == "api_url":
         api_url = message.text.strip()
         if len(api_url) > 500:
@@ -226,8 +217,8 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
         if not URL_REGEX.match(api_url):
             await message.answer(texts.ERROR_INVALID_URL, parse_mode="HTML")
             return
-
-        # 🔧 НОВОЕ: Защита от дублирования api_url
+        
+        # Защита от дублирования api_url
         existing = await get_server_by_api_url(session, api_url)
         if existing:
             await message.answer(
@@ -243,7 +234,6 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             texts.ADMIN_SERVER_KEY_PROMPT,
             reply_markup=get_back_button("admin_servers"),
         )
-
     elif step == "api_key":
         api_key = message.text.strip()
         if not api_key or len(api_key) < 8:
@@ -254,8 +244,8 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
         # --- healthcheck и получение метаданных сервера ---
         all_data = await state.get_data()
         check_msg = await message.answer(texts.ADMIN_SERVER_CHECKING, parse_mode="HTML")
-
         client = AmneziaClient(all_data["api_url"], all_data["api_key"])
+
         if not await client.healthcheck():
             await check_msg.edit_text(texts.ERROR_SERVER_UNREACHABLE, parse_mode="HTML")
             await state.clear()
@@ -326,7 +316,6 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
         logger.info(f"Admin {message.from_user.id} added server: {server.id}")
         await state.clear()
 
-
 # ============================================================
 # Карточка сервера и операции
 # ============================================================
@@ -349,14 +338,12 @@ async def _show_server_card(callback: CallbackQuery, session: AsyncSession, serv
         parse_mode="HTML",
     )
 
-
 @router.callback_query(F.data.startswith("admin_server_card:"))
 async def show_server_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
-
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
@@ -365,7 +352,6 @@ async def show_server_card(callback: CallbackQuery, state: FSMContext, session: 
     await _show_server_card(callback, session, server)
     await callback.answer()
 
-
 @router.callback_query(F.data.startswith("admin_server_toggle:"))
 async def toggle_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
@@ -373,7 +359,6 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext, session: Asy
         return
     await state.clear()
     await callback.answer("⏳ Выполняется...")
-
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
@@ -408,6 +393,7 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext, session: Asy
         "enabled" if new_status else "disabled",
     )
     await session.commit()
+
     await callback.answer(
         f"✅ Сервер {'включен' if new_status else 'выключен'}", show_alert=True,
     )
@@ -416,9 +402,8 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext, session: Asy
     refreshed = await get_server_by_id(session, server_id)
     await _show_server_card(callback, session, refreshed)
 
-
 # ============================================================
-# 🔧 НОВОЕ: Двухшаговое удаление сервера
+# Двухшаговое удаление сервера
 # ============================================================
 @router.callback_query(F.data.startswith("admin_server_delete:"))
 async def request_delete_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -442,7 +427,6 @@ async def request_delete_server(callback: CallbackQuery, state: FSMContext, sess
 
     await state.update_data(delete_server_id=server_id)
     await state.set_state(AdminStates.confirming_server_delete)
-
     await callback.message.edit_text(
         texts.ADMIN_SERVER_DELETE_CONFIRM.format(
             flag=flag,
@@ -453,7 +437,6 @@ async def request_delete_server(callback: CallbackQuery, state: FSMContext, sess
         parse_mode="HTML",
     )
     await callback.answer()
-
 
 @router.callback_query(F.data.startswith("confirm_server_delete:"))
 async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -509,7 +492,6 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
         session, callback.from_user.id, "DELETE_SERVER", "Server", server_id,
         f"{server_name}: {deleted_profiles} profiles deleted",
     )
-
     await callback.answer(
         f"✅ Сервер {server_name} удалён ({deleted_profiles} устр.)",
         show_alert=True,
@@ -520,9 +502,8 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
     )
     await _show_servers_list(callback, session, page=1)
 
-
 # ============================================================
-# 🔧 НОВОЕ: Редактирование имени сервера
+# Редактирование имени сервера
 # ============================================================
 @router.callback_query(F.data.startswith("admin_server_edit_name:"))
 async def start_edit_server_name(callback: CallbackQuery, state: FSMContext):
@@ -530,7 +511,6 @@ async def start_edit_server_name(callback: CallbackQuery, state: FSMContext):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
-
     server_id = int(callback.data.split(":")[1])
     await state.update_data(server_id=server_id, edit_field="name")
     await state.set_state(AdminStates.editing_server)
@@ -540,9 +520,8 @@ async def start_edit_server_name(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-
 # ============================================================
-# 🔧 НОВОЕ: Редактирование флага сервера
+# Редактирование флага сервера
 # ============================================================
 @router.callback_query(F.data.startswith("admin_server_edit_flag:"))
 async def start_edit_server_flag(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -550,7 +529,6 @@ async def start_edit_server_flag(callback: CallbackQuery, state: FSMContext, ses
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
-
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
@@ -565,7 +543,6 @@ async def start_edit_server_flag(callback: CallbackQuery, state: FSMContext, ses
         reply_markup=get_back_button(f"admin_server_card:{server_id}"),
     )
     await callback.answer()
-
 
 @router.message(AdminStates.editing_server_flag)
 async def process_edit_server_flag(message: Message, state: FSMContext, session: AsyncSession):
@@ -603,7 +580,6 @@ async def process_edit_server_flag(message: Message, state: FSMContext, session:
     )
     logger.info(f"Admin {message.from_user.id} updated server {server_id} flag to {new_flag}")
     await state.clear()
-
 
 @router.message(AdminStates.editing_server)
 async def process_edit_server_name(message: Message, state: FSMContext, session: AsyncSession):

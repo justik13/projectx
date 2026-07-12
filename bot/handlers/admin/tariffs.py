@@ -1,6 +1,5 @@
 import logging
 import math
-
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -24,8 +23,8 @@ from utils.telegram import safe_edit_text
 
 router = Router()
 logger = logging.getLogger(__name__)
-TARIFFS_PER_PAGE = 10
 
+TARIFFS_PER_PAGE = 10
 
 # ============================================================
 # Хелперы
@@ -38,8 +37,9 @@ async def _build_tariffs_list_text_and_kb(
         f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
     )
     builder = InlineKeyboardBuilder()
+
     if not tariffs:
-        rendered += "_Тарифов пока нет_\n"
+        rendered += "<i>Тарифов пока нет</i>\n"
     else:
         for tariff in tariffs:
             status = "🟢" if tariff.is_active else "🔴"
@@ -62,7 +62,6 @@ async def _build_tariffs_list_text_and_kb(
     builder.adjust(1)
     return rendered, builder
 
-
 async def _show_tariffs_list(callback: CallbackQuery, session: AsyncSession, page: int = 1):
     total_tariffs = await get_tariff_count(session)
     total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
@@ -71,7 +70,6 @@ async def _show_tariffs_list(callback: CallbackQuery, session: AsyncSession, pag
     await safe_edit_text(
         callback.message, rendered, reply_markup=kb.as_markup(), parse_mode="HTML",
     )
-
 
 # ============================================================
 # Список тарифов и пагинация
@@ -84,7 +82,6 @@ async def show_tariffs_list(callback: CallbackQuery, session: AsyncSession):
     await _show_tariffs_list(callback, session, page=1)
     await callback.answer()
 
-
 @router.callback_query(F.data.startswith("admin_tariffs_page:"))
 async def tariffs_pagination(callback: CallbackQuery, session: AsyncSession):
     if not is_admin(callback.from_user.id):
@@ -93,7 +90,6 @@ async def tariffs_pagination(callback: CallbackQuery, session: AsyncSession):
     page = int(callback.data.split(":")[1])
     await _show_tariffs_list(callback, session, page=page)
     await callback.answer()
-
 
 # ============================================================
 # Карточка тарифа и операции
@@ -115,14 +111,12 @@ async def _show_tariff_card(callback: CallbackQuery, tariff):
         parse_mode="HTML",
     )
 
-
 @router.callback_query(F.data.startswith("admin_tariff_card:"))
 async def show_tariff_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
@@ -131,14 +125,12 @@ async def show_tariff_card(callback: CallbackQuery, state: FSMContext, session: 
     await _show_tariff_card(callback, tariff)
     await callback.answer()
 
-
 @router.callback_query(F.data.startswith("admin_tariff_toggle:"))
 async def toggle_tariff(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
@@ -155,13 +147,11 @@ async def toggle_tariff(callback: CallbackQuery, state: FSMContext, session: Asy
         f"✅ Тариф {'включен' if new_status else 'выключен'}", show_alert=True,
     )
     logger.info(f"Admin {callback.from_user.id} toggled tariff {tariff_id} to {new_status}")
-
     refreshed = await get_tariff_by_id(session, tariff_id)
     await _show_tariff_card(callback, refreshed)
 
-
 # ============================================================
-# 🔧 НОВОЕ: Удаление тарифа с проверкой на активных пользователей
+# Удаление тарифа с проверкой на активных пользователей
 # ============================================================
 @router.callback_query(F.data.startswith("admin_tariff_delete:"))
 async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -169,7 +159,6 @@ async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext, sess
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
@@ -201,7 +190,6 @@ async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext, sess
     logger.info(f"Admin {callback.from_user.id} deleted tariff {tariff_id}")
     await _show_tariffs_list(callback, session, page=1)
 
-
 # ============================================================
 # Редактирование полей тарифа
 # ============================================================
@@ -212,7 +200,6 @@ async def _start_edit_tariff(
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
     await state.update_data(tariff_id=tariff_id)
     await state.set_state(field_state)
@@ -221,7 +208,6 @@ async def _start_edit_tariff(
         reply_markup=get_back_button("admin_tariffs"),
     )
     await callback.answer()
-
 
 async def _apply_tariff_int_edit(
     message: Message,
@@ -277,13 +263,11 @@ async def _apply_tariff_int_edit(
     )
     await state.clear()
 
-
 @router.callback_query(F.data.startswith("admin_tariff_edit_days:"))
 async def start_edit_tariff_days(callback: CallbackQuery, state: FSMContext):
     await _start_edit_tariff(
         callback, state, AdminStates.editing_tariff_days, texts.ADMIN_TARIFF_EDIT_DAYS_PROMPT,
     )
-
 
 @router.message(AdminStates.editing_tariff_days)
 async def process_edit_tariff_days(message: Message, state: FSMContext, session: AsyncSession):
@@ -296,14 +280,12 @@ async def process_edit_tariff_days(message: Message, state: FSMContext, session:
         audit_detail_fn=lambda old, new: f"days: {old} -> {new}",
     )
 
-
 @router.callback_query(F.data.startswith("admin_tariff_edit_devices:"))
 async def start_edit_tariff_devices(callback: CallbackQuery, state: FSMContext):
     await _start_edit_tariff(
         callback, state, AdminStates.editing_tariff_device_limit,
         texts.ADMIN_TARIFF_EDIT_DEVICES_PROMPT,
     )
-
 
 @router.message(AdminStates.editing_tariff_device_limit)
 async def process_edit_tariff_devices(message: Message, state: FSMContext, session: AsyncSession):
@@ -316,13 +298,11 @@ async def process_edit_tariff_devices(message: Message, state: FSMContext, sessi
         audit_detail_fn=lambda old, new: f"device_limit: {old} -> {new}",
     )
 
-
 @router.callback_query(F.data.startswith("admin_tariff_edit_rub:"))
 async def start_edit_tariff_rub(callback: CallbackQuery, state: FSMContext):
     await _start_edit_tariff(
         callback, state, AdminStates.editing_tariff_rub, texts.ADMIN_TARIFF_EDIT_RUB_PROMPT,
     )
-
 
 @router.message(AdminStates.editing_tariff_rub)
 async def process_edit_tariff_rub(message: Message, state: FSMContext, session: AsyncSession):
@@ -335,13 +315,11 @@ async def process_edit_tariff_rub(message: Message, state: FSMContext, session: 
         audit_detail_fn=lambda old, new: f"RUB: {old} -> {new}",
     )
 
-
 @router.callback_query(F.data.startswith("admin_tariff_edit_stars:"))
 async def start_edit_tariff_stars(callback: CallbackQuery, state: FSMContext):
     await _start_edit_tariff(
         callback, state, AdminStates.editing_tariff_stars, texts.ADMIN_TARIFF_EDIT_STARS_PROMPT,
     )
-
 
 @router.message(AdminStates.editing_tariff_stars)
 async def process_edit_tariff_stars(message: Message, state: FSMContext, session: AsyncSession):

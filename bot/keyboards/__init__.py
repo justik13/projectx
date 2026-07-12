@@ -1,4 +1,4 @@
-from .common import get_hub_keyboard, get_back_button, get_help_keyboard
+from .common import get_hub_keyboard, get_back_button
 from .user import get_profile_keyboard, get_history_keyboard, get_referral_keyboard
 from .device import get_device_keyboard, get_device_delete_confirm_keyboard
 from .payment import (
@@ -13,7 +13,7 @@ from .admin.tariffs import get_admin_tariff_card_keyboard
 from .admin.broadcast import get_broadcast_confirm_keyboard
 
 __all__ = [
-    "get_hub_keyboard", "get_back_button", "get_help_keyboard",
+    "get_hub_keyboard", "get_back_button",
     "get_profile_keyboard", "get_history_keyboard", "get_referral_keyboard",
     "get_device_keyboard", "get_device_delete_confirm_keyboard",
     "get_tariff_showcase_keyboard", "get_tariff_duration_keyboard",
