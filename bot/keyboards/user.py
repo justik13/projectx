@@ -6,7 +6,7 @@ def get_profile_keyboard(is_active: bool = False) -> InlineKeyboardMarkup:
     builder.button(text="🎁 Пригласить друга", callback_data="referral")
     builder.button(text="🧾 История оплат", callback_data="user_history")
     if is_active:
-        builder.button(text="⚙️ Сменить тариф", callback_data="payment_change_tariff")
+        builder.button(text="⏳ Моя подписка", callback_data="payment_quick_renew")
     builder.adjust(1)
     return builder.as_markup()
 

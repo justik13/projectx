@@ -24,14 +24,10 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 def _get_tariff_display_name(device_limit: int) -> str:
-    if device_limit <= 2:
-        return "📱 Базовый"
-    elif device_limit <= 5:
-        return "👨‍👩‍👧‍👦 Семейный"
-    elif device_limit <= 10:
-        return "🚀 Pro"
-    else:
-        return "🏢 Бизнес"
+    if device_limit <= 2: return "📱 Базовый"
+    elif device_limit <= 5: return "👨‍👩‍👧‍👦 Семейный"
+    elif device_limit <= 10: return "🚀 Pro"
+    else: return "🏢 Бизнес"
 
 async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
     profiles = await get_user_profiles(session, user.id)
@@ -40,7 +36,6 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
     has_access = await SubscriptionService.check_access(session, user.telegram_id)
     referrals_count = len(await get_user_referrals(session, user.telegram_id))
     
-    # Определяем название текущего тарифа
     tariff_name = "—"
     if user.current_tariff_id:
         tariff = await get_tariff_by_id(session, user.current_tariff_id)
@@ -66,6 +61,7 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         tariff_name=tariff_name,
     )
     
+    # ИЗМЕНЕНИЕ: Передаем is_active в клавиатуру
     kb = get_profile_keyboard(is_active=has_access)
     
     if edit:
