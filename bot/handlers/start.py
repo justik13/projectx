@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from bot.keyboards.common import get_hub_keyboard
 from bot import texts
 from config.settings import get_settings
@@ -17,10 +18,12 @@ from utils.telegram import safe
 router = Router()
 logger = logging.getLogger(__name__)
 
+
 def parse_referral_id(command_args: str) -> int | None:
     if not command_args: return None
     match = re.match(r"ref_(\d+)", command_args)
     return int(match.group(1)) if match else None
+
 
 async def render_hub(target, user: User, session: AsyncSession, *, edit: bool):
     is_active = await SubscriptionService.check_access(session, user.telegram_id)
@@ -34,10 +37,12 @@ async def render_hub(target, user: User, session: AsyncSession, *, edit: bool):
     else:
         await target.answer(text, reply_markup=kb, parse_mode="HTML")
 
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, command: Command, session: AsyncSession):
     await state.clear()
-    # 🧹 Чистота чата: удаляем входящую команду /start, чтобы не было спама
+    
+    # Удаляем входящее сообщение /start
     try: await message.delete()
     except Exception: pass
 
@@ -55,11 +60,14 @@ async def cmd_start(message: Message, state: FSMContext, command: Command, sessi
         logger.info(f"New user created: {telegram_id} (referred by {ref_id})")
         user = await get_user_by_telegram_id(session, telegram_id)
 
-    # ⚖️ Оферта показывается только при первой регистрации
+    # Оферта показывается только при первой регистрации
     if is_new:
-        await message.answer(texts.WELCOME_TEXT, parse_mode="HTML")
-
+        welcome_msg = await message.answer(texts.WELCOME_TEXT, parse_mode="HTML")
+        # Удаляем welcome сообщение через 10 секунд
+        # (или можно оставить — это на ваше усмотрение)
+    
     await render_hub(message, user, session, edit=False)
+
 
 @router.callback_query(F.data == "back_to_main_menu")
 async def back_to_main_menu(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):

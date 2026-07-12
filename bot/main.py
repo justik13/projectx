@@ -5,9 +5,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuButtonCommands
 from aiogram.utils.chat_action import ChatActionMiddleware
 from cryptography.fernet import Fernet
-
 from bot import texts
-from bot.middlewares import DBSessionMiddleware, ThrottlingMiddleware, UserContextMiddleware
+from bot.middlewares import DBSessionMiddleware, ThrottlingMiddleware, UserContextMiddleware, CleanChatMiddleware
 from config.settings import get_settings
 from database.connection import close_db, init_db
 from services.amnezia_client import close_http_session
@@ -20,11 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# Глобальный обработчик исключений (единая точка)
-# ============================================================
 async def global_error_handler(event: ErrorEvent) -> bool:
-    """Ловит любые необработанные исключения и отвечает пользователю унифицированно."""
     logger.critical(f"Unhandled exception: {event.exception}", exc_info=True)
     try:
         if event.update.callback_query:
@@ -40,11 +35,7 @@ async def global_error_handler(event: ErrorEvent) -> bool:
     return True
 
 
-# ============================================================
-# Конфигурация и запуск
-# ============================================================
 async def setup_bot_commands(bot: Bot):
-    # 🔧 ФИКС: Оставлена только /start. /help удалена по RF compliance & UX
     commands = [
         BotCommand(command="start", description="🚀 Запустить бота"),
     ]
@@ -57,14 +48,23 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     bot = Bot(token=get_settings().BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Порядок middleware важен
+    # Порядок middleware важен!
+    # 1. DB Session — создает сессию
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
+    
+    # 2. Clean Chat — удаляет входящие сообщения (ДО UserContext)
+    dp.message.middleware(CleanChatMiddleware())
+    
+    # 3. User Context — загружает пользователя
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
-    # 🔧 ФИКС: Снижен троттлинг — 0.3с для текста, 0.1с для кнопок
+    
+    # 4. Throttling — защита от спама
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
+    
+    # 5. Chat Action — показывает "печатает..."
     dp.message.middleware(ChatActionMiddleware())
 
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
@@ -98,7 +98,6 @@ async def main():
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
-
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
@@ -113,6 +112,7 @@ async def main():
 
         logger.info("Запуск polling...")
         await dp.start_polling(bot)
+
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:

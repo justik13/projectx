@@ -4,6 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from bot.keyboards import get_back_button, get_history_keyboard, get_profile_keyboard, get_referral_keyboard
 from bot import texts
 from config.settings import get_settings
@@ -19,11 +20,13 @@ from utils.telegram import safe
 router = Router()
 logger = logging.getLogger(__name__)
 
+
 def _get_tariff_display_name(device_limit: int) -> str:
     if device_limit <= 2: return "📱 Базовый"
     elif device_limit <= 5: return "👨‍👩‍👧‍👦 Семейный"
     elif device_limit <= 10: return "🚀 Pro"
     else: return "🏢 Бизнес"
+
 
 async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
     profiles = await get_user_profiles(session, user.id)
@@ -40,7 +43,7 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
             if tariff:
                 device_limit = tariff.device_limit
                 tariff_name = f"{_get_tariff_display_name(device_limit)} ({device_limit} устр.)"
-        
+
         rendered = texts.PROFILE_TEXT_ACTIVE.format(
             name=safe(user.first_name or "Пользователь"),
             username=safe(user.username or "—"),
@@ -54,6 +57,7 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
             referrals_count=referrals_count,
             referral_days=user.referral_days,
         )
+        # ИСПОЛЬЗУЕМ клавиатуру БЕЗ дублирующей кнопки "Моя подписка"
         kb = get_profile_keyboard(is_active=True)
     else:
         rendered = texts.PROFILE_TEXT_INACTIVE.format(
@@ -67,8 +71,10 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         builder.button(text="🚀 Купить доступ", callback_data="menu_buy")
         builder.button(text="🎁 Пригласить друга", callback_data="referral")
         builder.button(text="🧾 История оплат", callback_data="user_history")
+        builder.button(text="📄 Условия сервиса", url=texts.TOS_AGREEMENT_URL)
+        builder.button(text="🔒 Политика", url=texts.PRIVACY_POLICY_URL)
         builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
-        builder.adjust(1, 1, 1, 1)
+        builder.adjust(1, 1, 1, 2, 1)
         kb = builder.as_markup()
 
     if edit:
@@ -76,6 +82,7 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         except Exception: pass
     else:
         await target.answer(rendered, reply_markup=kb, parse_mode="HTML")
+
 
 @router.callback_query(F.data == "menu_profile")
 async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
@@ -86,6 +93,7 @@ async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: 
     await _render_profile(callback.message, db_user, session, edit=True)
     await callback.answer()
 
+
 @router.callback_query(F.data == "back_to_profile")
 async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await state.clear()
@@ -94,6 +102,7 @@ async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: U
         return
     await _render_profile(callback.message, db_user, session, edit=True)
     await callback.answer()
+
 
 @router.callback_query(F.data == "user_history")
 async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
@@ -115,6 +124,7 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
     await callback.message.edit_text(rendered, reply_markup=get_history_keyboard(), parse_mode="HTML")
 
+
 @router.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await state.clear()
@@ -134,6 +144,7 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
         reply_markup=get_referral_keyboard(referral_link), parse_mode="HTML",
     )
     await callback.answer()
+
 
 @router.callback_query(F.data == "referrals_list")
 async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
