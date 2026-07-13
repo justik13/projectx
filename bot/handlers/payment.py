@@ -319,27 +319,36 @@ async def process_successful_payment(message: Message, state: FSMContext, sessio
 
 @router.callback_query(F.data == "cancel_invoice")
 async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
-    """Отмена инвойса Stars — удаляет инвойс и сообщение отмены, возвращает к выбору способа оплаты."""
+    """Отмена инвойса Stars — удаляет инвойс, помечает платёж как cancelled, возвращает к выбору оплаты."""
     await callback.answer("❌ Инвойс отменен")
 
     data = await state.get_data()
     invoice_message_id = data.get("invoice_message_id")
     cancel_message_id = data.get("cancel_message_id")
     tariff_id = data.get("tariff_id")
+    payment_id = data.get("payment_id")
 
-    # ✅ Удаляем инвойс
+    # ✅ Удаляем инвойс Telegram
     if invoice_message_id:
         try:
             await callback.bot.delete_message(callback.from_user.id, invoice_message_id)
         except Exception:
             pass
 
-    # ✅ Удаляем сообщение отмены (текущее)
+    # ✅ Удаляем сообщение с кнопкой отмены
     if cancel_message_id:
         try:
             await callback.bot.delete_message(callback.from_user.id, cancel_message_id)
         except Exception:
             pass
+
+    # ✅ Помечаем платёж как отменённый в БД
+    if payment_id:
+        try:
+            from database.repositories.payments_repo import mark_payment_as_cancelled
+            await mark_payment_as_cancelled(session, payment_id)
+        except Exception as e:
+            logger.warning(f"Failed to cancel payment {payment_id}: {e}")
 
     await state.clear()
 
@@ -357,7 +366,7 @@ async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: As
             )
             await render_hub(
                 callback.bot, callback.from_user.id,
-                text, get_payment_method_keyboard(tariff.id)
+                text, get_payment_method_keyboard(tariff.id, device_limit)
             )
             return
 

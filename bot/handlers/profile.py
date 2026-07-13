@@ -106,14 +106,22 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
     else:
         rendered = texts.HISTORY_HEADER
         for p in payments[:10]:
-            status = "✅" if p.status == "completed" else "⏳"
+            # ✅ Обновлённая логика статусов
+            if p.status == "completed":
+                status = "✅"
+            elif p.status == "cancelled":
+                status = "❌"
+            elif p.status == "failed":
+                status = "⚠️"
+            else:  # pending
+                status = "⏳"
+            
             date = format_datetime(p.paid_at or p.created_at)
             currency = "⭐" if p.currency == "stars" else "₽"
             rendered += f"{status} {date} | {p.amount} {currency}\n"
         if len(payments) > 10:
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
     await callback.message.edit_text(rendered, reply_markup=get_history_keyboard(), parse_mode="HTML")
-
 
 @router.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
