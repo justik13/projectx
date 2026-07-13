@@ -1,7 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-
 def _get_tariff_group_name(device_limit: int) -> str:
     if device_limit <= 2:
         return "📱 Для себя (2 устр.)"
@@ -12,7 +11,6 @@ def _get_tariff_group_name(device_limit: int) -> str:
     else:
         return f"🏢 Бизнес ({device_limit} устр.)"
 
-
 def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for limit in sorted(grouped_tariffs.keys()):
@@ -21,7 +19,6 @@ def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showcase") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -33,13 +30,13 @@ def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showc
         elif t.duration_days >= 30:
             text += " 🌟"
         builder.button(text=text, callback_data=f"select_tariff:{t.id}")
+        
     if back_to == "subscription":
         builder.button(text="← Назад", callback_data="menu_subscription")
     else:
         builder.button(text="← К выбору тарифа", callback_data="payment_showcase")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -55,7 +52,6 @@ def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_change_tariff_keyboard(
     tariffs: list, current_limit: int, *, is_subscription_active: bool = False,
 ) -> InlineKeyboardMarkup:
@@ -68,6 +64,7 @@ def get_change_tariff_keyboard(
         if limit not in grouped:
             grouped[limit] = []
         grouped[limit].append(t)
+        
     for limit in sorted(grouped.keys()):
         group_name = _get_tariff_group_name(limit)
         if limit == current_limit:
@@ -75,31 +72,23 @@ def get_change_tariff_keyboard(
         elif limit > current_limit:
             group_name += " 🔼"
         builder.button(text=group_name, callback_data=f"select_tariff_type:{limit}")
-    builder.button(text="← Назад", callback_data="menu_subscription")
+        
+    # 🔥 ИСПРАВЛЕНО: Кнопка Назад теперь ведёт в главное меню, а не в menu_subscription (что было тупиком)
+    builder.button(text="← Назад", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_payment_method_keyboard(tariff_id: int, device_limit: int | None = None) -> InlineKeyboardMarkup:
-    """
-    Клавиатура выбора способа оплаты.
-    ✅ ИСПРАВЛЕНО: Кнопка "Назад" ведёт на экран выбора длительности (select_tariff_type),
-    а не на сам экран Checkout.
-    """
     builder = InlineKeyboardBuilder()
     builder.button(text="⭐ Telegram Stars", callback_data=f"pay_stars:{tariff_id}")
     builder.button(text="🏦 СБП / Карта", callback_data=f"pay_sbp:{tariff_id}")
     
-    # ✅ Кнопка "Назад" ведёт к выбору длительности для этого типа тарифа
     if device_limit is not None:
         builder.button(text="← Назад", callback_data=f"select_tariff_type:{device_limit}")
     else:
-        # Fallback для уведомлений (когда device_limit неизвестен)
         builder.button(text="← В главное меню", callback_data="back_to_main_menu")
-    
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_payment_success_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()

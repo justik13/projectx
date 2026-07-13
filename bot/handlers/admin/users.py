@@ -59,6 +59,7 @@ async def _build_users_list_text_and_kb(
 
 @router.callback_query(F.data == "admin_users")
 async def show_users_list(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -71,10 +72,10 @@ async def show_users_list(callback: CallbackQuery, state: FSMContext, session: A
         await callback.message.edit_text(rendered, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
         pass
-    await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_users_page:"))
 async def users_pagination(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -88,10 +89,10 @@ async def users_pagination(callback: CallbackQuery, state: FSMContext, session: 
         await callback.message.edit_text(rendered, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
         pass
-    await callback.answer()
 
 @router.callback_query(F.data == "admin_users_search")
 async def start_search_user(callback: CallbackQuery, state: FSMContext):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -103,7 +104,6 @@ async def start_search_user(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
     await state.set_state(AdminStates.searching_user)
-    await callback.answer()
 
 @router.message(AdminStates.searching_user)
 async def process_search_user(message: Message, state: FSMContext, session: AsyncSession):
@@ -135,6 +135,7 @@ async def process_search_user(message: Message, state: FSMContext, session: Asyn
 
 @router.callback_query(F.data.startswith("admin_user_card:"))
 async def show_user_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -145,7 +146,6 @@ async def show_user_card(callback: CallbackQuery, state: FSMContext, session: As
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
     await _show_user_card_edit(callback.message, user, session)
-    await callback.answer()
 
 async def _build_user_card_text(user, session: AsyncSession) -> str:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -179,6 +179,7 @@ async def _show_user_card_edit(message, user, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("admin_user_extend:"))
 async def show_extend_options(callback: CallbackQuery, state: FSMContext):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -191,10 +192,10 @@ async def show_extend_options(callback: CallbackQuery, state: FSMContext):
         )
     except Exception:
         pass
-    await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_extend_days:"))
 async def extend_subscription(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -213,6 +214,7 @@ async def extend_subscription(callback: CallbackQuery, state: FSMContext, sessio
 
 @router.callback_query(F.data.startswith("admin_extend_custom:"))
 async def start_custom_extend(callback: CallbackQuery, state: FSMContext):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -227,7 +229,6 @@ async def start_custom_extend(callback: CallbackQuery, state: FSMContext):
         pass
     await state.set_state(AdminStates.entering_custom_days)
     await state.update_data(target_user_id=telegram_id)
-    await callback.answer()
 
 @router.message(AdminStates.entering_custom_days)
 async def process_custom_days(message: Message, state: FSMContext, session: AsyncSession):
@@ -266,6 +267,7 @@ async def process_custom_days(message: Message, state: FSMContext, session: Asyn
 
 @router.callback_query(F.data.startswith("admin_user_ban:"))
 async def toggle_ban_user(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -285,6 +287,7 @@ async def toggle_ban_user(callback: CallbackQuery, state: FSMContext, session: A
 
 @router.callback_query(F.data.startswith("admin_user_devices:"))
 async def show_user_devices(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await callback.answer() # 🔥 ДОБАВЛЕНО
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -312,4 +315,3 @@ async def show_user_devices(callback: CallbackQuery, state: FSMContext, session:
         await callback.message.edit_text(rendered, reply_markup=builder.as_markup(), parse_mode="HTML")
     except Exception:
         pass
-    await callback.answer()

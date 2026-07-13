@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards import get_broadcast_confirm_keyboard, get_back_button
+from bot.keyboards.admin.broadcast import get_broadcast_result_keyboard
 from bot.states import AdminStates
 from bot import texts
 from database.connection import session_scope
@@ -39,21 +40,18 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    
     broadcast_text = message.text or message.caption
     if not broadcast_text:
         await render_hub(message.bot, message.chat.id, texts.ERROR_TEXT_OR_MEDIA, get_back_button("admin_menu"))
         return
-    
     media_id = None
     content_type = message.content_type
     if message.photo:
         media_id = message.photo[-1].file_id
     elif message.document:
         media_id = message.document.file_id
-    
+        
     preview = texts.BROADCAST_PREVIEW.format(content_type=content_type, text=broadcast_text)
-    
     try:
         if media_id and content_type == "photo":
             await send_hub_photo(
@@ -108,7 +106,7 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
                 pass
         except Exception:
             fail_count += 1
-    
+            
     try:
         await bot.send_message(
             admin_id,
@@ -116,11 +114,12 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
                 success_count=success_count, fail_count=fail_count,
                 label=label, total_count=total_count,
             ),
-            reply_markup=get_back_button("admin_menu"), parse_mode="HTML",
+            # 🔥 ИСПОЛЬЗУЕМ НОВУЮ КЛАВИАТУРУ ДЛЯ УДАЛЕНИЯ УВЕДОМЛЕНИЯ
+            reply_markup=get_broadcast_result_keyboard(), parse_mode="HTML",
         )
     except Exception:
         pass
-    
+
     try:
         async with session_scope() as session:
             await AuditService.log_action(
@@ -154,6 +153,7 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: 
     content_type = data.get("content_type")
     users = await get_all_users(session)
     user_ids = [u.telegram_id for u in users if not u.is_bot_blocked]
+    
     asyncio.create_task(_send_broadcast_to_users(
         callback.bot, user_ids, broadcast_text, media_id, content_type, "Всего", callback.from_user.id,
     ))
@@ -182,6 +182,7 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, sessio
     content_type = data.get("content_type")
     users = await get_active_users(session)
     user_ids = [u.telegram_id for u in users]
+    
     asyncio.create_task(_send_broadcast_to_users(
         callback.bot, user_ids, broadcast_text, media_id, content_type, "Активных", callback.from_user.id,
     ))
@@ -198,3 +199,12 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, sessio
 async def stop_broadcast(callback: CallbackQuery):
     await callback.answer("⏹ Рассылка остановлена", show_alert=True)
     _broadcast_stop_event.set()
+
+# 🔥 НОВЫЙ ХЕНДЛЕР: Убирает уведомление о результате рассылки
+@router.callback_query(F.data == "broadcast_dismiss")
+async def dismiss_broadcast_result(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass

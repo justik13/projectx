@@ -40,7 +40,16 @@ async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardM
                 await bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception:
                 pass
-    
+        except TelegramAPIError:
+            # 🔥 ПЕРЕХВАТЫВАЕМ ЛЮБЫЕ ОШИБКИ API (Flood control, Bad Request и т.д.)
+            # Чтобы не ломать SMH и не создавать дубликаты из-за необработанных исключений
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     msg = await bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -58,7 +67,6 @@ async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, repl
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:
             pass
-    
     msg = await bot.send_photo(
         chat_id=chat_id,
         photo=photo,
@@ -77,7 +85,6 @@ async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:
             pass
-    
     msg = await bot.send_document(
         chat_id=chat_id,
         document=document,
@@ -96,7 +103,6 @@ async def send_hub_invoice(bot, chat_id: int, **kwargs) -> int:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:
             pass
-    
     msg = await bot.send_invoice(chat_id=chat_id, **kwargs)
     _hub_cache[chat_id] = msg.message_id
     return msg.message_id
