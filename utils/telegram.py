@@ -24,7 +24,6 @@ async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardM
     msg_id = _hub_cache.get(chat_id)
     if msg_id:
         try:
-            # ✅ Именованные параметры для aiogram 3.x (фикс business_connection_id)
             await bot.edit_message_text(
                 text=text,
                 chat_id=chat_id,
@@ -37,14 +36,33 @@ async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardM
             if "message is not modified" in str(e):
                 return msg_id
             # Если сообщение не текстовое (документ, инвойс) или было удалено
-            try: 
+            try:
                 await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-            except Exception: 
+            except Exception:
                 pass
-            
+    
     msg = await bot.send_message(
         chat_id=chat_id,
         text=text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode
+    )
+    _hub_cache[chat_id] = msg.message_id
+    return msg.message_id
+
+async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, reply_markup: InlineKeyboardMarkup, parse_mode: str = "HTML") -> int:
+    """Отправляет фото, удаляя предыдущее текстовое сообщение хаба."""
+    msg_id = _hub_cache.get(chat_id)
+    if msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+    
+    msg = await bot.send_photo(
+        chat_id=chat_id,
+        photo=photo,
+        caption=caption,
         reply_markup=reply_markup,
         parse_mode=parse_mode
     )
@@ -55,11 +73,11 @@ async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str
     """Отправляет документ, удаляя предыдущее текстовое сообщение хаба."""
     msg_id = _hub_cache.get(chat_id)
     if msg_id:
-        try: 
+        try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception: 
+        except Exception:
             pass
-            
+    
     msg = await bot.send_document(
         chat_id=chat_id,
         document=document,
@@ -74,11 +92,11 @@ async def send_hub_invoice(bot, chat_id: int, **kwargs) -> int:
     """Отправляет инвойс, удаляя предыдущее текстовое сообщение хаба."""
     msg_id = _hub_cache.get(chat_id)
     if msg_id:
-        try: 
+        try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception: 
+        except Exception:
             pass
-            
+    
     msg = await bot.send_invoice(chat_id=chat_id, **kwargs)
     _hub_cache[chat_id] = msg.message_id
     return msg.message_id

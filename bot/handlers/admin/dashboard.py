@@ -1,62 +1,192 @@
+import asyncio
 import logging
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
-from bot.keyboards import get_admin_menu, get_audit_keyboard
+
+from bot.keyboards import get_broadcast_confirm_keyboard, get_back_button
+from bot.states import AdminStates
 from bot import texts
-from database.repositories.audit_repo import get_recent_audit_logs
-from database.repositories.servers_repo import get_total_free_ips
-from database.repositories.users_repo import get_active_subscriptions_count, get_new_users_count_24h, get_user_count
+from database.connection import session_scope
+from database.repositories.users_repo import get_active_users, get_all_users, mark_user_bot_blocked
+from services.audit_service import AuditService
 from utils.admin import is_admin
-from utils.formatters import format_datetime
-from utils.telegram import safe
+from utils.telegram import render_hub, send_hub_photo
 
 router = Router()
 logger = logging.getLogger(__name__)
+_broadcast_stop_event = asyncio.Event()
 
-async def _render_dashboard(message_or_callback, session: AsyncSession, *, edit: bool = False):
-    total_users = await get_user_count(session)
-    active_subs = await get_active_subscriptions_count(session)
-    new_users_24h = await get_new_users_count_24h(session)
-    free_ips = await get_total_free_ips(session)
-    rendered = texts.DASHBOARD_HEADER + texts.DASHBOARD_STATS.format(total_users=total_users, active_subs=active_subs, new_users_24h=new_users_24h, free_ips=free_ips)
-    target = message_or_callback.message if isinstance(message_or_callback, CallbackQuery) else message_or_callback
-    if edit:
-        try: await target.edit_text(rendered, reply_markup=get_admin_menu(), parse_mode="HTML")
-        except Exception: pass
+@router.callback_query(F.data == "admin_broadcast")
+async def start_broadcast(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
+        return
+    try:
+        await callback.message.edit_text(
+            texts.BROADCAST_PROMPT, reply_markup=get_back_button("admin_menu"),
+        )
+    except Exception:
+        pass
+    await state.set_state(AdminStates.entering_broadcast_message)
+
+@router.message(AdminStates.entering_broadcast_message)
+async def process_broadcast_message(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    broadcast_text = message.text or message.caption
+    if not broadcast_text:
+        await render_hub(message.bot, message.chat.id, texts.ERROR_TEXT_OR_MEDIA, get_back_button("admin_menu"))
+        return
+    
+    media_id = None
+    content_type = message.content_type
+    if message.photo:
+        media_id = message.photo[-1].file_id
+    elif message.document:
+        media_id = message.document.file_id
+    
+    preview = texts.BROADCAST_PREVIEW.format(content_type=content_type, text=broadcast_text)
+    
+    try:
+        if media_id and content_type == "photo":
+            await send_hub_photo(
+                message.bot, message.chat.id, message.photo[-1],
+                caption=preview, reply_markup=get_broadcast_confirm_keyboard(), parse_mode="HTML",
+            )
+        else:
+            await render_hub(
+                message.bot, message.chat.id, preview,
+                get_broadcast_confirm_keyboard(), parse_mode="HTML",
+            )
+        await state.update_data(
+            broadcast_text=broadcast_text, media_id=media_id, content_type=content_type,
+        )
+        await state.set_state(AdminStates.confirming_broadcast)
+    except Exception as e:
+        await render_hub(message.bot, message.chat.id, texts.ERROR_VALIDATION.format(error=e), get_back_button("admin_menu"))
+
+async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, content_type, label, admin_id):
+    _broadcast_stop_event.clear()
+    total_count = len(user_ids)
+    success_count = 0
+    fail_count = 0
+    for uid in user_ids:
+        if _broadcast_stop_event.is_set():
+            break
+        try:
+            await _dispatch_message(bot, uid, broadcast_text, media_id, content_type)
+            success_count += 1
+            await asyncio.sleep(0.04)
+        except TelegramRetryAfter as e:
+            fail_count += 1
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await _dispatch_message(bot, uid, broadcast_text, media_id, content_type)
+                success_count += 1
+                fail_count -= 1
+            except Exception:
+                pass
+        except TelegramForbiddenError:
+            fail_count += 1
+            try:
+                async with session_scope() as session:
+                    await mark_user_bot_blocked(session, uid)
+            except Exception:
+                pass
+        except Exception:
+            fail_count += 1
+    
+    try:
+        await bot.send_message(
+            admin_id,
+            texts.BROADCAST_RESULT.format(
+                success_count=success_count, fail_count=fail_count,
+                label=label, total_count=total_count,
+            ),
+            reply_markup=get_back_button("admin_menu"), parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    
+    try:
+        async with session_scope() as session:
+            await AuditService.log_action(
+                session, admin_id, "BROADCAST",
+                details=f"to {label}: {success_count} success, {fail_count} fail",
+            )
+    except Exception:
+        pass
+
+async def _dispatch_message(bot, uid, text, media_id, content_type):
+    if content_type == "photo" and media_id:
+        await bot.send_photo(uid, media_id, caption=text, parse_mode="HTML")
+    elif content_type == "document" and media_id:
+        await bot.send_document(uid, media_id, caption=text, parse_mode="HTML")
     else:
-        await target.answer(rendered, reply_markup=get_admin_menu(), parse_mode="HTML")
+        await bot.send_message(uid, text, parse_mode="HTML")
 
-@router.callback_query(F.data == "menu_admin")
-async def hub_menu_admin(callback: CallbackQuery, session: AsyncSession = None):
+@router.callback_query(F.data == "broadcast_send_all", AdminStates.confirming_broadcast)
+async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+    await callback.answer("🚀 Рассылка запущена в фоне")
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
-    await _render_dashboard(callback, session, edit=True)
-    await callback.answer()
+    data = await state.get_data()
+    broadcast_text = data.get("broadcast_text")
+    if not broadcast_text:
+        await callback.answer(texts.ERROR_TEXT_EMPTY, show_alert=True)
+        await state.clear()
+        return
+    media_id = data.get("media_id")
+    content_type = data.get("content_type")
+    users = await get_all_users(session)
+    user_ids = [u.telegram_id for u in users if not u.is_bot_blocked]
+    asyncio.create_task(_send_broadcast_to_users(
+        callback.bot, user_ids, broadcast_text, media_id, content_type, "Всего", callback.from_user.id,
+    ))
+    try:
+        await callback.message.edit_text(
+            f"🚀 <b>Рассылка запущена!</b>\nОтправляю {len(user_ids)} пользователям...\nРезультат придёт отдельным сообщением.",
+            reply_markup=get_back_button("admin_menu"), parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await state.clear()
 
-@router.callback_query(F.data == "admin_menu")
-async def back_to_admin(callback: CallbackQuery, session: AsyncSession = None):
+@router.callback_query(F.data == "broadcast_send_active", AdminStates.confirming_broadcast)
+async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+    await callback.answer("🚀 Рассылка запущена в фоне")
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
-    await _render_dashboard(callback, session, edit=True)
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_audit")
-async def show_audit_log(callback: CallbackQuery, session: AsyncSession = None):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
+    data = await state.get_data()
+    broadcast_text = data.get("broadcast_text")
+    if not broadcast_text:
+        await callback.answer(texts.ERROR_TEXT_EMPTY, show_alert=True)
+        await state.clear()
         return
-    logs = await get_recent_audit_logs(session, limit=10)
-    if not logs:
-        rendered = texts.AUDIT_LOG_HEADER + texts.AUDIT_LOG_EMPTY
-    else:
-        rendered = texts.AUDIT_LOG_HEADER
-        for log in logs:
-            action_text = texts.AUDIT_ACTIONS.get(log.action, log.action)
-            target_info = f" {log.target_type} <code>{log.target_id}</code>" if log.target_type and log.target_id else ""
-            details = f"\n<i>{safe(log.details)}</i>" if log.details else ""
-            rendered += texts.AUDIT_ENTRY.format(date=format_datetime(log.created_at), admin_id=log.admin_id, action=action_text, target=target_info, details=details)
-    await callback.message.edit_text(rendered, reply_markup=get_audit_keyboard(), parse_mode="HTML")
-    await callback.answer()
+    media_id = data.get("media_id")
+    content_type = data.get("content_type")
+    users = await get_active_users(session)
+    user_ids = [u.telegram_id for u in users]
+    asyncio.create_task(_send_broadcast_to_users(
+        callback.bot, user_ids, broadcast_text, media_id, content_type, "Активных", callback.from_user.id,
+    ))
+    try:
+        await callback.message.edit_text(
+            f"🚀 <b>Рассылка запущена!</b>\nОтправляю {len(user_ids)} активным пользователям...\nРезультат придёт отдельным сообщением.",
+            reply_markup=get_back_button("admin_menu"), parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await state.clear()
+
+@router.callback_query(F.data == "broadcast_stop")
+async def stop_broadcast(callback: CallbackQuery):
+    await callback.answer("⏹ Рассылка остановлена", show_alert=True)
+    _broadcast_stop_event.set()

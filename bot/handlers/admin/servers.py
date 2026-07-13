@@ -15,19 +15,14 @@ from bot.states import AdminStates
 from bot import texts
 from database.models import VPNProfile
 from database.repositories.servers_repo import (
-    create_server,
-    get_server_by_id,
-    get_server_by_api_url,
-    get_server_count,
-    get_servers_paginated,
-    update_server,
-    delete_server,
-    delete_profiles_by_server_id,
+    create_server, get_server_by_id, get_server_by_api_url,
+    get_server_count, get_servers_paginated, update_server,
+    delete_server, delete_profiles_by_server_id,
 )
 from services.amnezia_client import AmneziaClient
 from services.audit_service import AuditService
 from utils.admin import is_admin
-from utils.telegram import safe
+from utils.telegram import safe, render_hub
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -47,15 +42,16 @@ URL_REGEX = re.compile(
 # ============================================================
 # Общие хелперы
 # ============================================================
+
 async def _build_servers_list_text_and_kb(
     servers, page: int, total_pages: int, total: int,
 ) -> tuple[str, InlineKeyboardBuilder]:
     rendered = (
         f"🛠 Админка › 🌍 <b>Серверы</b>\n"
-        f"(стр. {page}/{total_pages}) · Всего: {total}\n\n"
+        f"(стр. {page}/{total_pages}) · Всего: {total}\n"
     )
     builder = InlineKeyboardBuilder()
-
+    
     if not servers:
         rendered += "<i>Серверов пока нет</i>\n"
     else:
@@ -66,15 +62,16 @@ async def _build_servers_list_text_and_kb(
                 text=f"{status} {flag} {safe(server.name)} · {server.protocol}",
                 callback_data=f"admin_server_card:{server.id}",
             )
-
+    
     if page > 1:
         builder.button(text="⬅️", callback_data=f"admin_servers_page:{page - 1}")
     if page < total_pages:
         builder.button(text="➡️", callback_data=f"admin_servers_page:{page + 1}")
-
+    
     builder.button(text="➕ Добавить сервер", callback_data="admin_server_add")
     builder.button(text="← В админку", callback_data="admin_menu")
     builder.adjust(1)
+    
     return rendered, builder
 
 async def _show_servers_list(callback: CallbackQuery, session: AsyncSession, page: int = 1):
@@ -82,9 +79,11 @@ async def _show_servers_list(callback: CallbackQuery, session: AsyncSession, pag
     total_servers = await get_server_count(session)
     total_pages = max(1, math.ceil(total_servers / SERVERS_PER_PAGE))
     servers = await get_servers_paginated(session, page=page, per_page=SERVERS_PER_PAGE)
+    
     rendered, kb = await _build_servers_list_text_and_kb(
         servers, page, total_pages, total_servers,
     )
+    
     await callback.message.edit_text(rendered, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 async def _bulk_update_peer_status(
@@ -93,17 +92,19 @@ async def _bulk_update_peer_status(
     """Массовое обновление статуса пиров через Amnezia API с лимитом параллелизма."""
     if not profiles_data:
         return True
+    
     client = AmneziaClient(api_url, api_key)
     sem = asyncio.Semaphore(20)
-
+    
     async def _limited(peer_id: str) -> bool:
         async with sem:
             return await client.update_client(client_id=peer_id, status=status)
-
+    
     results = await asyncio.gather(
         *[_limited(pid) for _, pid in profiles_data],
         return_exceptions=True,
     )
+    
     return not any(isinstance(r, Exception) or r is False for r in results)
 
 async def _bulk_delete_peers_from_api(
@@ -115,11 +116,12 @@ async def _bulk_delete_peers_from_api(
     """
     if not profiles_data:
         return 0, 0
+    
     client = AmneziaClient(api_url, api_key)
     sem = asyncio.Semaphore(20)
     success = 0
     fail = 0
-
+    
     async def _delete_limited(peer_id: str):
         nonlocal success, fail
         async with sem:
@@ -128,21 +130,24 @@ async def _bulk_delete_peers_from_api(
                 success += 1
             else:
                 fail += 1
-
+    
     await asyncio.gather(
         *[_delete_limited(pid) for _, pid in profiles_data],
         return_exceptions=True,
     )
+    
     return success, fail
 
 # ============================================================
 # Список серверов и пагинация
 # ============================================================
+
 @router.callback_query(F.data == "admin_servers")
 async def show_servers_list(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+    
     await state.clear()
     await _show_servers_list(callback, session, page=1)
     await callback.answer()
@@ -152,6 +157,7 @@ async def servers_pagination(callback: CallbackQuery, state: FSMContext, session
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+    
     await state.clear()
     page = int(callback.data.split(":")[1])
     await _show_servers_list(callback, session, page=page)
@@ -160,11 +166,13 @@ async def servers_pagination(callback: CallbackQuery, state: FSMContext, session
 # ============================================================
 # Создание сервера (с защитой от дублирования api_url)
 # ============================================================
+
 @router.callback_query(F.data == "admin_server_add")
 async def start_add_server(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+    
     await state.clear()
     await callback.message.edit_text(
         texts.ADMIN_SERVER_NAME_PROMPT,
@@ -179,95 +187,147 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+    
     if not message.text:
-        await message.answer(texts.ERROR_TEXT_REQUIRED)
-        return
-    if message.text.startswith("/"):
-        await state.clear()
-        await message.answer(
-            texts.ERROR_OPERATION_CANCELLED,
-            reply_markup=get_back_button("admin_servers"),
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_TEXT_REQUIRED,
+            get_back_button("admin_servers")
         )
         return
-
+    
+    if message.text.startswith("/"):
+        await state.clear()
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_OPERATION_CANCELLED,
+            get_back_button("admin_servers")
+        )
+        return
+    
     data = await state.get_data()
     step = data.get("step")
-
+    
     if step == "name":
         name = message.text.strip()
         if len(name) > 255:
-            await message.answer(texts.ERROR_NAME_TOO_LONG.format(max=255))
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_NAME_TOO_LONG.format(max=255),
+                get_back_button("admin_servers")
+            )
             return
+        
         await state.update_data(name=name, step="flag")
-        await message.answer(
+        await render_hub(
+            message.bot, message.chat.id,
             texts.ADMIN_SERVER_FLAG_PROMPT,
-            reply_markup=get_back_button("admin_servers"),
+            get_back_button("admin_servers")
         )
+    
     elif step == "flag":
         await state.update_data(country_flag=message.text.strip(), step="api_url")
-        await message.answer(
+        await render_hub(
+            message.bot, message.chat.id,
             texts.ADMIN_SERVER_URL_PROMPT,
-            reply_markup=get_back_button("admin_servers"),
+            get_back_button("admin_servers")
         )
+    
     elif step == "api_url":
         api_url = message.text.strip()
         if len(api_url) > 500:
-            await message.answer(texts.ERROR_URL_TOO_LONG.format(max=500))
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_URL_TOO_LONG.format(max=500),
+                get_back_button("admin_servers")
+            )
             return
+        
         if not URL_REGEX.match(api_url):
-            await message.answer(texts.ERROR_INVALID_URL, parse_mode="HTML")
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_INVALID_URL,
+                get_back_button("admin_servers"),
+                parse_mode="HTML"
+            )
             return
         
         # Защита от дублирования api_url
         existing = await get_server_by_api_url(session, api_url)
         if existing:
-            await message.answer(
+            await render_hub(
+                message.bot, message.chat.id,
                 texts.ERROR_SERVER_DUPLICATE_URL.format(api_url=safe(api_url)),
-                reply_markup=get_back_button("admin_servers"),
-                parse_mode="HTML",
+                get_back_button("admin_servers"),
+                parse_mode="HTML"
             )
             await state.clear()
             return
-
+        
         await state.update_data(api_url=api_url, step="api_key")
-        await message.answer(
+        await render_hub(
+            message.bot, message.chat.id,
             texts.ADMIN_SERVER_KEY_PROMPT,
-            reply_markup=get_back_button("admin_servers"),
+            get_back_button("admin_servers")
         )
+    
     elif step == "api_key":
         api_key = message.text.strip()
         if not api_key or len(api_key) < 8:
-            await message.answer(texts.ERROR_API_KEY_SHORT.format(min=8))
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_API_KEY_SHORT.format(min=8),
+                get_back_button("admin_servers")
+            )
             return
+        
         await state.update_data(api_key=api_key)
-
+        
         # --- healthcheck и получение метаданных сервера ---
         all_data = await state.get_data()
-        check_msg = await message.answer(texts.ADMIN_SERVER_CHECKING, parse_mode="HTML")
+        
+        check_msg = await render_hub(
+            message.bot, message.chat.id,
+            texts.ADMIN_SERVER_CHECKING,
+            get_back_button("admin_servers"),
+            parse_mode="HTML"
+        )
+        
         client = AmneziaClient(all_data["api_url"], all_data["api_key"])
-
         if not await client.healthcheck():
-            await check_msg.edit_text(texts.ERROR_SERVER_UNREACHABLE, parse_mode="HTML")
-            await state.clear()
-            return
-
-        server_info = await client.get_server_info()
-        if not server_info:
-            await check_msg.edit_text(texts.ERROR_SERVER_API_INFO_FAILED, parse_mode="HTML")
-            await state.clear()
-            return
-
-        protocols = server_info.get("protocols", [])
-        if "amneziawg2" not in protocols:
-            await check_msg.edit_text(
-                texts.ERROR_PROTOCOL_NOT_SUPPORTED.format(
-                    protocols=safe(", ".join(protocols) if protocols else "неизвестно"),
-                ),
-                parse_mode="HTML",
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_SERVER_UNREACHABLE,
+                get_back_button("admin_servers"),
+                parse_mode="HTML"
             )
             await state.clear()
             return
-
+        
+        server_info = await client.get_server_info()
+        if not server_info:
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_SERVER_API_INFO_FAILED,
+                get_back_button("admin_servers"),
+                parse_mode="HTML"
+            )
+            await state.clear()
+            return
+        
+        protocols = server_info.get("protocols", [])
+        if "amneziawg2" not in protocols:
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_PROTOCOL_NOT_SUPPORTED.format(
+                    protocols=safe(", ".join(protocols) if protocols else "неизвестно"),
+                ),
+                get_back_button("admin_servers"),
+                parse_mode="HTML"
+            )
+            await state.clear()
+            return
+        
         api_max_peers = (
             server_info.get("maxPeers")
             or server_info.get("serverMaxPeers")
@@ -278,18 +338,19 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             or server_info.get("serverName")
             or all_data["name"]
         )
-
+        
         # Повторная проверка дубликата (на случай гонки)
         existing = await get_server_by_api_url(session, all_data["api_url"])
         if existing:
-            await check_msg.edit_text(
+            await render_hub(
+                message.bot, message.chat.id,
                 texts.ERROR_SERVER_DUPLICATE_URL.format(api_url=safe(all_data["api_url"])),
-                reply_markup=get_back_button("admin_servers"),
-                parse_mode="HTML",
+                get_back_button("admin_servers"),
+                parse_mode="HTML"
             )
             await state.clear()
             return
-
+        
         server = await create_server(
             session,
             name=api_server_name,
@@ -299,10 +360,13 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             protocol="amneziawg2",
             max_clients=int(api_max_peers),
         )
+        
         await AuditService.log_action(
             session, message.from_user.id, "ADD_SERVER", "Server", server.id, api_server_name,
         )
-        await check_msg.edit_text(
+        
+        await render_hub(
+            message.bot, message.chat.id,
             texts.ADMIN_SERVER_ADDED.format(
                 flag=all_data["country_flag"],
                 name=safe(api_server_name),
@@ -310,19 +374,22 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
                 max_clients=api_max_peers,
                 api_url=safe(all_data["api_url"]),
             ),
-            reply_markup=get_back_button("admin_servers"),
-            parse_mode="HTML",
+            get_back_button("admin_servers"),
+            parse_mode="HTML"
         )
+        
         logger.info(f"Admin {message.from_user.id} added server: {server.id}")
         await state.clear()
 
 # ============================================================
 # Карточка сервера и операции
 # ============================================================
+
 async def _show_server_card(callback: CallbackQuery, session: AsyncSession, server):
     """Рендер карточки сервера — переиспользуется после операций."""
     flag = server.country_flag or "🌍"
     status = "🟢 Активен" if server.is_active else "🔴 Отключен"
+    
     rendered = texts.ADMIN_SERVER_CARD.format(
         flag=flag,
         name=safe(server.name),
@@ -332,6 +399,7 @@ async def _show_server_card(callback: CallbackQuery, session: AsyncSession, serv
         api_url=server.api_url,
         max_clients=server.max_clients,
     )
+    
     await callback.message.edit_text(
         rendered,
         reply_markup=get_admin_server_card_keyboard(server.id, server.is_active),
@@ -343,12 +411,15 @@ async def show_server_card(callback: CallbackQuery, state: FSMContext, session: 
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+    
     await state.clear()
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
+    
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         return
+    
     await _show_server_card(callback, session, server)
     await callback.answer()
 
@@ -357,76 +428,86 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext, session: Asy
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+    
     await state.clear()
     await callback.answer("⏳ Выполняется...")
+    
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
+    
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         return
-
+    
     new_status = not server.is_active
+    
     result = await session.execute(
         select(VPNProfile.id, VPNProfile.peer_id).where(VPNProfile.server_id == server.id),
     )
     profiles_data = result.all()
-
+    
     if profiles_data:
         target_api_status = "active" if new_status else "disabled"
         ok = await _bulk_update_peer_status(
             profiles_data, server.api_url, server.api_key, target_api_status,
         )
+        
         if not ok:
             await callback.answer(texts.ADMIN_TOGGLE_NETWORK_FAIL, show_alert=True)
             return
-
+        
         profile_ids = [pid for pid, _ in profiles_data]
         await session.execute(
             update(VPNProfile)
             .where(VPNProfile.id.in_(profile_ids))
             .values(is_active=new_status),
         )
-
+    
     await update_server(session, server, is_active=new_status)
+    
     await AuditService.log_action(
         session, callback.from_user.id, "TOGGLE_SERVER", "Server", server_id,
         "enabled" if new_status else "disabled",
     )
     await session.commit()
-
+    
     await callback.answer(
         f"✅ Сервер {'включен' if new_status else 'выключен'}", show_alert=True,
     )
     logger.info(f"Admin {callback.from_user.id} toggled server {server_id} to {new_status}")
-
+    
     refreshed = await get_server_by_id(session, server_id)
     await _show_server_card(callback, session, refreshed)
 
 # ============================================================
 # Двухшаговое удаление сервера
 # ============================================================
+
 @router.callback_query(F.data.startswith("admin_server_delete:"))
 async def request_delete_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     """Шаг 1: Показываем предупреждение с количеством затронутых устройств."""
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
-
+    
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
+    
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         return
-
+    
     # Считаем количество устройств на этом сервере
     result = await session.execute(
         select(VPNProfile.id).where(VPNProfile.server_id == server.id),
     )
     profiles_count = len(result.all())
+    
     flag = server.country_flag or "🌍"
-
+    
     await state.update_data(delete_server_id=server_id)
     await state.set_state(AdminStates.confirming_server_delete)
+    
     await callback.message.edit_text(
         texts.ADMIN_SERVER_DELETE_CONFIRM.format(
             flag=flag,
@@ -444,32 +525,33 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
-
+    
     current_state = await state.get_state()
     if current_state != AdminStates.confirming_server_delete:
         await callback.answer("⚠️ Сессия подтверждения истекла", show_alert=True)
         return
-
+    
     await state.clear()
     await callback.answer("⏳ Удаляю сервер и все устройства...", show_alert=False)
-
+    
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
+    
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         await _show_servers_list(callback, session, page=1)
         return
-
+    
     flag = server.country_flag or "🌍"
     server_name = server.name
-
+    
     # Получаем все профили для удаления с API
     result = await session.execute(
         select(VPNProfile.id, VPNProfile.peer_id).where(VPNProfile.server_id == server.id),
     )
     profiles_data = result.all()
     profiles_count = len(profiles_data)
-
+    
     # Шаг A: Массовое удаление с Amnezia API
     if profiles_data:
         api_success, api_fail = await _bulk_delete_peers_from_api(
@@ -480,18 +562,19 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
                 f"Server {server_id}: {api_fail}/{profiles_count} peers "
                 f"failed to delete from API"
             )
-
+    
     # Шаг B: Удаление профилей из локальной БД
     deleted_profiles = await delete_profiles_by_server_id(session, server_id)
-
+    
     # Шаг C: Удаление самого сервера
     await delete_server(session, server)
-
+    
     # Аудит
     await AuditService.log_action(
         session, callback.from_user.id, "DELETE_SERVER", "Server", server_id,
         f"{server_name}: {deleted_profiles} profiles deleted",
     )
+    
     await callback.answer(
         f"✅ Сервер {server_name} удалён ({deleted_profiles} устр.)",
         show_alert=True,
@@ -500,20 +583,25 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
         f"Admin {callback.from_user.id} fully deleted server {server_id} "
         f"({server_name}) with {deleted_profiles} profiles"
     )
+    
     await _show_servers_list(callback, session, page=1)
 
 # ============================================================
 # Редактирование имени сервера
 # ============================================================
+
 @router.callback_query(F.data.startswith("admin_server_edit_name:"))
 async def start_edit_server_name(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+    
     await state.clear()
     server_id = int(callback.data.split(":")[1])
+    
     await state.update_data(server_id=server_id, edit_field="name")
     await state.set_state(AdminStates.editing_server)
+    
     await callback.message.edit_text(
         texts.ADMIN_SERVER_RENAME_PROMPT,
         reply_markup=get_back_button(f"admin_server_card:{server_id}"),
@@ -523,21 +611,26 @@ async def start_edit_server_name(callback: CallbackQuery, state: FSMContext):
 # ============================================================
 # Редактирование флага сервера
 # ============================================================
+
 @router.callback_query(F.data.startswith("admin_server_edit_flag:"))
 async def start_edit_server_flag(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+    
     await state.clear()
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
+    
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         return
-
+    
     current_flag = server.country_flag or "🌍"
+    
     await state.update_data(server_id=server_id, edit_field="flag")
     await state.set_state(AdminStates.editing_server_flag)
+    
     await callback.message.edit_text(
         texts.ADMIN_SERVER_FLAG_PROMPT_EDIT.format(current_flag=current_flag),
         reply_markup=get_back_button(f"admin_server_card:{server_id}"),
@@ -549,35 +642,54 @@ async def process_edit_server_flag(message: Message, state: FSMContext, session:
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+    
     if not message.text:
-        await message.answer(texts.ERROR_TEXT_REQUIRED)
-        return
-    if message.text.startswith("/"):
-        await state.clear()
-        await message.answer(
-            texts.ERROR_OPERATION_CANCELLED,
-            reply_markup=get_back_button("admin_servers"),
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_TEXT_REQUIRED,
+            get_back_button("admin_servers")
         )
         return
-
+    
+    if message.text.startswith("/"):
+        await state.clear()
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_OPERATION_CANCELLED,
+            get_back_button("admin_servers")
+        )
+        return
+    
     data = await state.get_data()
     server_id = data["server_id"]
     server = await get_server_by_id(session, server_id)
+    
     if not server:
-        await message.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_SERVER_NOT_FOUND,
+            get_back_button("admin_servers")
+        )
         await state.clear()
         return
-
+    
     new_flag = message.text.strip()
     if len(new_flag) > 10:
-        await message.answer("⚠️ Флаг слишком длинный (макс. 10 символов):")
+        await render_hub(
+            message.bot, message.chat.id,
+            "⚠️ Флаг слишком длинный (макс. 10 символов):",
+            get_back_button("admin_servers")
+        )
         return
-
+    
     await update_server(session, server, country_flag=new_flag)
-    await message.answer(
+    
+    await render_hub(
+        message.bot, message.chat.id,
         texts.ADMIN_SERVER_FLAG_UPDATED.format(flag=new_flag),
-        reply_markup=get_back_button(f"admin_server_card:{server_id}"),
+        get_back_button(f"admin_server_card:{server_id}")
     )
+    
     logger.info(f"Admin {message.from_user.id} updated server {server_id} flag to {new_flag}")
     await state.clear()
 
@@ -587,34 +699,53 @@ async def process_edit_server_name(message: Message, state: FSMContext, session:
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+    
     if not message.text:
-        await message.answer(texts.ERROR_TEXT_REQUIRED)
-        return
-    if message.text.startswith("/"):
-        await state.clear()
-        await message.answer(
-            texts.ERROR_OPERATION_CANCELLED,
-            reply_markup=get_back_button("admin_servers"),
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_TEXT_REQUIRED,
+            get_back_button("admin_servers")
         )
         return
-
+    
+    if message.text.startswith("/"):
+        await state.clear()
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_OPERATION_CANCELLED,
+            get_back_button("admin_servers")
+        )
+        return
+    
     data = await state.get_data()
     server_id = data["server_id"]
     server = await get_server_by_id(session, server_id)
+    
     if not server:
-        await message.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_SERVER_NOT_FOUND,
+            get_back_button("admin_servers")
+        )
         await state.clear()
         return
-
+    
     new_name = message.text.strip()
     if len(new_name) > 255:
-        await message.answer(texts.ERROR_NAME_TOO_LONG.format(max=255))
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_NAME_TOO_LONG.format(max=255),
+            get_back_button("admin_servers")
+        )
         return
-
+    
     await update_server(session, server, name=new_name)
-    await message.answer(
+    
+    await render_hub(
+        message.bot, message.chat.id,
         texts.ADMIN_SERVER_RENAMED.format(name=safe(new_name)),
-        reply_markup=get_back_button(f"admin_server_card:{server_id}"),
+        get_back_button(f"admin_server_card:{server_id}")
     )
+    
     logger.info(f"Admin {message.from_user.id} updated server {server_id} name to {new_name}")
     await state.clear()
