@@ -21,6 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     """Глобальный обработчик ошибок"""
     logger.critical(f"Unhandled exception: {event.exception}", exc_info=event.exception)
@@ -46,6 +47,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
 
     return True
 
+
 async def setup_bot_commands(bot: Bot):
     """Устанавливает меню команд"""
     commands = [
@@ -55,12 +57,12 @@ async def setup_bot_commands(bot: Bot):
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     logger.info("Bot commands configured")
 
+
 async def setup_bot() -> tuple[Bot, Dispatcher]:
     """Создаёт и настраивает bot + dispatcher"""
     bot = Bot(token=get_settings().BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Middlewares
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
     dp.message.middleware(CleanChatMiddleware())
@@ -70,7 +72,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
     dp.message.middleware(ChatActionMiddleware())
 
-    # Routers
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
     from bot.handlers.admin.dashboard import router as admin_dashboard_router
     from bot.handlers.admin.servers import router as admin_servers_router
@@ -96,6 +97,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
     return bot, dp
 
+
 async def start_webhook_server(port: int):
     """Запускает aiohttp сервер для webhook"""
     app = web.Application()
@@ -109,6 +111,7 @@ async def start_webhook_server(port: int):
     
     logger.info(f"Webhook server started on port {port}")
     return runner
+
 
 async def main():
     """Главная функция запуска"""
@@ -130,7 +133,6 @@ async def main():
         
         bot, dp = await setup_bot()
         
-        # 🆕 Запуск webhook сервера для Platega
         webhook_runner = None
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
             webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
@@ -143,11 +145,12 @@ async def main():
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:
-        if webhook_runner:
+        if 'webhook_runner' in locals() and webhook_runner:
             await webhook_runner.cleanup()
         await close_db()
         await close_http_session()
         logger.info("Работа бота завершена")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

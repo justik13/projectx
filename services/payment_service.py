@@ -12,6 +12,7 @@ from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
+
 class PaymentService:
     @staticmethod
     async def handle_successful_payment(
@@ -25,7 +26,7 @@ class PaymentService:
         )
         result = await session.execute(stmt)
         if result.rowcount == 0:
-            return True  # уже обработано
+            return True
 
         result = await session.execute(
             select(Payment)
@@ -49,7 +50,6 @@ class PaymentService:
             new_tariff_id=tariff.id,
         )
 
-        # Реферальный бонус за первую оплату
         payments = await get_user_payments(session, user.id)
         completed_payments = [p for p in payments if p.status == 'completed']
         is_first_payment = len(completed_payments) == 1
@@ -74,13 +74,12 @@ class PaymentService:
         tariff_id: int,
         amount: float,
         telegram_id: int
-    ) -> tuple[Payment | None, dict | None]:
-        """Создает платеж через Platega.io"""
+    ) -> tuple:
+        """Создает платеж через Platega.io. Возвращает (payment, qr_data)."""
         from database.repositories.payments_repo import create_payment
         
         settings = get_settings()
         
-        # Создаем запись в БД
         payment = await create_payment(
             session=session,
             user_id=user_id,
@@ -89,18 +88,13 @@ class PaymentService:
             currency="RUB"
         )
         
-        # Формируем description с Telegram ID (требование Platega)
         description = f"Оплата подписки VPN. TgId:{telegram_id} UserId:{user_id}"
         
-        # Формируем return URL
-        bot_username = "your_bot_username"  # TODO: получить из bot.get_me()
-        return_url = settings.PLATEGA_RETURN_URL.format(bot_username=bot_username)
-        failed_url = settings.PLATEGA_FAILED_URL.format(bot_username=bot_username)
+        return_url = settings.PLATEGA_RETURN_URL.format(bot_username="your_bot")
+        failed_url = settings.PLATEGA_FAILED_URL.format(bot_username="your_bot")
         
-        # Payload для идентификации
         payload = f"payment_{payment.id}"
         
-        # Создаем транзакцию в Platega
         client = PlategaClient()
         transaction = await client.create_transaction(
             amount=amount,
@@ -116,13 +110,11 @@ class PaymentService:
             await session.commit()
             return payment, None
         
-        # Сохраняем данные транзакции
         payment.external_id = transaction.get("transactionId")
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get("paymentMethod", "SBPQR")
         await session.commit()
         
-        # Получаем QR-код
         qr_data = await client.get_qr_code(payment.external_id)
         if qr_data:
             payment.qr_code = qr_data.get("qr")
@@ -138,7 +130,6 @@ class PaymentService:
         payload: str
     ) -> bool:
         """Обрабатывает callback от Platega.io"""
-        # Находим платеж по external_id
         stmt = (
             select(Payment)
             .options(selectinload(Payment.user), selectinload(Payment.tariff))
@@ -154,17 +145,14 @@ class PaymentService:
         logger.info(f"Platega callback: payment {payment.id} status={status}")
         
         if status == "CONFIRMED":
-            # Оплата успешна
             return await PaymentService.handle_successful_payment(session, payment.id)
         
         elif status == "CANCELED":
-            # Оплата отменена
             payment.status = "cancelled"
             await session.commit()
             return True
         
         elif status == "CHARGEBACKED":
-            # Возврат средств
             payment.status = "refunded"
             await session.commit()
             logger.warning(f"Chargeback for payment {payment.id}")

@@ -49,7 +49,6 @@ check_os() {
 install_dependencies() {
     log "Обновление пакетов..."
     apt-get update -qq
-
     log "Установка системных зависимостей..."
     if ! apt-get install -y -qq \
         python3 \
@@ -67,7 +66,6 @@ install_dependencies() {
         > /dev/null 2>&1; then
         error "Не удалось установить системные зависимости. Проверьте интернет и apt-репозитории."
     fi
-
     log "Создание системного пользователя projectx..."
     if ! id "projectx" &>/dev/null; then
         useradd -r -s /bin/false projectx
@@ -75,7 +73,6 @@ install_dependencies() {
     else
         warn "Системный пользователь projectx уже существует"
     fi
-
     success "Системные зависимости установлены"
 }
 
@@ -83,7 +80,6 @@ migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
         log "Изоляция кодовой базы: синхронизация проекта в безопасную директорию $PROJECT_DIR..."
         mkdir -p "$PROJECT_DIR"
-
         if ! rsync -a --delete \
             --exclude='.env' \
             --exclude='bot_data.db' \
@@ -95,7 +91,6 @@ migrate_to_opt() {
             "$START_DIR/" "$PROJECT_DIR/"; then
             error "Ошибка синхронизации файлов. Убедитесь, что rsync установлен."
         fi
-
         success "Проект успешно синхронизирован в $PROJECT_DIR"
     fi
     cd "$PROJECT_DIR"
@@ -109,12 +104,9 @@ setup_venv() {
     else
         warn "Виртуальное окружение уже существует"
     fi
-
     source "$VENV_DIR/bin/activate"
-
     log "Обновление pip..."
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
-
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
         log "Установка зависимостей проекта..."
         pip install -r "$PROJECT_DIR/requirements.txt" > /dev/null 2>&1
@@ -167,34 +159,36 @@ setup_env() {
     REFERRAL_BONUS_DAYS=${REFERRAL_BONUS_DAYS:-3}
 
     echo ""
-    echo -e "${BLUE}[5/6]${NC} Platega.io Merchant ID (для СБП, оставить пустым если не нужно)"
+    echo -e "${BLUE}[5/7]${NC} Platega.io Merchant ID (для СБП, оставить пустым если не нужно)"
     read -p "Введите PLATEGA_MERCHANT_ID: " PLATEGA_MERCHANT_ID
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         echo ""
-        echo -e "${BLUE}[6/6]${NC} Platega.io Secret Key"
+        echo -e "${BLUE}[6/7]${NC} Platega.io Secret Key"
         read -p "Введите PLATEGA_SECRET: " PLATEGA_SECRET
         [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET не может быть пустым если указан Merchant ID"
-    
+
         echo ""
         echo -e "${BLUE}[7/7]${NC} Callback URL для Platega (например: https://yourdomain.com/webhook/platega)"
         read -p "Введите PLATEGA_CALLBACK_URL: " PLATEGA_CALLBACK_URL
         [ -z "$PLATEGA_CALLBACK_URL" ] && error "PLATEGA_CALLBACK_URL не может быть пустым"
-    
+        if [[ ! "$PLATEGA_CALLBACK_URL" =~ ^https?:// ]]; then
+            error "PLATEGA_CALLBACK_URL должен начинаться с http:// или https://"
+        fi
+
         write_env_var "PLATEGA_MERCHANT_ID" "$PLATEGA_MERCHANT_ID"
         write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
         write_env_var "PLATEGA_BASE_URL" "https://api.platega.io"
         write_env_var "PLATEGA_CALLBACK_URL" "$PLATEGA_CALLBACK_URL"
         write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
-        write_env_var "PLATEGA_RETURN_URL" "https://t.me/\${BOT_USERNAME}"
-        write_env_var "PLATEGA_FAILED_URL" "https://t.me/\${BOT_USERNAME}"
-    
+        write_env_var "PLATEGA_PAYMENT_METHOD" "2"
+        write_env_var "PLATEGA_RETURN_URL" "https://t.me/projectx_bot"
+        write_env_var "PLATEGA_FAILED_URL" "https://t.me/projectx_bot"
+
         success "Platega.io настроен"
     else
         success "Platega.io пропущен (будут только Telegram Stars)"
     fi
-
-    # 🔧 ФИКС: УДАЛЁН запрос DEFAULT_DEVICE_LIMIT — хардкод в коде (2 устр.)
 
     log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
     DB_ENCRYPTION_KEY=$(python3 -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
@@ -207,9 +201,20 @@ HEADER
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
     write_env_var "REFERRAL_BONUS_DAYS" "$REFERRAL_BONUS_DAYS"
-    # 🔧 ФИКС: УДАЛЁН write_env_var "DEFAULT_DEVICE_LIMIT"
     write_env_var "DB_ENCRYPTION_KEY" "$DB_ENCRYPTION_KEY"
     write_env_var "DB_PATH" "./bot_data.db"
+    
+    # Дописываем Platega переменные если были настроены
+    if [ -n "$PLATEGA_MERCHANT_ID" ]; then
+        write_env_var "PLATEGA_MERCHANT_ID" "$PLATEGA_MERCHANT_ID"
+        write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
+        write_env_var "PLATEGA_BASE_URL" "https://api.platega.io"
+        write_env_var "PLATEGA_CALLBACK_URL" "$PLATEGA_CALLBACK_URL"
+        write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
+        write_env_var "PLATEGA_PAYMENT_METHOD" "2"
+        write_env_var "PLATEGA_RETURN_URL" "https://t.me/projectx_bot"
+        write_env_var "PLATEGA_FAILED_URL" "https://t.me/projectx_bot"
+    fi
 
     chmod 600 "$PROJECT_DIR/.env"
     success ".env файл создан и защищён"
@@ -219,20 +224,17 @@ init_database() {
     log "Инициализация асинхронной базы данных SQLite..."
     cd "$PROJECT_DIR"
     source "$VENV_DIR/bin/activate"
-
     python3 -c "
 import asyncio
 from database.connection import init_db
 asyncio.run(init_db())
 " 2>&1 | tee -a "$LOG_FILE"
-
     success "База данных успешно инициализирована"
 }
 
 setup_systemd() {
     log "Настройка и изоляция systemd сервиса..."
     systemctl is-active --quiet "$SERVICE_NAME" && systemctl stop "$SERVICE_NAME" || true
-
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
@@ -260,7 +262,6 @@ ProtectHome=true
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     success "Systemd сервис успешно настроен и добавлен в автозапуск"
@@ -269,7 +270,6 @@ EOF
 setup_backup() {
     log "Настройка регламентного автобэкапа базы данных и ключей..."
     mkdir -p "$BACKUP_DIR"
-
     cat > /usr/local/bin/projectx-backup.sh << EOF
 #!/bin/bash
 BACKUP_DIR="$BACKUP_DIR"
@@ -280,32 +280,24 @@ DATE=\$(date +%Y%m%d_%H%M%S)
 if [ -f "\$DB_FILE" ]; then
     sqlite3 "\$DB_FILE" ".backup '\$BACKUP_DIR/bot_data_\$DATE.db'"
     gzip "\$BACKUP_DIR/bot_data_\$DATE.db"
-
     if [ -f "\$ENV_FILE" ]; then
         cp "\$ENV_FILE" "\$BACKUP_DIR/env_\$DATE.backup"
         gzip "\$BACKUP_DIR/env_\$DATE.backup"
     fi
-
     find "\$BACKUP_DIR" -name "bot_data_*.db.gz" -mtime +30 -delete
     find "\$BACKUP_DIR" -name "env_*.backup.gz" -mtime +30 -delete
-
     echo "[\$(date)] Backup completed successfully."
 fi
 EOF
-
     chmod +x /usr/local/bin/projectx-backup.sh
-
     CRON_JOB="0 3 * * * /usr/local/bin/projectx-backup.sh >> /var/log/projectx-backup.log 2>&1"
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "$CRON_JOB") | crontab -
-
     /usr/local/bin/projectx-backup.sh || true
-
     success "Автобэкап успешно настроен (ежедневно в 3:00, ротация 30 дней)"
 }
 
 setup_monitoring() {
     log "Настройка пятиминутного автовосстановления (Healthcheck)..."
-
     cat > /usr/local/bin/projectx-healthcheck.sh << EOF
 #!/bin/bash
 SERVICE_NAME="$SERVICE_NAME"
@@ -315,28 +307,22 @@ BOT_TOKEN=\$(grep "^BOT_TOKEN=" "\$BOT_TOKEN_FILE" | cut -d'=' -f2- | tr -d '"' 
 
 if ! systemctl is-active --quiet "\$SERVICE_NAME"; then
     systemctl restart "\$SERVICE_NAME"
-
     if [ -n "\$BOT_TOKEN" ] && [ -n "\$ADMIN_IDS" ]; then
         curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN/sendMessage" \
             -d "chat_id=\$ADMIN_IDS" \
             -d "text=⚠️ Бот упал и был перезапущен автоматически (\$(date))" > /dev/null
     fi
-
     echo "[\$(date)] Bot crashed, self-healing triggered." >> /var/log/projectx-healthcheck.log
 fi
 EOF
-
     chmod +x /usr/local/bin/projectx-healthcheck.sh
-
     CRON_HEALTH="*/5 * * * * /usr/local/bin/projectx-healthcheck.sh"
     (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "$CRON_HEALTH") | crontab -
-
     success "Мониторинг доступности настроен (проверка каждые 5 минут)"
 }
 
 setup_logrotate() {
     log "Настройка ротации лог-файлов..."
-
     cat > /etc/logrotate.d/projectx << EOF
 /var/log/projectx-*.log {
     daily
@@ -348,7 +334,6 @@ setup_logrotate() {
     create 0640 root root
 }
 EOF
-
     success "Ротация системных логов настроена"
 }
 
@@ -356,7 +341,6 @@ start_bot() {
     log "Запуск службы бота..."
     systemctl start "$SERVICE_NAME"
     sleep 3
-
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         success "Бот успешно запущен в фоновом режиме!"
         echo ""

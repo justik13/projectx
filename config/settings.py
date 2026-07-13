@@ -16,9 +16,11 @@ class Settings(BaseSettings):
     PLATEGA_MERCHANT_ID: str = ""
     PLATEGA_SECRET: str = ""
     PLATEGA_BASE_URL: str = "https://api.platega.io"
-    PLATEGA_CALLBACK_URL: str = ""  # https://yourdomain.com/webhook/platega
-    PLATEGA_WEBHOOK_PORT: int = 8080  # Порт для webhook сервера
+    PLATEGA_CALLBACK_URL: str = ""
+    PLATEGA_WEBHOOK_PORT: int = 8080
     PLATEGA_PAYMENT_METHOD: int = 2  # 2 = СБП QR
+    PLATEGA_RETURN_URL: str = "https://t.me/{bot_username}"
+    PLATEGA_FAILED_URL: str = "https://t.me/{bot_username}"
     
     model_config = {
         "env_file": ".env",

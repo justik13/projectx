@@ -8,25 +8,22 @@ import logging
 _engine = None
 _sessionmaker = None
 
-# Дефолтная матрица тарифов
 DEFAULT_TARIFFS = [
-    # 📱 Базовый (2 устройства)
     {"duration_days": 7, "device_limit": 2, "price_rub": 35, "price_stars": 35, "sort_order": 10},
     {"duration_days": 30, "device_limit": 2, "price_rub": 90, "price_stars": 90, "sort_order": 11},
     {"duration_days": 90, "device_limit": 2, "price_rub": 240, "price_stars": 240, "sort_order": 12},
-    # 👨‍👩‍👧‍👦 Семейный (5 устройств)
     {"duration_days": 30, "device_limit": 5, "price_rub": 180, "price_stars": 180, "sort_order": 20},
     {"duration_days": 90, "device_limit": 5, "price_rub": 480, "price_stars": 480, "sort_order": 21},
-    # 🚀 Pro (10 устройств)
     {"duration_days": 30, "device_limit": 10, "price_rub": 320, "price_stars": 320, "sort_order": 30},
     {"duration_days": 90, "device_limit": 10, "price_rub": 850, "price_stars": 850, "sort_order": 31},
 ]
+
 
 async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
     db_url = f"sqlite+aiosqlite:///{settings.DB_PATH}"
-    
+
     _engine = create_async_engine(
         db_url, echo=False,
         connect_args={"check_same_thread": False, "timeout": 30},
@@ -48,11 +45,10 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         await _run_migrations(conn)
 
-    # Сидинг дефолтных тарифов (если таблица пустая)
     await _seed_default_tariffs()
-    
     logging.info(f"Database initialized at {settings.DB_PATH}")
     return _engine, _sessionmaker
+
 
 async def _run_migrations(conn):
     """Автоматические миграции для существующих БД."""
@@ -60,29 +56,40 @@ async def _run_migrations(conn):
         def check_and_migrate(sync_conn):
             inspector = inspect(sync_conn)
             
-            # Миграция 1: device_limit в tariffs
             tariff_columns = {col['name'] for col in inspector.get_columns('tariffs')}
             if 'device_limit' not in tariff_columns:
                 logging.info("🔄 Migration: adding device_limit to tariffs...")
                 sync_conn.execute(text("ALTER TABLE tariffs ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 2"))
                 logging.info("✅ Migration: device_limit added to tariffs")
-            
-            # Миграция 2: device_limit в users
+
             user_columns = {col['name'] for col in inspector.get_columns('users')}
             if 'device_limit' not in user_columns:
                 logging.info("🔄 Migration: adding device_limit to users...")
                 sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0"))
                 logging.info("✅ Migration: device_limit added to users")
-            
-            # Миграция 3: current_tariff_id в users
+
             if 'current_tariff_id' not in user_columns:
                 logging.info("🔄 Migration: adding current_tariff_id to users...")
                 sync_conn.execute(text("ALTER TABLE users ADD COLUMN current_tariff_id INTEGER DEFAULT NULL"))
                 logging.info("✅ Migration: current_tariff_id added to users")
+            
+            # Platega.io миграция
+            payment_columns = {col['name'] for col in inspector.get_columns('payments')}
+            platega_fields = ['external_id', 'payment_url', 'qr_code', 'payment_method']
+            
+            for field in platega_fields:
+                if field not in payment_columns:
+                    logging.info(f"🔄 Migration: adding {field} to payments...")
+                    if field == 'qr_code':
+                        sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {field} TEXT"))
+                    else:
+                        sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {field} VARCHAR(1000)"))
+                    logging.info(f"✅ Migration: {field} added to payments")
 
         await conn.run_sync(check_and_migrate)
     except Exception as e:
         logging.warning(f"Migration check failed (safe to ignore on fresh DB): {e}")
+
 
 async def _seed_default_tariffs():
     """Создаёт дефолтные тарифы, если таблица пустая."""
@@ -112,11 +119,13 @@ async def _seed_default_tariffs():
     finally:
         await session.close()
 
+
 async def get_session() -> AsyncSession:
     global _sessionmaker
     if _sessionmaker is None:
         await init_db()
     return _sessionmaker()
+
 
 @asynccontextmanager
 async def session_scope():
@@ -131,49 +140,9 @@ async def session_scope():
     finally:
         await session.close()
 
+
 async def close_db():
     global _engine
     if _engine:
         await _engine.dispose()
         logging.info("Database connection closed")
-
-async def _run_migrations(conn):
-    """Автоматические миграции для существующих БД."""
-    try:
-        def check_and_migrate(sync_conn):
-            inspector = inspect(sync_conn)
-            
-            # Существующие миграции...
-            tariff_columns = {col['name'] for col in inspector.get_columns('tariffs')}
-            if 'device_limit' not in tariff_columns:
-                logging.info("🔄 Migration: adding device_limit to tariffs...")
-                sync_conn.execute(text("ALTER TABLE tariffs ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 2"))
-                logging.info("✅ Migration: device_limit added to tariffs")
-
-            user_columns = {col['name'] for col in inspector.get_columns('users')}
-            if 'device_limit' not in user_columns:
-                logging.info("🔄 Migration: adding device_limit to users...")
-                sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0"))
-                logging.info("✅ Migration: device_limit added to users")
-
-            if 'current_tariff_id' not in user_columns:
-                logging.info("🔄 Migration: adding current_tariff_id to users...")
-                sync_conn.execute(text("ALTER TABLE users ADD COLUMN current_tariff_id INTEGER DEFAULT NULL"))
-                logging.info("✅ Migration: current_tariff_id added to users")
-            
-            # 🆕 Platega.io миграция
-            payment_columns = {col['name'] for col in inspector.get_columns('payments')}
-            platega_fields = ['external_id', 'payment_url', 'qr_code', 'payment_method']
-            
-            for field in platega_fields:
-                if field not in payment_columns:
-                    logging.info(f"🔄 Migration: adding {field} to payments...")
-                    if field == 'qr_code':
-                        sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {field} TEXT"))
-                    else:
-                        sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {field} VARCHAR(1000)"))
-                    logging.info(f"✅ Migration: {field} added to payments")
-
-        await conn.run_sync(check_and_migrate)
-    except Exception as e:
-        logging.warning(f"Migration check failed (safe to ignore on fresh DB): {e}")

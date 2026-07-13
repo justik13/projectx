@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.tariff_names import get_tariff_group_name
-from aiogram.types import InlineKeyboardButton
+
 
 def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -11,6 +11,7 @@ def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
+
 
 def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showcase") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -29,6 +30,7 @@ def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showc
     builder.adjust(1)
     return builder.as_markup()
 
+
 def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     tariffs_sorted = sorted(tariffs, key=lambda t: t.duration_days)
@@ -43,6 +45,7 @@ def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
+
 def get_change_tariff_keyboard(
     tariffs: list, current_limit: int, *, is_subscription_active: bool = False,
 ) -> InlineKeyboardMarkup:
@@ -55,7 +58,6 @@ def get_change_tariff_keyboard(
         if limit not in grouped:
             grouped[limit] = []
         grouped[limit].append(t)
-
     for limit in sorted(grouped.keys()):
         group_name = get_tariff_group_name(limit)
         if limit == current_limit:
@@ -63,10 +65,10 @@ def get_change_tariff_keyboard(
         elif limit > current_limit:
             group_name += " 🔼"
         builder.button(text=group_name, callback_data=f"select_tariff_type:{limit}")
-
     builder.button(text="← Назад", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
+
 
 def get_payment_method_keyboard(tariff_id: int, device_limit: int | None = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -79,16 +81,15 @@ def get_payment_method_keyboard(tariff_id: int, device_limit: int | None = None)
     builder.adjust(1)
     return builder.as_markup()
 
+
 def get_payment_success_keyboard() -> InlineKeyboardMarkup:
-    """
-    🔥 ИСПРАВЛЕНО: Добавлена кнопка "← К подписке" для возврата в меню подписки.
-    """
     builder = InlineKeyboardBuilder()
     builder.button(text="🔌 Подключить устройство", callback_data="menu_connections")
-    builder.button(text="⏳ К подписке", callback_data="menu_subscription")  # 🔥 НОВАЯ КНОПКА
+    builder.button(text="⏳ К подписке", callback_data="menu_subscription")
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1, 1, 1)
     return builder.as_markup()
+
 
 def get_sbp_payment_keyboard(payment_url: str, payment_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для СБП платежа"""
@@ -99,24 +100,3 @@ def get_sbp_payment_keyboard(payment_url: str, payment_id: int) -> InlineKeyboar
     builder.button(text="← Назад", callback_data="back_to_payment")
     builder.adjust(1, 1, 1, 1)
     return builder.as_markup()
-
-@router.callback_query(F.data.startswith("cancel_payment:"))
-async def cancel_payment(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
-    """Отмена платежа"""
-    await callback.answer("❌ Платеж отменен")
-    
-    payment_id = int(callback.data.split(":")[1])
-    
-    try:
-        await mark_payment_as_cancelled(session, payment_id)
-    except Exception as e:
-        logger.warning(f"Failed to cancel payment {payment_id}: {e}")
-    
-    await state.clear()
-    
-    # Возвращаемся к выбору тарифа
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if user and await _is_subscription_active(user):
-        await _show_hub(callback, user, session)
-    else:
-        await _show_showcase(callback, session)

@@ -5,6 +5,7 @@ from .payment import (
     get_tariff_showcase_keyboard, get_tariff_duration_keyboard,
     get_renew_keyboard, get_change_tariff_keyboard,
     get_payment_method_keyboard, get_payment_success_keyboard,
+    get_sbp_payment_keyboard,
 )
 from .admin.dashboard import get_admin_menu, get_audit_keyboard
 from .admin.users import get_admin_user_card_keyboard, get_admin_extend_days_keyboard
@@ -19,6 +20,7 @@ __all__ = [
     "get_tariff_showcase_keyboard", "get_tariff_duration_keyboard",
     "get_renew_keyboard", "get_change_tariff_keyboard",
     "get_payment_method_keyboard", "get_payment_success_keyboard",
+    "get_sbp_payment_keyboard",
     "get_admin_menu", "get_audit_keyboard",
     "get_admin_user_card_keyboard", "get_admin_extend_days_keyboard",
     "get_admin_server_card_keyboard", "get_server_delete_confirm_keyboard",

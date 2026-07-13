@@ -11,6 +11,7 @@ from services.payment_service import PaymentService
 
 logger = logging.getLogger("BackgroundWorker")
 
+
 async def stale_payments_checker_loop(bot: Bot):
     """Проверяет зависшие платежи и уведомляет админов"""
     settings = get_settings()
@@ -21,7 +22,6 @@ async def stale_payments_checker_loop(bot: Bot):
             
             session = await get_session()
             try:
-                # Проверяем старые pending платежи
                 threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
                 stmt = (
                     select(Payment)
@@ -31,7 +31,6 @@ async def stale_payments_checker_loop(bot: Bot):
                 result = await session.execute(stmt)
                 stale_payments = result.scalars().all()
                 
-                # 🆕 Автоматически проверяем статус Platega платежей
                 for payment in stale_payments[:20]:
                     if payment.external_id and payment.payment_method == "SBPQR":
                         try:
@@ -39,7 +38,6 @@ async def stale_payments_checker_loop(bot: Bot):
                         except Exception as e:
                             logger.warning(f"Failed to check Platega payment {payment.id}: {e}")
                 
-                # Уведомляем админов если есть зависшие платежи
                 if stale_payments:
                     msg = f"⚠️ <b>{len(stale_payments)} зависших платежей (pending > 1ч)</b>\n\n"
                     for p in stale_payments[:10]:
