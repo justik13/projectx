@@ -5,7 +5,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuButtonCommands
 from aiogram.utils.chat_action import ChatActionMiddleware
 from cryptography.fernet import Fernet
-
 from bot import texts
 from bot.middlewares import DBSessionMiddleware, ThrottlingMiddleware, UserContextMiddleware, CleanChatMiddleware
 from config.settings import get_settings
@@ -19,16 +18,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 async def global_error_handler(event: ErrorEvent) -> bool:
+    """Глобальный обработчик ошибок — логирует и сообщает пользователю"""
     logger.critical(f"Unhandled exception: {event.exception}", exc_info=True)
-    
     state = event.data.get("state")
     if state:
         try:
             await state.clear()
         except Exception:
             pass
-    
     try:
         if event.update.callback_query:
             await event.update.callback_query.answer(
@@ -40,10 +39,11 @@ async def global_error_handler(event: ErrorEvent) -> bool:
             )
     except Exception:
         pass
-    
     return True
 
+
 async def setup_bot_commands(bot: Bot):
+    """Устанавливает меню команд и кнопку меню"""
     commands = [
         BotCommand(command="start", description="🚀 Запустить бота"),
     ]
@@ -51,23 +51,26 @@ async def setup_bot_commands(bot: Bot):
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     logger.info("Bot commands configured")
 
+
 async def setup_bot() -> tuple[Bot, Dispatcher]:
+    """Создаёт и настраивает bot + dispatcher"""
     bot = Bot(token=get_settings().BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     
+    # === Middlewares (порядок важен!) ===
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
-    
     dp.message.middleware(CleanChatMiddleware())
-    
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
     
+    # 🔥 Исправлено: message = 0.3s, callback = 0.1s (быстрее отклик на кнопки)
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
     
     dp.message.middleware(ChatActionMiddleware())
     
+    # === Routers ===
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
     from bot.handlers.admin.dashboard import router as admin_dashboard_router
     from bot.handlers.admin.servers import router as admin_servers_router
@@ -89,18 +92,17 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
         dp.include_router(r)
     
     dp.errors.register(global_error_handler)
-    
     await setup_bot_commands(bot)
-    
     return bot, dp
 
+
 async def main():
+    """Главная функция запуска"""
     settings = get_settings()
     try:
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
-        
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
@@ -111,7 +113,6 @@ async def main():
         await init_db()
         
         bot, dp = await setup_bot()
-        
         await start_background_worker(bot)
         
         logger.info("Запуск polling...")
@@ -122,6 +123,7 @@ async def main():
         await close_db()
         await close_http_session()
         logger.info("Работа бота завершена")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

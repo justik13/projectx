@@ -1,6 +1,12 @@
+"""
+Парсер vpn:// URI от Amnezia API.
+Формат: base64url(4-byte big-endian original_length + zlib_compressed_JSON)
+Поддержка AmneziaWG и AmneziaWG 2.0.
+"""
 import base64
 import json
 import zlib
+import struct
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
@@ -37,130 +43,161 @@ class AmneziaWGConfig:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
-def _try_decode_base64(payload: str) -> Optional[bytes]:
-    """Пытается декодировать base64 в разных форматах"""
-    # Попытка 1: standard base64
+def _decode_base64url(payload: str) -> Optional[bytes]:
+    """
+    Декодирует base64url (формат Amnezia):
+    - Заменяет - на + и _ на /
+    - Добавляет padding =
+    - Декодирует
+    """
     try:
-        return base64.b64decode(payload, validate=False)
-    except Exception:
-        pass
-    
-    # Попытка 2: urlsafe base64 с padding
+        # base64url → base64 standard
+        b64 = payload.replace("-", "+").replace("_", "/")
+        
+        # Добавляем padding
+        padding_needed = len(b64) % 4
+        if padding_needed:
+            b64 += "=" * (4 - padding_needed)
+        
+        return base64.b64decode(b64)
+    except Exception as e:
+        logger.warning(f"_decode_base64url failed: {e}")
+        return None
+
+
+def _try_standard_base64(payload: str) -> Optional[bytes]:
+    """Попытка обычного base64 (если вдруг API изменился)"""
     try:
         padding = 4 - len(payload) % 4
         if padding != 4:
-            payload_padded = payload + "=" * padding
-        else:
-            payload_padded = payload
-        return base64.urlsafe_b64decode(payload_padded)
+            payload += "=" * padding
+        return base64.b64decode(payload, validate=False)
     except Exception:
-        pass
+        return None
+
+
+def _try_decompress_amnezia(data: bytes) -> Optional[str]:
+    """
+    Распаковывает формат Amnezia: 4-byte header + zlib data
+    """
+    if len(data) < 4:
+        return None
     
-    # Попытка 3: urlsafe base64 без padding
+    # Читаем заголовок — 4 байта big-endian = оригинальная длина JSON
     try:
-        return base64.urlsafe_b64decode(payload + "==")
-    except Exception:
-        pass
+        original_length = struct.unpack(">I", data[:4])[0]
+    except struct.error:
+        logger.warning("_try_decompress_amnezia: не могу прочитать заголовок")
+        return None
     
+    # Берём сжатые данные (после 4 байт заголовка)
+    compressed = data[4:]
+    
+    try:
+        # standard zlib deflate
+        decompressed_bytes = zlib.decompress(compressed)
+        
+        # Проверяем длину (опционально, но полезно для диагностики)
+        if len(decompressed_bytes) != original_length:
+            logger.warning(
+                f"Length mismatch: header says {original_length}, got {len(decompressed_bytes)}"
+            )
+        
+        # Декодируем в строку
+        return decompressed_bytes.decode("utf-8")
+    except Exception as e:
+        logger.warning(f"_try_decompress_amnezia zlib failed: {e}")
+        return None
+
+
+def _try_plain_decompress(data: bytes) -> Optional[str]:
+    """
+    Попытка стандартного zlib (без заголовка длины)
+    """
+    for wbits in (15, -15, 31, 47):
+        try:
+            decompressed = zlib.decompress(data, wbits)
+            text = decompressed.decode("utf-8")
+            if text.strip().startswith("{"):
+                return text
+        except Exception:
+            continue
     return None
 
 
-def _try_decompress(data: bytes) -> Optional[str]:
-    """Пытается распаковать данные разными методами и декодировать в JSON"""
-    decompressed = None
-    
-    # Попытка 1: zlib (стандартный)
+def _try_plain_json(data: bytes) -> Optional[str]:
+    """
+    Попытка: данные вообще не сжаты — это просто base64-encoded JSON
+    """
     try:
-        decompressed = zlib.decompress(data)
-    except Exception:
+        text = data.decode("utf-8")
+        if text.strip().startswith("{"):
+            return text
+    except UnicodeDecodeError:
         pass
-    
-    # Попытка 2: raw deflate (без zlib header)
-    if decompressed is None:
-        try:
-            decompressed = zlib.decompress(data, -zlib.MAX_WBITS)
-        except Exception:
-            pass
-    
-    # Попытка 3: gzip
-    if decompressed is None:
-        try:
-            decompressed = zlib.decompress(data, zlib.MAX_WBITS | 16)
-        except Exception:
-            pass
-    
-    if decompressed is None:
-        return None
-    
-    # Перебор кодировок
-    for encoding in ("utf-8", "utf-16", "cp1251", "latin-1"):
-        try:
-            json_str = decompressed.decode(encoding)
-            if json_str.strip().startswith("{"):
-                return json_str
-        except (UnicodeDecodeError, AttributeError):
-            continue
-    
     return None
 
 
 def parse_vpn_uri(uri: str) -> Optional[AmneziaWGConfig]:
     """
     Парсит vpn:// URI от Amnezia API.
-    Поддерживает все возможные форматы кодирования и сжатия.
+    Формат: base64url(4-byte big-endian length + zlib(JSON))
+    Fallback: обычный base64 + JSON или zlib
     """
     if not uri or not isinstance(uri, str):
-        logger.warning("parse_vpn_uri: пустой или некорректный URI")
         return None
     
-    # Убираем префикс vpn://
+    # Убираем префикс
     if uri.startswith("vpn://"):
         payload = uri[6:]
     else:
-        logger.warning("parse_vpn_uri: URI не начинается с vpn://")
         return None
     
     if not payload:
-        logger.warning("parse_vpn_uri: пустой payload после vpn://")
         return None
     
-    # Декодируем base64
-    decoded_bytes = _try_decode_base64(payload)
-    if decoded_bytes is None:
-        logger.error("parse_vpn_uri: не удалось декодировать base64")
+    # Декодируем base64url
+    decoded = _decode_base64url(payload)
+    if decoded is None:
+        # Fallback: обычный base64
+        decoded = _try_standard_base64(payload)
+    
+    if decoded is None:
+        logger.error("parse_vpn_uri: не удалось декодировать base64/base64url")
         return None
     
-    # Пробуем распаковать
-    json_str = _try_decompress(decoded_bytes)
+    # Пробуем формат Amnezia (4-byte header + zlib)
+    json_str = _try_decompress_amnezia(decoded)
+    if json_str:
+        return _parse_and_extract(json_str, uri)
     
-    # Если не распаковалось, может быть это просто JSON в base64?
-    if json_str is None:
-        for encoding in ("utf-8", "utf-16", "cp1251", "latin-1"):
-            try:
-                json_str = decoded_bytes.decode(encoding)
-                if json_str.strip().startswith("{"):
-                    break
-                else:
-                    json_str = None
-            except (UnicodeDecodeError, AttributeError):
-                continue
+    # Пробуем обычный zlib
+    json_str = _try_plain_decompress(decoded)
+    if json_str:
+        return _parse_and_extract(json_str, uri)
     
-    if not json_str:
-        logger.error("parse_vpn_uri: не удалось получить JSON строку")
-        return None
+    # Пробуем plain JSON (не сжатый)
+    json_str = _try_plain_json(decoded)
+    if json_str:
+        return _parse_and_extract(json_str, uri)
     
-    # Парсим JSON
+    logger.error("parse_vpn_uri: ни один метод распаковки не сработал")
+    return None
+
+
+def _parse_and_extract(json_str: str, original_uri: str) -> Optional[AmneziaWGConfig]:
+    """Парсит JSON строку и извлекает конфиг"""
     try:
         data = json.loads(json_str)
     except json.JSONDecodeError as e:
-        logger.error(f"parse_vpn_uri: JSON decode error: {e}")
+        logger.error(f"_parse_and_extract JSON error: {e}")
         return None
     
     if not isinstance(data, dict):
-        logger.error("parse_vpn_uri: JSON не является словарем")
+        logger.error("_parse_and_extract: JSON не словарь")
         return None
     
-    return _extract_config(data, original_uri=uri)
+    return _extract_config(data, original_uri)
 
 
 def _find_awg_section(data: dict) -> Optional[tuple[dict, str]]:
@@ -168,7 +205,7 @@ def _find_awg_section(data: dict) -> Optional[tuple[dict, str]]:
     Рекурсивно ищет секцию AmneziaWG в JSON.
     Возвращает (секция, протокол) или None.
     """
-    # Прямой поиск в containers
+    # 1) Прямой поиск в containers
     containers = data.get("containers", [])
     if isinstance(containers, list):
         for container in containers:
@@ -178,14 +215,14 @@ def _find_awg_section(data: dict) -> Optional[tuple[dict, str]]:
                 if proto_key in container and isinstance(container[proto_key], dict):
                     return container[proto_key], proto_key
     
-    # Прямой поиск на верхнем уровне (если нет containers)
+    # 2) Прямой поиск на верхнем уровне (flat формат)
     for proto_key in ("amneziawg2", "amneziawg", "awg"):
         if proto_key in data and isinstance(data[proto_key], dict):
             return data[proto_key], proto_key
     
-    # Рекурсивный поиск (fallback)
+    # 3) Рекурсивный поиск (fallback)
     def _recursive_search(obj, depth=0):
-        if depth > 5:  # Защита от бесконечной рекурсии
+        if depth > 5:
             return None
         if isinstance(obj, dict):
             for proto_key in ("amneziawg2", "amneziawg", "awg"):
@@ -242,7 +279,7 @@ def _extract_config(data: dict, original_uri: str) -> Optional[AmneziaWGConfig]:
                 pass
     
     # Сохраняем дополнительные поля
-    skip_keys = {"config", "H1", "H2", "H3", "H4", "S1", "S2", "J1", "J2", "J3", "Jc", "Jmin", "Jmax"}
+    skip_keys = {"config", "H1", "H2", "H3", "H4", "S1", "S2", "J1", "J2", "J3", "Jc", "Jmin", "Jmax", "last_config"}
     config.extra = {k: v for k, v in awg_section.items() if k not in skip_keys}
     
     return config
@@ -289,12 +326,10 @@ def _parse_wg_config(wg_config: str, config: AmneziaWGConfig) -> None:
 def is_valid_amneziawg_config(config: Optional[AmneziaWGConfig]) -> bool:
     """
     Смягченная валидация: если есть базовые ключи WG, мы ОБЯЗАНЫ выдать .conf файл.
-    Обфускационные параметры (H1-H4, S1-S2, Jc/Jmin/Jmax) опциональны.
     """
     if config is None:
         return False
     
-    # Минимальные требования для WireGuard
     required = [
         config.private_key,
         config.peer_public_key,
