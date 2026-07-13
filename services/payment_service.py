@@ -75,9 +75,8 @@ class PaymentService:
         amount: float,
         telegram_id: int
     ) -> tuple:
-        """Создает платеж через Platega.io. Возвращает (payment, qr_data)."""
+        """Создает платеж через Platega.io. Возвращает (payment, None)."""
         from database.repositories.payments_repo import create_payment
-        
         settings = get_settings()
         
         payment = await create_payment(
@@ -88,13 +87,11 @@ class PaymentService:
             currency="RUB"
         )
         
-        description = f"Оплата подписки VPN. TgId:{telegram_id} UserId:{user_id}"
-        
+        description = f"Оплата подписки. TgId:{telegram_id} UserId:{user_id}"
         return_url = settings.PLATEGA_RETURN_URL.format(bot_username="your_bot")
         failed_url = settings.PLATEGA_FAILED_URL.format(bot_username="your_bot")
-        
         payload = f"payment_{payment.id}"
-        
+
         client = PlategaClient()
         transaction = await client.create_transaction(
             amount=amount,
@@ -104,23 +101,21 @@ class PaymentService:
             failed_url=failed_url,
             payload=payload
         )
-        
+
         if not transaction:
             payment.status = "failed"
             await session.commit()
             return payment, None
-        
+
         payment.external_id = transaction.get("transactionId")
+        # В переменной redirect лежит нужная ссылка вида https://pay.platega.io/?id=...&mh=...
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get("paymentMethod", "SBPQR")
         await session.commit()
         
-        qr_data = await client.get_qr_code(payment.external_id)
-        if qr_data:
-            payment.qr_code = qr_data.get("qr")
-            await session.commit()
-        
-        return payment, qr_data
+        # 🔥 ИСПРАВЛЕНО: QR-код больше не запрашиваем. 
+        # Пользователь перейдет по payment_url, где Platega сама сгенерирует QR.
+        return payment, None
 
     @staticmethod
     async def handle_platega_callback(

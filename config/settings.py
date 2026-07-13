@@ -1,6 +1,5 @@
 from pydantic_settings import BaseSettings
 from typing import List
-import logging
 from pydantic import field_validator
 
 class Settings(BaseSettings):
@@ -15,10 +14,10 @@ class Settings(BaseSettings):
     # Platega.io (СБП)
     PLATEGA_MERCHANT_ID: str = ""
     PLATEGA_SECRET: str = ""
-    PLATEGA_BASE_URL: str = "https://api.platega.io"
+    PLATEGA_BASE_URL: str = "https://app.platega.io"
     PLATEGA_CALLBACK_URL: str = ""
     PLATEGA_WEBHOOK_PORT: int = 8080
-    PLATEGA_PAYMENT_METHOD: int = 2  # 2 = СБП QR
+    PLATEGA_PAYMENT_METHOD: int = 2
     PLATEGA_RETURN_URL: str = "https://t.me/{bot_username}"
     PLATEGA_FAILED_URL: str = "https://t.me/{bot_username}"
     
@@ -37,8 +36,7 @@ class Settings(BaseSettings):
             return [v]
         elif isinstance(v, list):
             return [int(x) for x in v]
-        else:
-            return v
+        return v
 
 _settings = None
 

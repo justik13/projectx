@@ -64,27 +64,6 @@ class PlategaClient:
             logger.error(f"Platega create_transaction failed: {e}", exc_info=True)
             return None
     
-    async def get_qr_code(self, transaction_id: str) -> Optional[Dict]:
-        """
-        Получение QR-кода для H2H-транзакции
-        GET /h2h/{id}
-        """
-        url = f"{self.base_url}/h2h/{transaction_id}"
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self._get_headers(), timeout=30) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        logger.info(f"Platega QR received for {transaction_id}")
-                        return result
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"Platega QR error {response.status}: {error_text}")
-                        return None
-        except Exception as e:
-            logger.error(f"Platega get_qr_code failed: {e}", exc_info=True)
-            return None
     
     async def check_status(self, transaction_id: str) -> Optional[Dict]:
         """

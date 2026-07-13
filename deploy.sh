@@ -178,7 +178,7 @@ setup_env() {
 
         write_env_var "PLATEGA_MERCHANT_ID" "$PLATEGA_MERCHANT_ID"
         write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
-        write_env_var "PLATEGA_BASE_URL" "https://api.platega.io"
+        write_env_var "PLATEGA_BASE_URL" "https://app.platega.io"
         write_env_var "PLATEGA_CALLBACK_URL" "$PLATEGA_CALLBACK_URL"
         write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
         write_env_var "PLATEGA_PAYMENT_METHOD" "2"

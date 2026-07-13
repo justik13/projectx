@@ -92,11 +92,10 @@ def get_payment_success_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_sbp_payment_keyboard(payment_url: str, payment_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура для СБП платежа"""
+    """Клавиатура для СБП платежа (без кнопки Назад)"""
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Открыть страницу оплаты", url=payment_url)
     builder.button(text="✅ Я оплатил (проверить)", callback_data=f"check_payment:{payment_id}")
     builder.button(text="❌ Отменить", callback_data=f"cancel_payment:{payment_id}")
-    builder.button(text="← Назад", callback_data="back_to_payment")
-    builder.adjust(1, 1, 1, 1)
+    builder.adjust(1, 1, 1)
     return builder.as_markup()

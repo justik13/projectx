@@ -320,17 +320,20 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSess
     if not tariff:
         await callback.answer(texts.ERROR_TARIFF_NOT_FOUND, show_alert=True)
         return
+        
     db_user = await get_user_by_telegram_id(session, callback.from_user.id)
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-    payment, qr_data = await PaymentService.create_platega_payment(
+
+    payment, _ = await PaymentService.create_platega_payment(
         session=session,
         user_id=db_user.id,
         tariff_id=tariff.id,
         amount=float(tariff.price_rub),
         telegram_id=db_user.telegram_id
     )
+    
     if not payment or not payment.payment_url:
         await render_hub(
             callback.bot, callback.message.chat.id,
@@ -338,46 +341,22 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSess
             get_back_button(f"select_tariff:{tariff_id}")
         )
         return
+
     await state.update_data(payment_id=payment.id)
-    qr_code = payment.qr_code or (qr_data.get("qr") if qr_data else None)
+    
     text = texts.PAYMENT_SBP_INSTRUCTIONS.format(
         amount=tariff.price_rub,
         payment_url=payment.payment_url
     )
-    if qr_code and qr_code.startswith("http"):
-        await render_hub(
-            callback.bot, callback.message.chat.id,
-            text,
-            get_sbp_payment_keyboard(payment.payment_url, payment.id),
-            parse_mode="HTML"
-        )
-    elif qr_code:
-        try:
-            qr_bytes = base64.b64decode(qr_code)
-            qr_file = BufferedInputFile(qr_bytes, filename="qr_code.png")
-            await clear_and_delete_hub(callback.bot, callback.message.chat.id)
-            await callback.bot.send_photo(
-                callback.message.chat.id,
-                qr_file,
-                caption=text,
-                reply_markup=get_sbp_payment_keyboard(payment.payment_url, payment.id),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logger.error(f"Failed to send QR image: {e}")
-            await render_hub(
-                callback.bot, callback.message.chat.id,
-                text,
-                get_sbp_payment_keyboard(payment.payment_url, payment.id),
-                parse_mode="HTML"
-            )
-    else:
-        await render_hub(
-            callback.bot, callback.message.chat.id,
-            text,
-            get_sbp_payment_keyboard(payment.payment_url, payment.id),
-            parse_mode="HTML"
-        )
+
+    # 🔥 ИСПРАВЛЕНО: Убираем генерацию и отправку QR-кода ботом.
+    # Отправляем только ссылку на платежную страницу Platega (SMH).
+    await render_hub(
+        callback.bot, callback.message.chat.id,
+        text,
+        get_sbp_payment_keyboard(payment.payment_url, payment.id),
+        parse_mode="HTML"
+    )
 
 
 @router.callback_query(F.data.startswith("check_payment:"))
