@@ -88,22 +88,25 @@ def parse_vpn_uri(uri: str) -> Optional[AmneziaWGConfig]:
                 pass
 
     if decoded_bytes is None:
-        # Тихий fallback, не спамим в логи
         return None
 
-    # Парсим JSON с перебором кодировок
-    try:
+    # 🔥 ИСПРАВЛЕНО: Перебор кодировок (UTF-8, Windows-1251, Latin-1)
+    # Ошибка 0xe2 часто возникает, когда API отдаёт кириллицу или спецсимволы в cp1251
+    json_str = None
+    for encoding in ("utf-8", "utf-16", "cp1251", "latin-1"):
         try:
-            json_str = decoded_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                json_str = decoded_bytes.decode("utf-16")
-            except UnicodeDecodeError:
-                json_str = decoded_bytes.decode("latin-1")
-                
+            json_str = decoded_bytes.decode(encoding)
+            if json_str.strip().startswith("{"):
+                break
+        except (UnicodeDecodeError, AttributeError):
+            continue
+            
+    if not json_str:
+        return None
+
+    try:
         data = json.loads(json_str)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        # Тихий fallback
+    except json.JSONDecodeError:
         return None
         
     if not isinstance(data, dict):
@@ -202,10 +205,4 @@ def is_valid_amneziawg_config(config: Optional[AmneziaWGConfig]) -> bool:
         config.peer_public_key,
         config.peer_endpoint,
     ]
-    if not all(required):
-        return False
-    if config.protocol == "amneziawg2":
-        if config.Jc == 0 and config.Jmin == 0 and config.Jmax == 0:
-            if all(x == 0 for x in (config.H1, config.H2, config.H3, config.H4)):
-                return False
-    return True
+    return all(required)

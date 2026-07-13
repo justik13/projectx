@@ -10,8 +10,13 @@ def get_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_broadcast_result_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для уведомления о результате рассылки"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Ок (Убрать)", callback_data="broadcast_dismiss")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_broadcast_close_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Прочитано (убрать)", callback_data="dismiss_broadcast")
     builder.adjust(1)
     return builder.as_markup()

@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards import get_broadcast_confirm_keyboard, get_back_button
-from bot.keyboards.admin.broadcast import get_broadcast_result_keyboard
+from bot.keyboards.admin.broadcast import get_broadcast_result_keyboard, get_broadcast_close_keyboard
 from bot.states import AdminStates
 from bot import texts
 from database.connection import session_scope
@@ -114,7 +114,6 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
                 success_count=success_count, fail_count=fail_count,
                 label=label, total_count=total_count,
             ),
-            # 🔥 ИСПОЛЬЗУЕМ НОВУЮ КЛАВИАТУРУ ДЛЯ УДАЛЕНИЯ УВЕДОМЛЕНИЯ
             reply_markup=get_broadcast_result_keyboard(), parse_mode="HTML",
         )
     except Exception:
@@ -130,12 +129,14 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
         pass
 
 async def _dispatch_message(bot, uid, text, media_id, content_type):
+    """🔥 ИСПРАВЛЕНО: Добавлена кнопка 'Прочитано' для очистки чата у пользователей"""
+    kb = get_broadcast_close_keyboard()
     if content_type == "photo" and media_id:
-        await bot.send_photo(uid, media_id, caption=text, parse_mode="HTML")
+        await bot.send_photo(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
     elif content_type == "document" and media_id:
-        await bot.send_document(uid, media_id, caption=text, parse_mode="HTML")
+        await bot.send_document(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
     else:
-        await bot.send_message(uid, text, parse_mode="HTML")
+        await bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
 
 @router.callback_query(F.data == "broadcast_send_all", AdminStates.confirming_broadcast)
 async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
@@ -200,9 +201,18 @@ async def stop_broadcast(callback: CallbackQuery):
     await callback.answer("⏹ Рассылка остановлена", show_alert=True)
     _broadcast_stop_event.set()
 
-# 🔥 НОВЫЙ ХЕНДЛЕР: Убирает уведомление о результате рассылки
 @router.callback_query(F.data == "broadcast_dismiss")
 async def dismiss_broadcast_result(callback: CallbackQuery):
+    """Убирает уведомление о результате рассылки у АДМИНА"""
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+# 🔥 НОВЫЙ ХЕНДЛЕР: Убирает сообщение рассылки у ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ
+@router.callback_query(F.data == "dismiss_broadcast")
+async def dismiss_broadcast_message(callback: CallbackQuery):
     await callback.answer()
     try:
         await callback.message.delete()
