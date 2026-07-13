@@ -167,6 +167,7 @@ async def download_conf(
     """
     🔥 ИСПРАВЛЕНО: Отдача ДВУХ файлов (.vpn и .conf) отдельными сообщениями +
     текстовый хаб с инструкцией и кнопкой Назад (сохраняет SMH).
+    Также исправлен TypeError: send_hub_document() missing reply_markup.
     """
     await callback.answer("⏳ Генерирую файлы...")
     await state.clear()
@@ -203,7 +204,8 @@ async def download_conf(
         caption=f"📁 <b>Основной клиент Amnezia</b>\n"
                 f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
                 f"<i>Для универсального приложения</i>",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=None  # <-- ИСПРАВЛЕНО: передаем None, так как это документ
     )
     
     # 2. Отправляем .conf отдельным сообщением
