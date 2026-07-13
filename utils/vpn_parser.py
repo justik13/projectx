@@ -2,6 +2,11 @@
 Парсер vpn:// URI от Amnezia API.
 
 Формат: base64url(4-byte big-endian original_length + zlib_compressed_JSON)
+
+Главные функции:
+- decode_vpn_uri_to_json(uri) -> dict: возвращает весь JSON как словарь
+- build_conf_content(uri) -> str: возвращает готовый .conf (JSON с отступами)
+- parse_vpn_uri(uri) -> AmneziaWGConfig: старая функция для обратной совместимости
 """
 import base64
 import json
@@ -26,8 +31,6 @@ class AmneziaWGConfig:
     peer_endpoint: str = ""
     peer_persistent_keepalive: int = 25
     mtu: Optional[int] = None
-
-    # Обфускационные параметры
     H1: Union[int, str] = 0
     H2: Union[int, str] = 0
     H3: Union[int, str] = 0
@@ -42,24 +45,20 @@ class AmneziaWGConfig:
     Jc: int = 0
     Jmin: int = 0
     Jmax: int = 0
-
-    # I1-I5 — пакеты инициализации (в .conf будут как h1-h5 lowercase)
     I1: str = ""
     I2: str = ""
     I3: str = ""
     I4: str = ""
     I5: str = ""
-
-    # Метаданные
     protocol_version: str = "2"
     description: str = ""
     host_name: str = ""
     raw_config: str = ""
-    raw_wg_config: str = ""  # Готовый WireGuard конфиг из last_config.config
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
 def _decode_base64url(payload: str) -> Optional[bytes]:
+    """Декодирует base64url (формат Amnezia API)"""
     try:
         b64 = payload.replace("-", "+").replace("_", "/")
         padding_needed = len(b64) % 4
@@ -71,47 +70,40 @@ def _decode_base64url(payload: str) -> Optional[bytes]:
         return None
 
 
-def _try_standard_base64(payload: str) -> Optional[bytes]:
-    try:
-        padding = 4 - len(payload) % 4
-        if padding != 4:
-            payload += "=" * padding
-        return base64.b64decode(payload, validate=False)
-    except Exception:
-        return None
-
-
 def _decompress_amnezia_format(data: bytes) -> Optional[str]:
-    """4-byte big-endian length + zlib compressed JSON"""
+    """
+    Формат Amnezia: 4-byte big-endian length + zlib compressed JSON.
+    """
     if len(data) < 4:
         return None
 
     try:
         original_length = struct.unpack(">I", data[:4])[0]
     except struct.error:
+        logger.warning("_decompress_amnezia_format: bad header")
         return None
 
     compressed = data[4:]
 
     try:
         decompressed = zlib.decompress(compressed)
+
+        if len(decompressed) != original_length:
+            logger.warning(
+                f"Length mismatch: header says {original_length}, "
+                f"got {len(decompressed)}"
+            )
+
         return decompressed.decode("utf-8")
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_decompress_amnezia_format zlib failed: {e}")
         return None
 
 
-def _decompress_plain_zlib(data: bytes) -> Optional[str]:
-    try:
-        decompressed = zlib.decompress(data)
-        text = decompressed.decode("utf-8")
-        if text.strip().startswith("{"):
-            return text
-    except Exception:
-        pass
-    return None
-
-
-def _parse_vpn_json(uri: str) -> Optional[dict]:
+def decode_vpn_uri_to_json(uri: str) -> Optional[dict]:
+    """
+    🔥 ГЛАВНАЯ ФУНКЦИЯ: декодирует vpn:// URI и возвращает ВЕСЬ JSON как dict.
+    """
     if not uri or not isinstance(uri, str):
         return None
 
@@ -121,37 +113,65 @@ def _parse_vpn_json(uri: str) -> Optional[dict]:
 
     decoded = _decode_base64url(payload)
     if decoded is None:
-        decoded = _try_standard_base64(payload)
-
-    if decoded is None:
-        logger.error("_parse_vpn_json: base64 decode failed")
+        logger.error("decode_vpn_uri_to_json: base64url decode failed")
         return None
 
     json_str = _decompress_amnezia_format(decoded)
-    if json_str:
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
-
-    json_str = _decompress_plain_zlib(decoded)
-    if json_str:
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
+    if json_str is None:
+        logger.error("decode_vpn_uri_to_json: zlib decompress failed")
+        return None
 
     try:
-        text = decoded.decode("utf-8")
-        if text.strip().startswith("{"):
-            return json.loads(text)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        pass
+        data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        logger.error(f"decode_vpn_uri_to_json: JSON parse error: {e}")
+        return None
 
-    logger.error("_parse_vpn_json: no decoding method worked")
-    return None
+    if not isinstance(data, dict):
+        logger.error("decode_vpn_uri_to_json: JSON is not a dict")
+        return None
+
+    return data
 
 
+def build_conf_content(uri: str) -> Optional[str]:
+    """
+    🔥 Создаёт содержимое .conf файла из vpn:// URI.
+    Возвращает ВЕСЬ JSON как строку с красивым форматированием (indent=2).
+    Это ТОЧНЫЙ формат, который использует Amnezia-клиент.
+    """
+    data = decode_vpn_uri_to_json(uri)
+    if data is None:
+        return None
+
+    # Сериализуем весь JSON с отступами для читаемости
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
+def is_valid_vpn_uri(uri: str) -> bool:
+    """Проверяет, что vpn:// URI валидный и содержит нужные поля"""
+    data = decode_vpn_uri_to_json(uri)
+    if not data or not isinstance(data, dict):
+        return False
+
+    # Должен быть хотя бы один контейнер с awg секцией
+    containers = data.get("containers")
+    if not containers or not isinstance(containers, list):
+        return False
+
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in ("awg", "amneziawg2", "amneziawg", "awg2"):
+            if key in container and isinstance(container[key], dict):
+                return True
+
+    return False
+
+
+# ============================================================
+# СТАРЫЕ ФУНКЦИИ — для обратной совместимости
+# ============================================================
 def _parse_h_value(value: Any) -> Union[int, str]:
     if value is None:
         return 0
@@ -186,33 +206,19 @@ def _extract_awg_section(container: dict) -> Optional[dict]:
     return None
 
 
-def _parse_last_config(last_config: Any) -> Optional[dict]:
-    if not last_config:
-        return None
-    if isinstance(last_config, str):
-        try:
-            return json.loads(last_config)
-        except json.JSONDecodeError:
-            return None
-    if isinstance(last_config, dict):
-        return last_config
-    return None
-
-
 def parse_vpn_uri(uri: str) -> Optional[AmneziaWGConfig]:
-    data = _parse_vpn_json(uri)
+    """
+    Старая функция для обратной совместимости.
+    Возвращает AmneziaWGConfig.
+    """
+    data = decode_vpn_uri_to_json(uri)
     if data is None:
-        logger.error("parse_vpn_uri: JSON parse failed")
-        return None
-    if not isinstance(data, dict):
-        logger.error("parse_vpn_uri: JSON is not a dict")
         return None
     return _build_config_object(data, original_uri=uri)
 
 
 def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGConfig]:
     cfg = AmneziaWGConfig(raw_config=original_uri)
-
     cfg.description = data.get("description", "") or ""
     cfg.host_name = (
         data.get("hostName") or
@@ -220,7 +226,6 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
         data.get("host_name") or
         ""
     )
-
     dns1 = data.get("dns1") or "1.1.1.1"
     dns2 = data.get("dns2") or "1.0.0.1"
     cfg.dns = f"{dns1}, {dns2}"
@@ -245,14 +250,19 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
     cfg.protocol_version = str(awg_section.get("protocol_version", "2"))
     cfg.protocol = "amneziawg2" if cfg.protocol_version == "2" else "amneziawg"
 
-    # КЛЮЧЕВАЯ ЧАСТЬ: last_config
-    last_config = _parse_last_config(awg_section.get("last_config"))
+    # Пытаемся извлечь готовые данные из last_config
+    last_config_raw = awg_section.get("last_config")
+    last_config = None
+    if last_config_raw:
+        if isinstance(last_config_raw, str):
+            try:
+                last_config = json.loads(last_config_raw)
+            except json.JSONDecodeError:
+                pass
+        elif isinstance(last_config_raw, dict):
+            last_config = last_config_raw
 
     if last_config and isinstance(last_config, dict):
-        raw_wg = last_config.get("config") or ""
-        if raw_wg:
-            cfg.raw_wg_config = raw_wg
-
         if not cfg.address:
             client_ip = last_config.get("client_ip")
             if client_ip:
@@ -268,7 +278,6 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
             port = last_config.get("port")
             if hostname and port:
                 cfg.peer_endpoint = f"{hostname}:{port}"
-
         if cfg.mtu is None:
             mtu_raw = last_config.get("mtu")
             if mtu_raw:
@@ -276,11 +285,11 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
                     cfg.mtu = int(mtu_raw)
                 except (ValueError, TypeError):
                     pass
-
         allowed_ips_list = last_config.get("allowed_ips")
         if isinstance(allowed_ips_list, list) and allowed_ips_list:
             cfg.peer_allowed_ips = ", ".join(allowed_ips_list)
 
+    # Заполняем обфускационные параметры
     for field_name in ("H1", "H2", "H3", "H4"):
         if not getattr(cfg, field_name):
             setattr(cfg, field_name, _parse_h_value(awg_section.get(field_name)))
@@ -289,7 +298,6 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
     cfg.S2 = cfg.S2 or _parse_int_value(awg_section.get("S2"))
     cfg.S3 = cfg.S3 or _parse_int_value(awg_section.get("S3"))
     cfg.S4 = cfg.S4 or _parse_int_value(awg_section.get("S4"))
-
     cfg.J1 = cfg.J1 or _parse_int_value(awg_section.get("J1"))
     cfg.J2 = cfg.J2 or _parse_int_value(awg_section.get("J2"))
     cfg.J3 = cfg.J3 or _parse_int_value(awg_section.get("J3"))
@@ -303,28 +311,16 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
             if value is not None:
                 setattr(cfg, field_name, str(value))
 
-    if cfg.mtu is None:
-        mtu_raw = awg_section.get("mtu")
-        if mtu_raw:
-            try:
-                cfg.mtu = int(mtu_raw)
-            except (ValueError, TypeError):
-                pass
-
     return cfg
 
 
 def is_valid_amneziawg_config(config: Optional[AmneziaWGConfig]) -> bool:
+    """Смягчённая валидация: если есть базовые ключи WG — валидно."""
     if config is None:
         return False
-
-    if config.raw_wg_config and config.raw_wg_config.strip():
-        return True
-
     required = [
         config.private_key,
         config.peer_public_key,
         config.peer_endpoint,
     ]
-
     return all(required)
