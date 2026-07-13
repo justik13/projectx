@@ -20,18 +20,16 @@ from database.repositories.profiles_repo import get_user_profiles
 from services.payment_service import PaymentService
 from utils.formatters import format_datetime, format_days_left
 from utils.telegram import render_hub, send_hub_invoice, clear_hub_cache
-from utils.tariff_names import get_tariff_display_name  # 🔥 УНИФИЦИРОВАНО
+from utils.tariff_names import get_tariff_display_name
 
 router = Router()
 logger = logging.getLogger(__name__)
-
 
 async def _is_subscription_active(user: User) -> bool:
     if not user or not user.subscription_end:
         return False
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     return user.subscription_end > now
-
 
 @router.callback_query(F.data.in_(["menu_buy", "menu_subscription"]))
 async def hub_menu_payment(
@@ -48,7 +46,6 @@ async def hub_menu_payment(
     else:
         await _show_showcase(callback, session)
 
-
 async def _show_showcase(callback: CallbackQuery, session: AsyncSession):
     tariffs = await get_active_tariffs(session)
     if not tariffs:
@@ -63,7 +60,6 @@ async def _show_showcase(callback: CallbackQuery, session: AsyncSession):
     kb = get_tariff_showcase_keyboard(grouped)
     await render_hub(callback.bot, callback.message.chat.id, texts.PAYMENT_SHOWCASE_HEADER, kb)
 
-
 async def _show_hub(callback: CallbackQuery, user: User, session: AsyncSession):
     profiles = await get_user_profiles(session, user.id)
     tariff_name = get_tariff_display_name(user.device_limit)
@@ -77,16 +73,15 @@ async def _show_hub(callback: CallbackQuery, user: User, session: AsyncSession):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Продлить доступ", callback_data="payment_quick_renew")
     builder.button(text="⚙️ Сменить тариф", callback_data="payment_change_tariff")
+    builder.button(text="👤 Профиль", callback_data="menu_profile")  # 🔥 Добавлена кнопка профиля
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
-    builder.adjust(1, 1, 1)
+    builder.adjust(1, 1, 1, 1)
     await render_hub(callback.bot, callback.message.chat.id, text, builder.as_markup())
-
 
 @router.callback_query(F.data == "payment_showcase")
 async def show_tariff_showcase_callback(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
     await _show_showcase(callback, session)
-
 
 @router.callback_query(F.data.startswith("select_tariff_type:"))
 async def select_tariff_type(callback: CallbackQuery, session: AsyncSession):
@@ -101,7 +96,6 @@ async def select_tariff_type(callback: CallbackQuery, session: AsyncSession):
     text = desc + texts.PAYMENT_DURATION_HEADER
     kb = get_tariff_duration_keyboard(type_tariffs)
     await render_hub(callback.bot, callback.message.chat.id, text, kb)
-
 
 @router.callback_query(F.data.in_(["payment_quick_renew", "payment_renew"]))
 async def show_quick_renew(callback: CallbackQuery, db_user: User, session: AsyncSession):
@@ -120,7 +114,6 @@ async def show_quick_renew(callback: CallbackQuery, db_user: User, session: Asyn
     kb = get_renew_keyboard(renew_tariffs)
     await render_hub(callback.bot, callback.message.chat.id, text, kb)
 
-
 @router.callback_query(F.data == "payment_change_tariff")
 async def show_change_tariff(callback: CallbackQuery, db_user: User, session: AsyncSession):
     await callback.answer()
@@ -137,7 +130,6 @@ async def show_change_tariff(callback: CallbackQuery, db_user: User, session: As
     )
     kb = get_change_tariff_keyboard(tariffs, current_limit, is_subscription_active=is_active)
     await render_hub(callback.bot, callback.message.chat.id, text, kb)
-
 
 @router.callback_query(F.data.startswith("select_tariff:"))
 async def select_tariff(
@@ -178,7 +170,6 @@ async def select_tariff(
         parse_mode="HTML",
     )
     await callback.answer()
-
 
 @router.callback_query(F.data.startswith("pay_stars:"))
 async def pay_stars(
@@ -226,11 +217,9 @@ async def pay_stars(
         await session.commit()
         return
 
-
 @router.pre_checkout_query()
 async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
-
 
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, state: FSMContext, session: AsyncSession = None):
@@ -267,10 +256,10 @@ async def process_successful_payment(message: Message, state: FSMContext, sessio
             texts.PAYMENT_SUCCESS_RENEW.format(tariff_name=tariff_name, valid_until=valid_until)
             if profiles else texts.PAYMENT_SUCCESS_NEW.format(tariff_name=tariff_name, valid_until=valid_until)
         )
+        # 🔥 ИСПРАВЛЕНО: Используем клавиатуру с кнопкой "К подписке"
         await render_hub(message.bot, message.chat.id, text, get_payment_success_keyboard())
     else:
         await render_hub(message.bot, message.chat.id, texts.PAYMENT_DELAYED, get_back_button("menu_subscription"))
-
 
 @router.callback_query(F.data.startswith("cancel_invoice:"))
 async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
@@ -317,7 +306,6 @@ async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: As
     else:
         await _show_showcase(callback, session)
 
-
 @router.callback_query(F.data.startswith("pay_sbp:"))
 async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     await callback.answer()
@@ -328,7 +316,6 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSess
     builder.button(text="← Назад", callback_data=f"select_tariff:{tariff_id}")
     builder.adjust(1)
     await render_hub(callback.bot, callback.message.chat.id, texts.PAYMENT_SBP_TEXT.format(price_rub=tariff.price_rub), builder.as_markup())
-
 
 @router.callback_query(F.data.startswith("confirm_payment_sbp:"))
 async def confirm_payment_sbp(
@@ -355,10 +342,10 @@ async def confirm_payment_sbp(
             texts.PAYMENT_SUCCESS_RENEW.format(tariff_name=tariff_name, valid_until=valid_until)
             if profiles else texts.PAYMENT_SUCCESS_NEW.format(tariff_name=tariff_name, valid_until=valid_until)
         )
+        # 🔥 ИСПРАВЛЕНО: Используем клавиатуру с кнопкой "К подписке"
         await render_hub(callback.bot, callback.message.chat.id, text, get_payment_success_keyboard())
     else:
         await render_hub(callback.bot, callback.message.chat.id, texts.PAYMENT_DELAYED, get_back_button("menu_subscription"))
-
 
 @router.callback_query(F.data == "back_to_payment")
 async def back_to_payment(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):

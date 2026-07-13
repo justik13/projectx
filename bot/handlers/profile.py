@@ -10,18 +10,22 @@ from config.settings import get_settings
 from database.models import User
 from database.repositories.payments_repo import get_user_payments
 from database.repositories.profiles_repo import get_user_profiles
-from database.repositories.users_repo import get_user_referrals
+from database.repositories.users_repo import get_user_referrals, get_user_with_referrals  # 🔥 ИМПОРТ
 from database.repositories.tariffs_repo import get_tariff_by_id
 from services.subscription import SubscriptionService
 from utils.formatters import format_datetime, format_days_left, format_traffic
 from utils.telegram import safe
-from utils.tariff_names import get_tariff_display_name  # 🔥 УНИФИЦИРОВАНО
+from utils.tariff_names import get_tariff_display_name
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-
-async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
+async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool, back_to: str = "back_to_main_menu"):
+    """
+    Рендерит экран профиля.
+    
+    🔥 ИСПРАВЛЕНО: Добавлен параметр back_to для контекстной кнопки "Назад".
+    """
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
     total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
@@ -47,7 +51,8 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
             referrals_count=referrals_count,
             referral_days=user.referral_days,
         )
-        kb = get_profile_keyboard(is_active=True)
+        # 🔥 ИСПРАВЛЕНО: Передаем back_to для контекстной кнопки
+        kb = get_profile_keyboard(is_active=True, back_to=back_to)
     else:
         rendered = texts.PROFILE_TEXT_INACTIVE.format(
             name=safe(user.first_name or "Пользователь"),
@@ -60,7 +65,13 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         builder.button(text="🚀 Купить доступ", callback_data="menu_buy")
         builder.button(text="🎁 Пригласить друга", callback_data="referral")
         builder.button(text="🧾 История оплат", callback_data="user_history")
-        builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
+        
+        # 🔥 Контекстная кнопка назад
+        if back_to == "menu_subscription":
+            builder.button(text="← К подписке", callback_data="menu_subscription")
+        else:
+            builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
+        
         builder.adjust(1, 1, 1, 1)
         kb = builder.as_markup()
 
@@ -72,7 +83,6 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
     else:
         await target.answer(rendered, reply_markup=kb, parse_mode="HTML")
 
-
 @router.callback_query(F.data == "menu_profile")
 async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
@@ -80,8 +90,7 @@ async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: 
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-    await _render_profile(callback.message, db_user, session, edit=True)
-
+    await _render_profile(callback.message, db_user, session, edit=True, back_to="back_to_main_menu")
 
 @router.callback_query(F.data == "back_to_profile")
 async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
@@ -90,8 +99,7 @@ async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: U
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-    await _render_profile(callback.message, db_user, session, edit=True)
-
+    await _render_profile(callback.message, db_user, session, edit=True, back_to="back_to_main_menu")
 
 @router.callback_query(F.data == "user_history")
 async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
@@ -121,7 +129,6 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
     await callback.message.edit_text(rendered, reply_markup=get_history_keyboard(), parse_mode="HTML")
 
-
 @router.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
@@ -129,9 +136,17 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
+    
+    # 🔥 ИСПРАВЛЕНО: Используем get_user_with_referrals для eager loading
+    user_with_refs = await get_user_with_referrals(session, db_user.telegram_id)
+    
     bot_info = await callback.bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{db_user.telegram_id}"
-    invited_count = len(await get_user_referrals(session, db_user.telegram_id))
+    
+    # Используем кешированные рефералы, если есть
+    referrals = getattr(user_with_refs, '_referrals_cache', []) if user_with_refs else []
+    invited_count = len(referrals)
+    
     await callback.message.edit_text(
         texts.REFERRAL_TEXT.format(
             bonus_days=get_settings().REFERRAL_BONUS_DAYS,
@@ -142,7 +157,6 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
         reply_markup=get_referral_keyboard(referral_link), parse_mode="HTML",
     )
 
-
 @router.callback_query(F.data == "referrals_list")
 async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
@@ -150,7 +164,11 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-    referrals = await get_user_referrals(session, db_user.telegram_id)
+    
+    # 🔥 ИСПРАВЛЕНО: Используем get_user_with_referrals для eager loading
+    user_with_refs = await get_user_with_referrals(session, db_user.telegram_id)
+    referrals = getattr(user_with_refs, '_referrals_cache', []) if user_with_refs else []
+    
     bonus_days = get_settings().REFERRAL_BONUS_DAYS
     if not referrals:
         rendered = texts.REFERRAL_LIST_EMPTY

@@ -1,7 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from utils.tariff_names import get_tariff_group_name  # 🔥 УНИФИЦИРОВАНО
-
+from utils.tariff_names import get_tariff_group_name
 
 def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -11,7 +10,6 @@ def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showcase") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -30,7 +28,6 @@ def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showc
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     tariffs_sorted = sorted(tariffs, key=lambda t: t.duration_days)
@@ -44,7 +41,6 @@ def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder.button(text="← Назад", callback_data="menu_subscription")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_change_tariff_keyboard(
     tariffs: list, current_limit: int, *, is_subscription_active: bool = False,
@@ -71,7 +67,6 @@ def get_change_tariff_keyboard(
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_payment_method_keyboard(tariff_id: int, device_limit: int | None = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⭐ Telegram Stars", callback_data=f"pay_stars:{tariff_id}")
@@ -83,10 +78,13 @@ def get_payment_method_keyboard(tariff_id: int, device_limit: int | None = None)
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_payment_success_keyboard() -> InlineKeyboardMarkup:
+    """
+    🔥 ИСПРАВЛЕНО: Добавлена кнопка "← К подписке" для возврата в меню подписки.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text="🔌 Подключить устройство", callback_data="menu_connections")
+    builder.button(text="⏳ К подписке", callback_data="menu_subscription")  # 🔥 НОВАЯ КНОПКА
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
-    builder.adjust(1)
+    builder.adjust(1, 1, 1)
     return builder.as_markup()
