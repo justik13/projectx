@@ -1,0 +1,17 @@
+[run]
+source = .
+omit = 
+    */tests/*
+    */venv/*
+    */__pycache__/*
+    */migrations/*
+    deploy.sh
+    uninstall.sh
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+show_missing = True
+precision = 2
