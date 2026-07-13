@@ -54,3 +54,11 @@ logs/
 # Temporary
 tmp/
 temp/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo

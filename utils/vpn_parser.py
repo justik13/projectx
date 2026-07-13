@@ -59,7 +59,7 @@ def _decode_base64url(payload: str) -> Optional[bytes]:
         padding_needed = len(b64) % 4
         if padding_needed:
             b64 += "=" * (4 - padding_needed)
-        return base64.b64decode(b64)
+        return base64.b64decode(b64, validate=True)  # 🔥 Strict validation
     except Exception as e:
         logger.warning(f"_decode_base64url failed: {e}")
         return None
