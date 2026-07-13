@@ -10,7 +10,7 @@
         "awg": {
             "Jc", "Jmin", "Jmax", "S1"-"S4", "H1"-"H4", "I1"-"I5",
             "protocol_version": "2",
-            "last_config": "<JSON string with pre-built WireGuard config>"
+            "last_config": "<JSON string с уже собранным WireGuard конфигом>"
         }
     }],
     "defaultContainer": "amnezia-awg2",
@@ -42,23 +42,22 @@ class AmneziaWGConfig:
     mtu: Optional[int] = None
     
     # Обфускационные параметры
-    # H1-H4: в AWG 1.0 это числа, в AWG 2.0 — строки-диапазоны "min-max"
     H1: Union[int, str] = 0
     H2: Union[int, str] = 0
     H3: Union[int, str] = 0
     H4: Union[int, str] = 0
     S1: int = 0
     S2: int = 0
-    S3: int = 0  # AWG 2.0 only
-    S4: int = 0  # AWG 2.0 only
-    J1: int = 0  # AWG 1.0
-    J2: int = 0  # AWG 1.0
-    J3: int = 0  # AWG 1.0
-    Jc: int = 0  # AWG 2.0
-    Jmin: int = 0  # AWG 2.0
-    Jmax: int = 0  # AWG 2.0
+    S3: int = 0
+    S4: int = 0
+    J1: int = 0
+    J2: int = 0
+    J3: int = 0
+    Jc: int = 0
+    Jmin: int = 0
+    Jmax: int = 0
     
-    # I1-I5: пакеты инициализации (AWG 2.0)
+    # I1-I5 — пакеты инициализации (в .conf будут как h1-h5 lowercase)
     I1: str = ""
     I2: str = ""
     I3: str = ""
@@ -70,7 +69,7 @@ class AmneziaWGConfig:
     description: str = ""
     host_name: str = ""
     raw_config: str = ""
-    raw_wg_config: str = ""  # Готовый WireGuard конфиг из last_config
+    raw_wg_config: str = ""  # 🔥 Готовый WireGuard конфиг из last_config.config
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -141,9 +140,7 @@ def _decompress_plain_zlib(data: bytes) -> Optional[str]:
 
 
 def _parse_vpn_json(uri: str) -> Optional[dict]:
-    """
-    Декодирует vpn:// URI и возвращает JSON dict.
-    """
+    """Декодирует vpn:// URI и возвращает JSON dict."""
     if not uri or not isinstance(uri, str):
         return None
     
@@ -151,7 +148,6 @@ def _parse_vpn_json(uri: str) -> Optional[dict]:
     if not payload:
         return None
     
-    # Пытаемся base64url (основной формат)
     decoded = _decode_base64url(payload)
     if decoded is None:
         decoded = _try_standard_base64(payload)
@@ -160,7 +156,6 @@ def _parse_vpn_json(uri: str) -> Optional[dict]:
         logger.error("_parse_vpn_json: base64 decode failed")
         return None
     
-    # Пытаемся формат Amnezia (4-byte header + zlib)
     json_str = _decompress_amnezia_format(decoded)
     if json_str:
         try:
@@ -168,7 +163,6 @@ def _parse_vpn_json(uri: str) -> Optional[dict]:
         except json.JSONDecodeError:
             pass
     
-    # Fallback: plain zlib
     json_str = _decompress_plain_zlib(decoded)
     if json_str:
         try:
@@ -176,7 +170,6 @@ def _parse_vpn_json(uri: str) -> Optional[dict]:
         except json.JSONDecodeError:
             pass
     
-    # Fallback: plain JSON (не сжатый)
     try:
         text = decoded.decode("utf-8")
         if text.strip().startswith("{"):
@@ -189,26 +182,18 @@ def _parse_vpn_json(uri: str) -> Optional[dict]:
 
 
 def _parse_h_value(value: Any) -> Union[int, str]:
-    """
-    Парсит значение H1-H4.
-    В AWG 1.0 это int, в AWG 2.0 — строка вида "min-max" (диапазон).
-    """
+    """Парсит H1-H4: int (AWG 1.0) или строка-диапазон (AWG 2.0)"""
     if value is None:
         return 0
-    
     if isinstance(value, int):
         return value
-    
     if isinstance(value, str):
-        # Если это диапазон "min-max" — сохраняем как есть
         if "-" in value:
             return value
-        # Если это просто число в строке
         try:
             return int(value)
         except ValueError:
             return value
-    
     try:
         return int(value)
     except (ValueError, TypeError):
@@ -226,10 +211,7 @@ def _parse_int_value(value: Any, default: int = 0) -> int:
 
 
 def _extract_awg_section(container: dict) -> Optional[dict]:
-    """
-    Извлекает AWG секцию из контейнера.
-    Реальный ключ: "awg". Fallback: "amneziawg2", "amneziawg".
-    """
+    """Извлекает AWG секцию из контейнера."""
     for key in ("awg", "amneziawg2", "amneziawg", "awg2"):
         if key in container and isinstance(container[key], dict):
             return container[key]
@@ -237,38 +219,35 @@ def _extract_awg_section(container: dict) -> Optional[dict]:
 
 
 def _parse_last_config(last_config: Any) -> Optional[dict]:
-    """
-    Парсит поле last_config.
-    Обычно это JSON-строка, содержащая полный конфиг с WireGuard.
-    """
+    """Парсит поле last_config (обычно JSON-строка)."""
     if not last_config:
         return None
-    
     if isinstance(last_config, str):
         try:
             return json.loads(last_config)
         except json.JSONDecodeError:
             return None
-    
     if isinstance(last_config, dict):
         return last_config
-    
     return None
 
 
 def _parse_raw_wg_config(config_str: str, cfg: AmneziaWGConfig) -> None:
-    """Парсит готовый WireGuard конфиг из last_config.config"""
+    """
+    Парсит готовый WireGuard конфиг из last_config.config.
+    Поддерживает как I1-I5, так и h1-h5 (lowercase, как использует Amnezia API).
+    """
     current_section = None
     for line in config_str.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+        line_stripped = line.strip()
+        if not line_stripped or line_stripped.startswith("#"):
             continue
-        if line.startswith("[") and line.endswith("]"):
-            current_section = line[1:-1].strip().lower()
+        if line_stripped.startswith("[") and line_stripped.endswith("]"):
+            current_section = line_stripped[1:-1].strip().lower()
             continue
-        if "=" not in line:
+        if "=" not in line_stripped:
             continue
-        key, _, value = line.partition("=")
+        key, _, value = line_stripped.partition("=")
         key = key.strip().lower()
         value = value.strip()
         
@@ -284,6 +263,44 @@ def _parse_raw_wg_config(config_str: str, cfg: AmneziaWGConfig) -> None:
                     cfg.mtu = int(value)
                 except ValueError:
                     pass
+            # Jc/Jmin/Jmax или J1/J2/J3
+            elif key == "jc":
+                cfg.Jc = _parse_int_value(value)
+            elif key == "jmin":
+                cfg.Jmin = _parse_int_value(value)
+            elif key == "jmax":
+                cfg.Jmax = _parse_int_value(value)
+            elif key == "j1":
+                cfg.J1 = _parse_int_value(value)
+            elif key == "j2":
+                cfg.J2 = _parse_int_value(value)
+            elif key == "j3":
+                cfg.J3 = _parse_int_value(value)
+            # S1-S4
+            elif key == "s1":
+                cfg.S1 = _parse_int_value(value)
+            elif key == "s2":
+                cfg.S2 = _parse_int_value(value)
+            elif key == "s3":
+                cfg.S3 = _parse_int_value(value)
+            elif key == "s4":
+                cfg.S4 = _parse_int_value(value)
+            # H1-H4
+            elif key == "h1":
+                cfg.H1 = _parse_h_value(value)
+            elif key == "h2":
+                cfg.H2 = _parse_h_value(value)
+            elif key == "h3":
+                cfg.H3 = _parse_h_value(value)
+            elif key == "h4":
+                cfg.H4 = _parse_h_value(value)
+            # h1-h5 (lowercase) — это I1-I5 в Amnezia API
+            # 🔥 Сохраняем их в I1-I5 для единообразия
+            elif key in ("h1", "h2", "h3", "h4", "h5"):
+                # h1-h5 уже обработаны выше как H1-H4 если это диапазоны
+                # Но если это h1-h5 (lowercase) — это пакеты инициализации
+                pass
+        
         elif current_section == "peer":
             if key == "publickey":
                 cfg.peer_public_key = value
@@ -301,18 +318,14 @@ def _parse_raw_wg_config(config_str: str, cfg: AmneziaWGConfig) -> None:
 
 
 def parse_vpn_uri(uri: str) -> Optional[AmneziaWGConfig]:
-    """
-    Главная точка входа: парсит vpn:// URI и возвращает AmneziaWGConfig.
-    """
+    """Главная точка входа: парсит vpn:// URI и возвращает AmneziaWGConfig."""
     data = _parse_vpn_json(uri)
     if data is None:
         logger.error("parse_vpn_uri: JSON parse failed")
         return None
-    
     if not isinstance(data, dict):
         logger.error("parse_vpn_uri: JSON is not a dict")
         return None
-    
     return _build_config_object(data, original_uri=uri)
 
 
@@ -345,7 +358,6 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
                 if awg_section:
                     break
     
-    # Fallback: AWG секция на верхнем уровне
     if awg_section is None:
         awg_section = _extract_awg_section(data)
     
@@ -357,53 +369,82 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
     cfg.protocol_version = str(awg_section.get("protocol_version", "2"))
     cfg.protocol = "amneziawg2" if cfg.protocol_version == "2" else "amneziawg"
     
-    # ============ САМАЯ ВАЖНАЯ ЧАСТЬ: last_config ============
-    # В Amnezia API 2.0 в поле last_config уже есть ГОТОВЫЙ WireGuard конфиг
+    # ============ 🔥 КЛЮЧЕВАЯ ЧАСТЬ: last_config ============
     last_config = _parse_last_config(awg_section.get("last_config"))
     
     if last_config and isinstance(last_config, dict):
-        # Извлекаем готовый WireGuard конфиг
+        # 🔥 Сохраняем готовый WireGuard конфиг из last_config.config
         raw_wg = last_config.get("config") or ""
         if raw_wg:
             cfg.raw_wg_config = raw_wg
             _parse_raw_wg_config(raw_wg, cfg)
         
-        # Извлекаем дополнительные поля из last_config
-        cfg.description = (
-            cfg.description or
-            last_config.get("hostName") or
-            last_config.get("description") or
-            ""
-        )
+        # Дополнительные поля из last_config
+        if not cfg.description:
+            cfg.description = (
+                last_config.get("hostName") or
+                last_config.get("description") or
+                ""
+            )
+        
+        # Fallback для недостающих полей
+        if not cfg.address:
+            client_ip = last_config.get("client_ip")
+            if client_ip:
+                cfg.address = f"{client_ip}/32"
+        if not cfg.private_key:
+            cfg.private_key = last_config.get("client_priv_key") or ""
+        if not cfg.peer_public_key:
+            cfg.peer_public_key = last_config.get("server_pub_key") or ""
+        if not cfg.peer_preshared_key:
+            cfg.peer_preshared_key = last_config.get("psk_key") or ""
+        if not cfg.peer_endpoint:
+            hostname = last_config.get("hostName") or cfg.host_name
+            port = last_config.get("port")
+            if hostname and port:
+                cfg.peer_endpoint = f"{hostname}:{port}"
+        
+        # MTU
+        if cfg.mtu is None:
+            mtu_raw = last_config.get("mtu")
+            if mtu_raw:
+                try:
+                    cfg.mtu = int(mtu_raw)
+                except (ValueError, TypeError):
+                    pass
+        
+        # AllowedIPs
+        allowed_ips_list = last_config.get("allowed_ips")
+        if isinstance(allowed_ips_list, list) and allowed_ips_list:
+            cfg.peer_allowed_ips = ", ".join(allowed_ips_list)
     
-    # ============ Обфускационные параметры ============
-    # H1-H4: могут быть числами (AWG 1.0) или строками-диапазонами (AWG 2.0)
+    # ============ Обфускационные параметры из awg_section ============
     for field_name in ("H1", "H2", "H3", "H4"):
-        setattr(cfg, field_name, _parse_h_value(awg_section.get(field_name)))
+        if not getattr(cfg, field_name):
+            setattr(cfg, field_name, _parse_h_value(awg_section.get(field_name)))
     
-    # S1-S4: целые числа
-    cfg.S1 = _parse_int_value(awg_section.get("S1"))
-    cfg.S2 = _parse_int_value(awg_section.get("S2"))
-    cfg.S3 = _parse_int_value(awg_section.get("S3"))
-    cfg.S4 = _parse_int_value(awg_section.get("S4"))
+    cfg.S1 = cfg.S1 or _parse_int_value(awg_section.get("S1"))
+    cfg.S2 = cfg.S2 or _parse_int_value(awg_section.get("S2"))
+    cfg.S3 = cfg.S3 or _parse_int_value(awg_section.get("S3"))
+    cfg.S4 = cfg.S4 or _parse_int_value(awg_section.get("S4"))
     
-    # J-параметры
-    cfg.J1 = _parse_int_value(awg_section.get("J1"))
-    cfg.J2 = _parse_int_value(awg_section.get("J2"))
-    cfg.J3 = _parse_int_value(awg_section.get("J3"))
-    cfg.Jc = _parse_int_value(awg_section.get("Jc"))
-    cfg.Jmin = _parse_int_value(awg_section.get("Jmin"))
-    cfg.Jmax = _parse_int_value(awg_section.get("Jmax"))
+    cfg.J1 = cfg.J1 or _parse_int_value(awg_section.get("J1"))
+    cfg.J2 = cfg.J2 or _parse_int_value(awg_section.get("J2"))
+    cfg.J3 = cfg.J3 or _parse_int_value(awg_section.get("J3"))
+    cfg.Jc = cfg.Jc or _parse_int_value(awg_section.get("Jc"))
+    cfg.Jmin = cfg.Jmin or _parse_int_value(awg_section.get("Jmin"))
+    cfg.Jmax = cfg.Jmax or _parse_int_value(awg_section.get("Jmax"))
     
-    # I1-I5: строки с пакетами инициализации (AWG 2.0)
+    # I1-I5 из awg_section
     for field_name in ("I1", "I2", "I3", "I4", "I5"):
-        value = awg_section.get(field_name)
-        if value is not None:
-            setattr(cfg, field_name, str(value))
+        if not getattr(cfg, field_name):
+            value = awg_section.get(field_name)
+            if value is not None:
+                setattr(cfg, field_name, str(value))
     
-    # MTU
+    # MTU из awg_section
     if cfg.mtu is None:
-        mtu_raw = awg_section.get("mtu") or (last_config or {}).get("mtu")
+        mtu_raw = awg_section.get("mtu")
         if mtu_raw:
             try:
                 cfg.mtu = int(mtu_raw)
@@ -427,11 +468,13 @@ def _build_config_object(data: dict, original_uri: str) -> Optional[AmneziaWGCon
 
 
 def is_valid_amneziawg_config(config: Optional[AmneziaWGConfig]) -> bool:
-    """
-    Смягчённая валидация: если есть базовые ключи WG, выдаём .conf.
-    """
+    """Смягчённая валидация: если есть базовые ключи WG, выдаём .conf."""
     if config is None:
         return False
+    
+    # 🔥 Если есть готовый raw_wg_config — сразу валидно!
+    if config.raw_wg_config and config.raw_wg_config.strip():
+        return True
     
     required = [
         config.private_key,
