@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from aiogram import Router, F
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.keyboards import (
@@ -73,7 +73,7 @@ async def _show_hub(callback: CallbackQuery, user: User, session: AsyncSession):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Продлить доступ", callback_data="payment_quick_renew")
     builder.button(text="⚙️ Сменить тариф", callback_data="payment_change_tariff")
-    builder.button(text="👤 Профиль", callback_data="menu_profile")  # 🔥 Добавлена кнопка профиля
+    builder.button(text="👤 Профиль", callback_data="menu_profile")
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1, 1, 1, 1)
     await render_hub(callback.bot, callback.message.chat.id, text, builder.as_markup())
@@ -186,9 +186,12 @@ async def pay_stars(
         tariff_id=tariff.id, amount=tariff.price_stars, currency="stars",
     )
     try:
-        cancel_builder = InlineKeyboardBuilder()
-        cancel_builder.button(text="❌ Отменить оплату", callback_data=f"cancel_invoice:{payment.id}:{tariff.id}")
-        cancel_builder.adjust(1)
+        # 🔥 ИСПРАВЛЕНО: Добавлена обязательная кнопка pay=True
+        invoice_builder = InlineKeyboardBuilder()
+        invoice_builder.row(
+            InlineKeyboardButton(text="💳 Оплатить", pay=True),
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_invoice:{payment.id}:{tariff.id}")
+        )
 
         invoice_msg_id = await send_hub_invoice(
             callback.bot, callback.message.chat.id,
@@ -199,7 +202,7 @@ async def pay_stars(
             payload=f"stars_payment:{payment.id}",
             currency="XTR",
             start_parameter="network-access-stars",
-            reply_markup=cancel_builder.as_markup()
+            reply_markup=invoice_builder.as_markup()
         )
         await state.update_data(
             tariff_id=tariff.id,
@@ -256,7 +259,6 @@ async def process_successful_payment(message: Message, state: FSMContext, sessio
             texts.PAYMENT_SUCCESS_RENEW.format(tariff_name=tariff_name, valid_until=valid_until)
             if profiles else texts.PAYMENT_SUCCESS_NEW.format(tariff_name=tariff_name, valid_until=valid_until)
         )
-        # 🔥 ИСПРАВЛЕНО: Используем клавиатуру с кнопкой "К подписке"
         await render_hub(message.bot, message.chat.id, text, get_payment_success_keyboard())
     else:
         await render_hub(message.bot, message.chat.id, texts.PAYMENT_DELAYED, get_back_button("menu_subscription"))
@@ -342,7 +344,6 @@ async def confirm_payment_sbp(
             texts.PAYMENT_SUCCESS_RENEW.format(tariff_name=tariff_name, valid_until=valid_until)
             if profiles else texts.PAYMENT_SUCCESS_NEW.format(tariff_name=tariff_name, valid_until=valid_until)
         )
-        # 🔥 ИСПРАВЛЕНО: Используем клавиатуру с кнопкой "К подписке"
         await render_hub(callback.bot, callback.message.chat.id, text, get_payment_success_keyboard())
     else:
         await render_hub(callback.bot, callback.message.chat.id, texts.PAYMENT_DELAYED, get_back_button("menu_subscription"))

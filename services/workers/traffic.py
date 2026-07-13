@@ -10,7 +10,6 @@ from bot.constants import TRAFFIC_SYNC_INTERVAL
 
 logger = logging.getLogger("BackgroundWorker")
 
-
 async def traffic_sync_loop():
     while True:
         try:
@@ -27,6 +26,7 @@ async def traffic_sync_loop():
                 )
                 result = await session.execute(stmt)
                 rows = result.all()
+
                 by_server = defaultdict(list)
                 servers_map = {}
                 for row in rows:
@@ -39,11 +39,11 @@ async def traffic_sync_loop():
                     servers_map[s_id] = {'api_url': api_url, 'api_key': api_key, 'name': s_name}
             finally:
                 await session.close()
-            
+
             if not servers_map:
                 await asyncio.sleep(TRAFFIC_SYNC_INTERVAL)
                 continue
-            
+
             async def _fetch_server_traffic(server_id, server_info):
                 client = AmneziaClient(server_info['api_url'], server_info['api_key'])
                 try:
@@ -54,14 +54,15 @@ async def traffic_sync_loop():
                 except Exception as e:
                     logger.error(f"Ошибка трафика с {server_info['name']}: {e}")
                     return server_id, None
-            
+
             tasks = [_fetch_server_traffic(s_id, servers_map[s_id]) for s_id in servers_map]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            
             api_data_by_server = {
                 r[0]: r[1] for r in results
                 if not isinstance(r, Exception) and r is not None and r[1] is not None
             }
-            
+
             updates_data = {}
             for server_id, api_clients in api_data_by_server.items():
                 for p_dict in by_server[server_id]:
@@ -70,46 +71,54 @@ async def traffic_sync_loop():
                         stats = api_data.get("traffics", {})
                         t_down = stats.get("totalDownload", p_dict['traffic_down'])
                         t_up = stats.get("totalUpload", p_dict['traffic_up'])
-                        
-                        # ИСПРАВЛЕНО: Amnezia API возвращает lastHandshake/lastSeen
+
                         last_conn_raw = (
-                            api_data.get("lastHandshake") 
-                            or api_data.get("lastSeen") 
+                            api_data.get("lastHandshake")
+                            or api_data.get("lastSeen")
                             or api_data.get("updatedAt")
                         )
                         last_connected = p_dict['last_connected']
+
                         if last_conn_raw:
                             try:
                                 if isinstance(last_conn_raw, (int, float)):
+                                    ts = int(float(str(last_conn_raw)))
+                                    # Защита от миллисекунд (Amnezia API иногда возвращает > 1e12)
+                                    if ts > 1e12:
+                                        ts = ts // 1000
                                     last_connected = datetime.fromtimestamp(
-                                        int(float(str(last_conn_raw))), tz=timezone.utc
+                                        ts, tz=timezone.utc
                                     ).replace(tzinfo=None)
                                 elif isinstance(last_conn_raw, str):
                                     try:
+                                        ts = int(float(last_conn_raw))
+                                        if ts > 1e12:
+                                            ts = ts // 1000
                                         last_connected = datetime.fromtimestamp(
-                                            int(float(last_conn_raw)), tz=timezone.utc
+                                            ts, tz=timezone.utc
                                         ).replace(tzinfo=None)
                                     except (ValueError, TypeError):
                                         try:
                                             last_connected = datetime.fromisoformat(last_conn_raw).replace(tzinfo=None)
                                         except (ValueError, TypeError):
                                             pass
-                            except (ValueError, TypeError):
+                            except (ValueError, TypeError, OverflowError):
                                 pass
-                        
+
                         api_status = api_data.get("status", "active")
                         api_is_active = (api_status == "active")
                         db_is_active = p_dict['is_active']
-                        
+
                         if (p_dict['traffic_down'] != t_down or
                             p_dict['traffic_up'] != t_up or
                             p_dict['last_connected'] != last_connected or
                             db_is_active != api_is_active):
+                            
                             updates_data[p_dict['id']] = {
                                 'traffic_down': t_down, 'traffic_up': t_up,
                                 'last_connected': last_connected, 'is_active': api_is_active
                             }
-            
+
             if updates_data:
                 session = await get_session()
                 try:
@@ -121,6 +130,8 @@ async def traffic_sync_loop():
                     logger.info(f"Трафик синхронизирован для {len(updates_data)} устройств.")
                 finally:
                     await session.close()
+
         except Exception as e:
             logger.error(f"Ошибка в цикле трафика: {e}", exc_info=True)
+        
         await asyncio.sleep(TRAFFIC_SYNC_INTERVAL)
