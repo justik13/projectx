@@ -1,11 +1,9 @@
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
-from database.repositories.users_repo import get_user_by_telegram_id
+from database.repositories.users_repo import get_user_by_telegram_id, update_user
 from services.subscription import SubscriptionService
 from config.settings import get_settings
-
 logger = logging.getLogger(__name__)
-
 
 class ReferralService:
     @staticmethod
@@ -15,5 +13,9 @@ class ReferralService:
             return
         bonus_days = get_settings().REFERRAL_BONUS_DAYS
         await SubscriptionService.extend_subscription(session, referrer_telegram_id, bonus_days)
-        referrer.referral_days = (referrer.referral_days or 0) + bonus_days
+        new_referral_days = (referrer.referral_days or 0) + bonus_days
+        
+        # 🔥 ИСПРАВЛЕНО: Сохраняем referral_days в БД
+        await update_user(session, referrer, referral_days=new_referral_days)
+        
         logger.info(f"Referral bonus: user {user_telegram_id} first payment, referrer {referrer_telegram_id} got +{bonus_days} days")
