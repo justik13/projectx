@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AmneziaWGConfig:
-    """Распарсенная конфигурация AmneziaWG"""
     protocol: str = "amneziawg2"
     address: str = ""
     private_key: str = ""
@@ -198,6 +197,7 @@ def _parse_wg_config(wg_config: str, config: AmneziaWGConfig) -> None:
                     pass
 
 def is_valid_amneziawg_config(config: Optional[AmneziaWGConfig]) -> bool:
+    """Смягченная валидация: если есть базовые ключи WG, мы ОБЯЗАНЫ выдать .conf файл."""
     if config is None:
         return False
     required = [

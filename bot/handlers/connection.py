@@ -197,10 +197,7 @@ async def download_conf(callback: CallbackQuery, state: FSMContext, session: Asy
     if parsed is None or not is_valid_amneziawg_config(parsed):
         await render_hub(
             callback.bot, callback.message.chat.id,
-            texts.DOWNLOAD_CONF_FALLBACK.format(
-                device_name=safe(profile.device_name),
-                raw_config=safe(profile.raw_config)
-            ),
+            texts.DOWNLOAD_CONF_FALLBACK.format(device_name=safe(profile.device_name)),
             get_back_button(f"manage_device:{profile.id}")
         )
         return
