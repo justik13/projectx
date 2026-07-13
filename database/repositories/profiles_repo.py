@@ -3,6 +3,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from database.models import VPNProfile
 
+# 🔥 БЕЗЫЙ WHITELIST: Только эти поля можно обновлять через update_profile
+ALLOWED_PROFILE_UPDATE_FIELDS = {
+    'device_name', 'last_connected', 'traffic_down', 'traffic_up',
+    'last_ip', 'is_active', 'sync_fail_count'
+}
+
 async def get_user_profiles(session: AsyncSession, user_id: int) -> list[VPNProfile]:
     stmt = select(VPNProfile).where(VPNProfile.user_id == user_id).options(selectinload(VPNProfile.server)).order_by(VPNProfile.created_at.desc())
     result = await session.execute(stmt)
@@ -27,8 +33,12 @@ async def create_profile(session: AsyncSession, user_id: int, server_id: int, de
     return profile
 
 async def update_profile(session: AsyncSession, profile: VPNProfile, **kwargs) -> VPNProfile:
+    """
+    🔥 ИСПРАВЛЕНО: Жесткий Whitelist полей.
+    Игнорирует любые попытки обновить user_id, server_id, peer_id, raw_config и т.д.
+    """
     for key, value in kwargs.items():
-        if hasattr(profile, key):
+        if key in ALLOWED_PROFILE_UPDATE_FIELDS:
             setattr(profile, key, value)
     await session.commit()
     await session.refresh(profile)

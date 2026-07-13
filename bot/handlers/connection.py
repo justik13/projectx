@@ -18,15 +18,18 @@ from services.subscription import SubscriptionService
 from utils.formatters import format_datetime, format_traffic
 from utils.telegram import safe, render_hub, send_hub_document
 from utils.vpn_parser import build_conf_content, is_valid_vpn_uri
+
 router = Router()
 logger = logging.getLogger(__name__)
 DEVICE_NAME_REGEX = re.compile(r"^[a-zA-Z0-9\s_-]+$")
+
 async def _get_effective_device_limit(user: User, session: AsyncSession) -> int:
     if user.current_tariff_id:
         tariff = await get_tariff_by_id(session, user.current_tariff_id)
         if tariff:
             return tariff.device_limit
     return 0
+
 async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardBuilder]:
     """Строит текст и клавиатуру для списка устройств."""
     profiles = await get_user_profiles(session, user.id)
@@ -59,6 +62,7 @@ async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[
         builder.button(text="➕ Добавить устройство", callback_data="add_device")
     builder.adjust(1)
     return rendered, builder
+
 async def _render_connections(target, user: User, session: AsyncSession):
     """Единая точка рендеринга экрана подключений через Single Message Hub."""
     if not user:
@@ -79,6 +83,7 @@ async def _render_connections(target, user: User, session: AsyncSession):
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1)
     await render_hub(target.bot, target.chat.id, rendered, builder.as_markup())
+
 # ============================================================
 # Навигация
 # ============================================================
@@ -93,6 +98,7 @@ async def hub_menu_connections(
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
     await _render_connections(callback.message, db_user, session)
+
 @router.callback_query(F.data == "back_to_connections")
 async def back_to_connections(
     callback: CallbackQuery, state: FSMContext,
@@ -104,18 +110,25 @@ async def back_to_connections(
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
     await _render_connections(callback.message, db_user, session)
+
 # ============================================================
 # Управление устройством
 # ============================================================
 @router.callback_query(F.data.startswith("manage_device:"))
-async def manage_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+async def manage_device(
+    callback: CallbackQuery, state: FSMContext, 
+    session: AsyncSession, db_user: User | None = None
+):
     await callback.answer()
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
-    if not profile:
-        await callback.answer(texts.ERROR_PROFILE_NOT_FOUND, show_alert=True)
+    
+    # 🔥 ИСПРАВЛЕНО: IDOR Check
+    if not profile or not db_user or profile.user_id != db_user.id:
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     server = await get_server_by_id(session, profile.server_id)
     flag = server.country_flag if server else "🌍"
     server_name = server.name if server else "Неизвестно"
@@ -126,6 +139,7 @@ async def manage_device(callback: CallbackQuery, state: FSMContext, session: Asy
         last_connected=(format_datetime(profile.last_connected) if profile.last_connected else "Нет данных"),
     )
     await render_hub(callback.bot, callback.message.chat.id, rendered, get_device_keyboard(profile.id))
+
 @router.callback_query(F.data.startswith("show_config:"))
 async def show_config(
     callback: CallbackQuery, state: FSMContext,
@@ -135,9 +149,12 @@ async def show_config(
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+    
+    # 🔥 ИСПРАВЛЕНО: IDOR Check (уже был, оставлен для ясности)
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     await render_hub(
         callback.bot, callback.message.chat.id,
         texts.DEVICE_SHOW_KEY.format(
@@ -146,39 +163,44 @@ async def show_config(
         ),
         get_back_button(f"manage_device:{profile.id}")
     )
+
 @router.callback_query(F.data.startswith("download_conf:"))
-async def download_conf(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+async def download_conf(
+    callback: CallbackQuery, state: FSMContext, 
+    session: AsyncSession, db_user: User | None = None
+):
     """
-    🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ: .conf файл теперь содержит ВЕСЬ JSON из vpn:// URI
-    с красивым форматированием (indent=2). Это точный формат Amnezia-клиента.
+    Отдача .conf файла.
+    🔥 ИСПРАВЛЕНО: Добавлена проверка IDOR.
     """
     await callback.answer("⏳ Генерирую файл...")
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
-    if not profile:
-        await callback.answer(texts.ERROR_PROFILE_NOT_FOUND, show_alert=True)
+    
+    # 🔥 ИСПРАВЛЕНО: IDOR Check
+    if not profile or not db_user or profile.user_id != db_user.id:
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     safe_device_name = "".join(
         c for c in profile.device_name if c.isalnum() or c in (" ", "_", "-")
     ).strip() or "client"
-    # 🔥 НОВАЯ ЛОГИКА: получаем ВЕСЬ JSON как строку
+    
     conf_content = build_conf_content(profile.raw_config)
     if conf_content is None:
-        # Fallback: если парсинг не удался, предлагаем ручной ключ
         await render_hub(
             callback.bot, callback.message.chat.id,
             texts.DOWNLOAD_CONF_FALLBACK.format(device_name=safe(profile.device_name)),
             get_back_button(f"manage_device:{profile.id}")
         )
         return
-    # 🔥 ВАЖНО: расширение файла — .conf, но содержимое — JSON
-    # Это формат, который использует Amnezia-клиент
+
     input_file = BufferedInputFile(
         conf_content.encode("utf-8"),
         filename=f"{safe_device_name}.conf"
     )
-    # ✅ send_hub_document удалит текстовый хаб и отправит .conf как единственное сообщение
+    
     await send_hub_document(
         callback.bot, callback.message.chat.id,
         document=input_file,
@@ -188,13 +210,24 @@ async def download_conf(callback: CallbackQuery, state: FSMContext, session: Asy
         ),
         reply_markup=get_back_button(f"manage_device:{profile.id}")
     )
+
 # ============================================================
 # Переименование устройства (FSM)
 # ============================================================
 @router.callback_query(F.data.startswith("rename_device:"))
-async def rename_device_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+async def rename_device_start(
+    callback: CallbackQuery, state: FSMContext, 
+    session: AsyncSession, db_user: User | None = None
+):
     await callback.answer()
     profile_id = int(callback.data.split(":")[1])
+    
+    # 🔥 ИСПРАВЛЕНО: IDOR Check
+    profile = await get_profile_by_id(session, profile_id)
+    if not profile or not db_user or profile.user_id != db_user.id:
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
+        return
+
     await state.update_data(profile_id=profile_id)
     await state.set_state(DeviceManagementStates.rename_device)
     await render_hub(
@@ -202,9 +235,9 @@ async def rename_device_start(callback: CallbackQuery, state: FSMContext, sessio
         texts.DEVICE_RENAME_PROMPT,
         get_back_button(f"manage_device:{profile_id}")
     )
+
 @router.message(DeviceManagementStates.rename_device)
 async def rename_device_process(message: Message, state: FSMContext, session: AsyncSession):
-    # CleanChatMiddleware уже удалил сообщение пользователя
     if not message.text or message.text.startswith("/"):
         await state.clear()
         return
@@ -226,23 +259,31 @@ async def rename_device_process(message: Message, state: FSMContext, session: As
             get_device_keyboard(profile.id)
         )
     await state.clear()
+
 # ============================================================
 # Удаление устройства
 # ============================================================
 @router.callback_query(F.data.startswith("request_delete_device:"))
-async def request_delete_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+async def request_delete_device(
+    callback: CallbackQuery, state: FSMContext, 
+    session: AsyncSession, db_user: User | None = None
+):
     await callback.answer()
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
-    if not profile:
-        await callback.answer("❌ Устройство уже удалено", show_alert=True)
+    
+    # 🔥 ИСПРАВЛЕНО: IDOR Check
+    if not profile or not db_user or profile.user_id != db_user.id:
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     await render_hub(
         callback.bot, callback.message.chat.id,
         texts.DEVICE_DELETE_CONFIRM.format(device_name=safe(profile.device_name)),
         get_device_delete_confirm_keyboard(profile_id)
     )
+
 @router.callback_query(F.data.startswith("cancel_delete_device:"))
 async def cancel_delete_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer("❌ Удаление отменено")
@@ -253,6 +294,7 @@ async def cancel_delete_device(callback: CallbackQuery, state: FSMContext, sessi
         f"📱 <b>Управление устройством</b>",
         get_device_keyboard(profile_id)
     )
+
 @router.callback_query(F.data.startswith("confirm_delete_device:"))
 async def confirm_delete_device(
     callback: CallbackQuery, state: FSMContext,
@@ -262,15 +304,19 @@ async def confirm_delete_device(
     await state.clear()
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
-    if not profile:
-        await callback.answer("❌ Устройство уже удалено", show_alert=True)
+    
+    # 🔥 ИСПРАВЛЕНО: IDOR Check
+    if not profile or not db_user or profile.user_id != db_user.id:
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     if not await DeviceService.delete_device(session, profile):
         await callback.answer(texts.ERROR_SERVER_UNAVAILABLE_GENERIC, show_alert=True)
         return
     user = db_user or await get_user_by_telegram_id(session, callback.from_user.id)
     if user:
         await _render_connections(callback.message, user, session)
+
 # ============================================================
 # Создание нового устройства (FSM)
 # ============================================================
@@ -297,6 +343,7 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext, session: 
         builder.as_markup()
     )
     await state.set_state(DeviceCreationStates.choose_server)
+
 @router.callback_query(F.data.startswith("select_server:"), DeviceCreationStates.choose_server)
 async def select_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -314,12 +361,12 @@ async def select_server(callback: CallbackQuery, state: FSMContext, session: Asy
         texts.DEVICE_ADD_NAME_PROMPT.format(flag=flag, server_name=safe(server.name)),
         get_back_button("add_device")
     )
+
 @router.message(DeviceCreationStates.enter_device_name)
 async def enter_device_name(
     message: Message, state: FSMContext,
     session: AsyncSession, db_user: User | None = None
 ):
-    # CleanChatMiddleware уже удалил сообщение пользователя
     if not message.text or message.text.startswith("/"):
         await state.clear()
         return
@@ -335,6 +382,8 @@ async def enter_device_name(
     if not user:
         await state.clear()
         return
+    
+    # Проверка лимита здесь тоже нужна, но основная защита теперь в DeviceService (Lock)
     device_limit = await _get_effective_device_limit(user, session)
     profiles_count = await get_user_profiles_count(session, user.id)
     if profiles_count >= device_limit:
@@ -345,6 +394,7 @@ async def enter_device_name(
         )
         await state.clear()
         return
+
     data = await state.get_data()
     profile = await DeviceService.create_device(
         session, user, data.get("server_id"), device_name
@@ -363,6 +413,5 @@ async def enter_device_name(
         flag=server.country_flag,
         server_name=safe(server.name)
     )
-    # ✅ Обновляем хаб на сообщение об успехе с клавиатурой устройства
     await render_hub(message.bot, message.chat.id, success_text, get_device_keyboard(profile.id))
     await state.clear()

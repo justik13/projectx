@@ -8,7 +8,6 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.keyboards import get_admin_server_card_keyboard, get_back_button
 from bot.keyboards.admin.servers import get_server_delete_confirm_keyboard
 from bot.states import AdminStates
@@ -23,11 +22,11 @@ from services.amnezia_client import AmneziaClient
 from services.audit_service import AuditService
 from utils.admin import is_admin
 from utils.telegram import safe, render_hub
+from utils.security import is_safe_url  # 🔥 ДОБАВЛЕНО
 
 router = Router()
 logger = logging.getLogger(__name__)
 SERVERS_PER_PAGE = 10
-
 URL_REGEX = re.compile(
     r"^https?://"
     r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|"
@@ -115,7 +114,7 @@ async def _bulk_delete_peers_from_api(
 
 @router.callback_query(F.data == "admin_servers")
 async def show_servers_list(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    await callback.answer() # 🔥 ДОБАВЛЕНО
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -124,7 +123,7 @@ async def show_servers_list(callback: CallbackQuery, state: FSMContext, session:
 
 @router.callback_query(F.data.startswith("admin_servers_page:"))
 async def servers_pagination(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    await callback.answer() # 🔥 ДОБАВЛЕНО
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -134,7 +133,7 @@ async def servers_pagination(callback: CallbackQuery, state: FSMContext, session
 
 @router.callback_query(F.data == "admin_server_add")
 async def start_add_server(callback: CallbackQuery, state: FSMContext):
-    await callback.answer() # 🔥 ДОБАВЛЕНО
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -166,8 +165,10 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             get_back_button("admin_servers")
         )
         return
+
     data = await state.get_data()
     step = data.get("step")
+
     if step == "name":
         name = message.text.strip()
         if len(name) > 255:
@@ -183,6 +184,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             texts.ADMIN_SERVER_FLAG_PROMPT,
             get_back_button("admin_servers")
         )
+
     elif step == "flag":
         await state.update_data(country_flag=message.text.strip(), step="api_url")
         await render_hub(
@@ -190,6 +192,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             texts.ADMIN_SERVER_URL_PROMPT,
             get_back_button("admin_servers")
         )
+
     elif step == "api_url":
         api_url = message.text.strip()
         if len(api_url) > 500:
@@ -199,6 +202,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
                 get_back_button("admin_servers")
             )
             return
+        
         if not URL_REGEX.match(api_url):
             await render_hub(
                 message.bot, message.chat.id,
@@ -207,6 +211,18 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
                 parse_mode="HTML"
             )
             return
+
+        # 🔥 ИСПРАВЛЕНО: Защита от SSRF
+        if not is_safe_url(api_url):
+            await render_hub(
+                message.bot, message.chat.id,
+                "⚠️ <b>URL запрещен правилами безопасности</b>\n"
+                "Использование приватных IP-адресов, loopback и metadata endpoints запрещено.",
+                get_back_button("admin_servers"),
+                parse_mode="HTML"
+            )
+            return
+
         existing = await get_server_by_api_url(session, api_url)
         if existing:
             await render_hub(
@@ -217,12 +233,14 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             )
             await state.clear()
             return
+        
         await state.update_data(api_url=api_url, step="api_key")
         await render_hub(
             message.bot, message.chat.id,
             texts.ADMIN_SERVER_KEY_PROMPT,
             get_back_button("admin_servers")
         )
+
     elif step == "api_key":
         api_key = message.text.strip()
         if not api_key or len(api_key) < 8:
@@ -232,15 +250,17 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
                 get_back_button("admin_servers")
             )
             return
-        await state.update_data(api_key=api_key)
         
+        await state.update_data(api_key=api_key)
         all_data = await state.get_data()
+        
         check_msg = await render_hub(
             message.bot, message.chat.id,
             texts.ADMIN_SERVER_CHECKING,
             get_back_button("admin_servers"),
             parse_mode="HTML"
         )
+        
         client = AmneziaClient(all_data["api_url"], all_data["api_key"])
         if not await client.healthcheck():
             await render_hub(
@@ -251,6 +271,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             )
             await state.clear()
             return
+
         server_info = await client.get_server_info()
         if not server_info:
             await render_hub(
@@ -261,6 +282,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             )
             await state.clear()
             return
+
         protocols = server_info.get("protocols", [])
         if "amneziawg2" not in protocols:
             await render_hub(
@@ -273,7 +295,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             )
             await state.clear()
             return
-            
+
         api_max_peers = (
             server_info.get("maxPeers")
             or server_info.get("serverMaxPeers")
@@ -284,7 +306,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             or server_info.get("serverName")
             or all_data["name"]
         )
-        
+
         existing = await get_server_by_api_url(session, all_data["api_url"])
         if existing:
             await render_hub(
@@ -295,7 +317,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             )
             await state.clear()
             return
-            
+
         server = await create_server(
             session,
             name=api_server_name,
@@ -343,7 +365,7 @@ async def _show_server_card(callback: CallbackQuery, session: AsyncSession, serv
 
 @router.callback_query(F.data.startswith("admin_server_card:"))
 async def show_server_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    await callback.answer() # 🔥 ДОБАВЛЕНО
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -386,7 +408,6 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext, session: Asy
             .where(VPNProfile.id.in_(profile_ids))
             .values(is_active=new_status),
         )
-        
     await update_server(session, server, is_active=new_status)
     await AuditService.log_action(
         session, callback.from_user.id, "TOGGLE_SERVER", "Server", server_id,
@@ -402,7 +423,7 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext, session: Asy
 
 @router.callback_query(F.data.startswith("admin_server_delete:"))
 async def request_delete_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    await callback.answer() # 🔥 ДОБАВЛЕНО
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -430,7 +451,7 @@ async def request_delete_server(callback: CallbackQuery, state: FSMContext, sess
 
 @router.callback_query(F.data.startswith("confirm_server_delete:"))
 async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    await callback.answer() # 🔥 ДОБАВЛЕНО
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -480,7 +501,7 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
 
 @router.callback_query(F.data.startswith("admin_server_edit_name:"))
 async def start_edit_server_name(callback: CallbackQuery, state: FSMContext):
-    await callback.answer() # 🔥 ДОБАВЛЕНО
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -495,7 +516,7 @@ async def start_edit_server_name(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_server_edit_flag:"))
 async def start_edit_server_flag(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    await callback.answer() # 🔥 ДОБАВЛЕНО
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
