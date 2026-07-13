@@ -15,15 +15,10 @@ from database.repositories.tariffs_repo import get_tariff_by_id
 from services.subscription import SubscriptionService
 from utils.formatters import format_datetime, format_days_left, format_traffic
 from utils.telegram import safe
+from utils.tariff_names import get_tariff_display_name  # 🔥 УНИФИЦИРОВАНО
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-
-def _get_tariff_display_name(device_limit: int) -> str:
-    if device_limit <= 2: return "📱 Базовый"
-    elif device_limit <= 5: return "👨‍👩‍👧‍👦 Семейный"
-    else: return "🚀 Pro"
 
 
 async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool):
@@ -32,6 +27,7 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
     total_traffic = sum(p.traffic_down + p.traffic_up for p in profiles)
     has_access = await SubscriptionService.check_access(session, user.telegram_id)
     referrals_count = len(await get_user_referrals(session, user.telegram_id))
+
     if has_access:
         tariff_name = "—"
         device_limit = 0
@@ -39,7 +35,8 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
             tariff = await get_tariff_by_id(session, user.current_tariff_id)
             if tariff:
                 device_limit = tariff.device_limit
-                tariff_name = f"{_get_tariff_display_name(device_limit)} ({device_limit} устр.)"
+                tariff_name = f"{get_tariff_display_name(device_limit)} ({device_limit} устр.)"
+
         rendered = texts.PROFILE_TEXT_ACTIVE.format(
             name=safe(user.first_name or "Пользователь"),
             username=safe(user.username or "—"),
@@ -66,9 +63,12 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
         builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
         builder.adjust(1, 1, 1, 1)
         kb = builder.as_markup()
+
     if edit:
-        try: await target.edit_text(rendered, reply_markup=kb, parse_mode="HTML")
-        except Exception: pass
+        try:
+            await target.edit_text(rendered, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            pass
     else:
         await target.answer(rendered, reply_markup=kb, parse_mode="HTML")
 
@@ -106,22 +106,21 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
     else:
         rendered = texts.HISTORY_HEADER
         for p in payments[:10]:
-            # ✅ Обновлённая логика статусов
             if p.status == "completed":
                 status = "✅"
             elif p.status == "cancelled":
                 status = "❌"
             elif p.status == "failed":
                 status = "⚠️"
-            else:  # pending
+            else:
                 status = "⏳"
-            
             date = format_datetime(p.paid_at or p.created_at)
             currency = "⭐" if p.currency == "stars" else "₽"
             rendered += f"{status} {date} | {p.amount} {currency}\n"
         if len(payments) > 10:
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
     await callback.message.edit_text(rendered, reply_markup=get_history_keyboard(), parse_mode="HTML")
+
 
 @router.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):

@@ -6,6 +6,8 @@ from typing import Optional
 from bot.constants import PERMANENT_SUBSCRIPTION_DAYS, PERMANENT_END_DATE
 import logging
 
+logger = logging.getLogger(__name__)
+
 
 class SubscriptionService:
     @staticmethod
@@ -22,15 +24,23 @@ class SubscriptionService:
         username: str | None, first_name: str | None,
         ref_id: int | None = None
     ) -> User:
+        """
+        🔥 ИСПРАВЛЕНО: Защита от реферального абьюза.
+        referred_by устанавливается ТОЛЬКО при первом входе (создании пользователя).
+        Если пользователь уже существует — referred_by НЕ перезаписывается.
+        """
         user = await get_user_by_telegram_id(session, telegram_id)
         if user:
+            # Пользователь уже существует — не трогаем referred_by
             return user
 
+        # 🔥 Пользователь новый — проверяем реферала
         referred_by = None
         if ref_id is not None and ref_id != telegram_id:
             ref_user = await get_user_by_telegram_id(session, ref_id)
             if ref_user:
                 referred_by = ref_id
+                logger.info(f"New user {telegram_id} referred by {ref_id}")
 
         return await create_user(session, telegram_id, username, first_name, referred_by)
 
@@ -52,6 +62,8 @@ class SubscriptionService:
         ) else now
 
         new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else current_end + timedelta(days=days)
+        
+        # Сбрасываем флаги уведомлений при продлении
         user.subscription_end = new_end
         user.notified_3d = False
         user.notified_1d = False
@@ -59,7 +71,6 @@ class SubscriptionService:
 
         if new_device_limit is not None:
             user.device_limit = new_device_limit
-
         if new_tariff_id is not None:
             user.current_tariff_id = new_tariff_id
 
@@ -70,4 +81,5 @@ class SubscriptionService:
     async def get_expires_timestamp(user: User) -> Optional[int]:
         if not user.subscription_end or user.subscription_end.year >= 2100:
             return None
+        # naive UTC datetime -> добавляем tzinfo UTC -> timestamp
         return int(user.subscription_end.replace(tzinfo=timezone.utc).timestamp())

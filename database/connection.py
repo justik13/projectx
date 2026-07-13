@@ -10,14 +10,14 @@ _sessionmaker = None
 
 # Дефолтная матрица тарифов
 DEFAULT_TARIFFS = [
-    # Базовый (2 устройства)
+    # 📱 Базовый (2 устройства)
     {"duration_days": 7, "device_limit": 2, "price_rub": 35, "price_stars": 35, "sort_order": 10},
     {"duration_days": 30, "device_limit": 2, "price_rub": 90, "price_stars": 90, "sort_order": 11},
     {"duration_days": 90, "device_limit": 2, "price_rub": 240, "price_stars": 240, "sort_order": 12},
-    # Семейный (5 устройств)
+    # 👨‍👩‍👧‍👦 Семейный (5 устройств)
     {"duration_days": 30, "device_limit": 5, "price_rub": 180, "price_stars": 180, "sort_order": 20},
     {"duration_days": 90, "device_limit": 5, "price_rub": 480, "price_stars": 480, "sort_order": 21},
-    # Pro (10 устройств)
+    # 🚀 Pro (10 устройств)
     {"duration_days": 30, "device_limit": 10, "price_rub": 320, "price_stars": 320, "sort_order": 30},
     {"duration_days": 90, "device_limit": 10, "price_rub": 850, "price_stars": 850, "sort_order": 31},
 ]
