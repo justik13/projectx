@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.tariff_names import get_tariff_group_name
+from aiogram.types import InlineKeyboardButton
 
 def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -88,3 +89,34 @@ def get_payment_success_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1, 1, 1)
     return builder.as_markup()
+
+def get_sbp_payment_keyboard(payment_url: str, payment_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура для СБП платежа"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💳 Открыть страницу оплаты", url=payment_url)
+    builder.button(text="✅ Я оплатил (проверить)", callback_data=f"check_payment:{payment_id}")
+    builder.button(text="❌ Отменить", callback_data=f"cancel_payment:{payment_id}")
+    builder.button(text="← Назад", callback_data="back_to_payment")
+    builder.adjust(1, 1, 1, 1)
+    return builder.as_markup()
+
+@router.callback_query(F.data.startswith("cancel_payment:"))
+async def cancel_payment(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+    """Отмена платежа"""
+    await callback.answer("❌ Платеж отменен")
+    
+    payment_id = int(callback.data.split(":")[1])
+    
+    try:
+        await mark_payment_as_cancelled(session, payment_id)
+    except Exception as e:
+        logger.warning(f"Failed to cancel payment {payment_id}: {e}")
+    
+    await state.clear()
+    
+    # Возвращаемся к выбору тарифа
+    user = await get_user_by_telegram_id(session, callback.from_user.id)
+    if user and await _is_subscription_active(user):
+        await _show_hub(callback, user, session)
+    else:
+        await _show_showcase(callback, session)

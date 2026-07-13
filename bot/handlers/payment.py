@@ -357,3 +357,123 @@ async def back_to_payment(callback: CallbackQuery, state: FSMContext, session: A
         await _show_hub(callback, user, session)
     else:
         await render_hub(callback.bot, callback.message.chat.id, texts.ERROR_OPERATION_CANCELLED, get_back_button("menu_subscription"))
+
+@router.callback_query(F.data.startswith("pay_sbp:"))
+async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+    """Создание платежа через Platega.io СБП"""
+    await callback.answer("⏳ Создаю платеж...")
+    
+    tariff_id = int(callback.data.split(":")[1])
+    tariff = await get_tariff_by_id(session, tariff_id)
+    
+    if not tariff:
+        await callback.answer(texts.ERROR_TARIFF_NOT_FOUND, show_alert=True)
+        return
+    
+    db_user = await get_user_by_telegram_id(session, callback.from_user.id)
+    if not db_user:
+        await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
+        return
+    
+    # Создаем платеж через Platega
+    payment, qr_data = await PaymentService.create_platega_payment(
+        session=session,
+        user_id=db_user.id,
+        tariff_id=tariff.id,
+        amount=float(tariff.price_rub),
+        telegram_id=db_user.telegram_id
+    )
+    
+    if not payment or not payment.payment_url:
+        await render_hub(
+            callback.bot, callback.message.chat.id,
+            texts.ERROR_PAYMENT_SERVICE,
+            get_back_button(f"select_tariff:{tariff_id}")
+        )
+        return
+    
+    # Сохраняем payment_id в state
+    await state.update_data(payment_id=payment.id)
+    
+    # Формируем сообщение с QR и ссылкой
+    qr_code = payment.qr_code or (qr_data.get("qr") if qr_data else None)
+    
+    text = texts.PAYMENT_SBP_INSTRUCTIONS.format(
+        amount=tariff.price_rub,
+        payment_url=payment.payment_url
+    )
+    
+    # Отправляем QR-код если есть
+    if qr_code and qr_code.startswith("http"):
+        # QR как ссылка
+        await render_hub(
+            callback.bot, callback.message.chat.id,
+            text,
+            get_sbp_payment_keyboard(payment.payment_url, payment.id),
+            parse_mode="HTML"
+        )
+    elif qr_code:
+        # QR как base64 - отправляем как изображение
+        import base64
+        from aiogram.types import BufferedInputFile
+        
+        try:
+            qr_bytes = base64.b64decode(qr_code)
+            qr_file = BufferedInputFile(qr_bytes, filename="qr_code.png")
+            
+            await clear_and_delete_hub(callback.bot, callback.message.chat.id)
+            await callback.bot.send_photo(
+                callback.message.chat.id,
+                qr_file,
+                caption=text,
+                reply_markup=get_sbp_payment_keyboard(payment.payment_url, payment.id),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send QR image: {e}")
+            await render_hub(
+                callback.bot, callback.message.chat.id,
+                text,
+                get_sbp_payment_keyboard(payment.payment_url, payment.id),
+                parse_mode="HTML"
+            )
+    else:
+        # Нет QR, только ссылка
+        await render_hub(
+            callback.bot, callback.message.chat.id,
+            text,
+            get_sbp_payment_keyboard(payment.payment_url, payment.id),
+            parse_mode="HTML"
+        )
+
+@router.callback_query(F.data.startswith("check_payment:"))
+async def check_payment_status(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+    """Проверка статуса платежа"""
+    await callback.answer("⏳ Проверяю статус...")
+    
+    payment_id = int(callback.data.split(":")[1])
+    
+    success = await PaymentService.check_platega_payment(session, payment_id)
+    
+    if success:
+        # Оплата прошла успешно
+        payment = await get_payment_by_id(session, payment_id)
+        user = await get_user_by_telegram_id(session, callback.from_user.id)
+        profiles = await get_user_profiles(session, user.id)
+        
+        valid_until = format_datetime(user.subscription_end) if user and user.subscription_end else "—"
+        device_limit = getattr(payment.tariff, 'device_limit', 2) if payment.tariff else 2
+        tariff_name = get_tariff_display_name(device_limit)
+        
+        text = (
+            texts.PAYMENT_SUCCESS_RENEW.format(tariff_name=tariff_name, valid_until=valid_until)
+            if profiles else texts.PAYMENT_SUCCESS_NEW.format(tariff_name=tariff_name, valid_until=valid_until)
+        )
+        
+        await render_hub(callback.bot, callback.message.chat.id, text, get_payment_success_keyboard())
+    else:
+        # Оплата еще не прошла
+        await callback.answer(
+            "⏳ Оплата еще не завершена. После оплаты нажмите кнопку снова.",
+            show_alert=True
+        )

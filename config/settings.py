@@ -3,16 +3,23 @@ from typing import List
 import logging
 from pydantic import field_validator
 
-
 class Settings(BaseSettings):
     BOT_TOKEN: str
     ADMIN_IDS: List[int]
     DB_PATH: str = "./bot_data.db"
     DB_ENCRYPTION_KEY: str = ""
-    DEFAULT_DEVICE_LIMIT: int = 2  # ← БЫЛО 3, СТАЛО 2
+    DEFAULT_DEVICE_LIMIT: int = 2
     REFERRAL_BONUS_DAYS: int = 3
     SUPPORT_USERNAME: str = "@support_username"
-
+    
+    # Platega.io (СБП)
+    PLATEGA_MERCHANT_ID: str = ""
+    PLATEGA_SECRET: str = ""
+    PLATEGA_BASE_URL: str = "https://api.platega.io"
+    PLATEGA_CALLBACK_URL: str = ""  # https://yourdomain.com/webhook/platega
+    PLATEGA_WEBHOOK_PORT: int = 8080  # Порт для webhook сервера
+    PLATEGA_PAYMENT_METHOD: int = 2  # 2 = СБП QR
+    
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
@@ -31,9 +38,7 @@ class Settings(BaseSettings):
         else:
             return v
 
-
 _settings = None
-
 
 def get_settings() -> Settings:
     global _settings

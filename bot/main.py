@@ -1,11 +1,11 @@
 import asyncio
 import logging
-
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuButtonCommands
 from aiogram.utils.chat_action import ChatActionMiddleware
 from cryptography.fernet import Fernet
+from aiohttp import web
 
 from bot import texts
 from bot.middlewares import DBSessionMiddleware, ThrottlingMiddleware, UserContextMiddleware, CleanChatMiddleware
@@ -13,6 +13,7 @@ from config.settings import get_settings
 from database.connection import close_db, init_db
 from services.amnezia_client import close_http_session
 from services.workers import start_background_worker
+from bot.handlers.webhook import setup_webhook_routes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,14 +22,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
-    """
-    Глобальный обработчик ошибок — логирует и сообщает пользователю.
-    🔥 ИСПРАВЛЕНО: ErrorEvent не имеет атрибута .data.
-    FSM state пробрасывается aiogram через kwargs.
-    """
+    """Глобальный обработчик ошибок"""
     logger.critical(f"Unhandled exception: {event.exception}", exc_info=event.exception)
     
-    # Получаем state из kwargs (aiogram 3 передает его туда)
     state = kwargs.get("state")
     if state:
         try:
@@ -47,11 +43,11 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             )
     except Exception:
         pass
-    
+
     return True
 
 async def setup_bot_commands(bot: Bot):
-    """Устанавливает меню команд и кнопку меню"""
+    """Устанавливает меню команд"""
     commands = [
         BotCommand(command="start", description="🚀 Запустить бота"),
     ]
@@ -64,19 +60,17 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     bot = Bot(token=get_settings().BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # === Middlewares (порядок важен!) ===
+    # Middlewares
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
     dp.message.middleware(CleanChatMiddleware())
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
-    
-    # 🔥 Исправлено: message = 0.3s, callback = 0.1s (быстрее отклик на кнопки)
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
     dp.message.middleware(ChatActionMiddleware())
 
-    # === Routers ===
+    # Routers
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
     from bot.handlers.admin.dashboard import router as admin_dashboard_router
     from bot.handlers.admin.servers import router as admin_servers_router
@@ -98,17 +92,33 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
         dp.include_router(r)
 
     dp.errors.register(global_error_handler)
-
     await setup_bot_commands(bot)
+
     return bot, dp
+
+async def start_webhook_server(port: int):
+    """Запускает aiohttp сервер для webhook"""
+    app = web.Application()
+    setup_webhook_routes(app)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    
+    logger.info(f"Webhook server started on port {port}")
+    return runner
 
 async def main():
     """Главная функция запуска"""
     settings = get_settings()
+    
     try:
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
+
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
@@ -117,14 +127,24 @@ async def main():
 
         logger.info("Инициализация БД...")
         await init_db()
+        
         bot, dp = await setup_bot()
+        
+        # 🆕 Запуск webhook сервера для Platega
+        webhook_runner = None
+        if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
+            webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
+        
         await start_background_worker(bot)
-
+        
         logger.info("Запуск polling...")
         await dp.start_polling(bot)
+        
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:
+        if webhook_runner:
+            await webhook_runner.cleanup()
         await close_db()
         await close_http_session()
         logger.info("Работа бота завершена")

@@ -124,3 +124,30 @@ class AuditLog(Base):
         DateTime(timezone=False),
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tariff_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tariffs.id", ondelete="RESTRICT"), nullable=False
+    )
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    
+    # Platega.io поля
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)  # UUID от Platega
+    payment_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)  # Ссылка для оплаты
+    qr_code: Mapped[str | None] = mapped_column(Text, nullable=True)  # QR-код (base64 или URL)
+    payment_method: Mapped[str | None] = mapped_column(String(50), nullable=True)  # SBPQR, STARS и т.д.
+    
+    user = relationship("User", back_populates="payments")
+    tariff = relationship("Tariff")

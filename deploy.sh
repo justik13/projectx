@@ -166,6 +166,34 @@ setup_env() {
     read -p "Введите REFERRAL_BONUS_DAYS [3]: " REFERRAL_BONUS_DAYS
     REFERRAL_BONUS_DAYS=${REFERRAL_BONUS_DAYS:-3}
 
+    echo ""
+    echo -e "${BLUE}[5/6]${NC} Platega.io Merchant ID (для СБП, оставить пустым если не нужно)"
+    read -p "Введите PLATEGA_MERCHANT_ID: " PLATEGA_MERCHANT_ID
+
+    if [ -n "$PLATEGA_MERCHANT_ID" ]; then
+        echo ""
+        echo -e "${BLUE}[6/6]${NC} Platega.io Secret Key"
+        read -p "Введите PLATEGA_SECRET: " PLATEGA_SECRET
+        [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET не может быть пустым если указан Merchant ID"
+    
+        echo ""
+        echo -e "${BLUE}[7/7]${NC} Callback URL для Platega (например: https://yourdomain.com/webhook/platega)"
+        read -p "Введите PLATEGA_CALLBACK_URL: " PLATEGA_CALLBACK_URL
+        [ -z "$PLATEGA_CALLBACK_URL" ] && error "PLATEGA_CALLBACK_URL не может быть пустым"
+    
+        write_env_var "PLATEGA_MERCHANT_ID" "$PLATEGA_MERCHANT_ID"
+        write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
+        write_env_var "PLATEGA_BASE_URL" "https://api.platega.io"
+        write_env_var "PLATEGA_CALLBACK_URL" "$PLATEGA_CALLBACK_URL"
+        write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
+        write_env_var "PLATEGA_RETURN_URL" "https://t.me/\${BOT_USERNAME}"
+        write_env_var "PLATEGA_FAILED_URL" "https://t.me/\${BOT_USERNAME}"
+    
+        success "Platega.io настроен"
+    else
+        success "Platega.io пропущен (будут только Telegram Stars)"
+    fi
+
     # 🔧 ФИКС: УДАЛЁН запрос DEFAULT_DEVICE_LIMIT — хардкод в коде (2 устр.)
 
     log "Автоматическая генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
