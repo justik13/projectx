@@ -11,6 +11,7 @@ from bot import texts
 from config.settings import get_settings
 from database.models import User
 from database.repositories.users_repo import get_user_by_telegram_id
+from database.repositories.payments_repo import mark_payment_as_cancelled
 from services.subscription import SubscriptionService
 from utils.telegram import safe, render_hub
 
@@ -24,8 +25,31 @@ def parse_referral_id(command_args: str) -> int | None:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, command: Command, session: AsyncSession):
+    data = await state.get_data()
+    invoice_message_id = data.get("invoice_message_id")
+    cancel_message_id = data.get("cancel_message_id")
+    payment_id = data.get("payment_id")
+    
+    if invoice_message_id:
+        try:
+            await message.bot.delete_message(message.chat.id, invoice_message_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete invoice message: {e}")
+    
+    if cancel_message_id:
+        try:
+            await message.bot.delete_message(message.chat.id, cancel_message_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete cancel message: {e}")
+    
+    if payment_id:
+        try:
+            await mark_payment_as_cancelled(session, payment_id)
+            logger.info(f"Payment {payment_id} cancelled due to /start")
+        except Exception as e:
+            logger.warning(f"Failed to cancel payment {payment_id}: {e}")
+    
     await state.clear()
-    # CleanChatMiddleware уже удалил сообщение /start
     
     telegram_id = message.from_user.id
     ref_id = parse_referral_id(command.args) if command.args else None
@@ -44,12 +68,35 @@ async def cmd_start(message: Message, state: FSMContext, command: Command, sessi
     text = texts.HUB_HEADER.format(name=name)
     kb = get_hub_keyboard(is_admin=is_admin, is_active=is_active)
     
-    # ✅ Всегда рендерим хаб через Single Message Hub
     await render_hub(message.bot, message.chat.id, text, kb)
 
 @router.callback_query(F.data == "back_to_main_menu")
 async def back_to_main_menu(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
+    
+    data = await state.get_data()
+    invoice_message_id = data.get("invoice_message_id")
+    cancel_message_id = data.get("cancel_message_id")
+    payment_id = data.get("payment_id")
+    
+    if invoice_message_id:
+        try:
+            await callback.bot.delete_message(callback.message.chat.id, invoice_message_id)
+        except Exception:
+            pass
+    
+    if cancel_message_id:
+        try:
+            await callback.bot.delete_message(callback.message.chat.id, cancel_message_id)
+        except Exception:
+            pass
+    
+    if payment_id:
+        try:
+            await mark_payment_as_cancelled(session, payment_id)
+        except Exception:
+            pass
+    
     await state.clear()
     
     if not db_user:

@@ -17,7 +17,6 @@ router = Router()
 )
 async def fsm_media_guard(message: Message, state: FSMContext):
     await state.clear()
-    # CleanChatMiddleware уже удалил медиа
     await render_hub(message.bot, message.chat.id, texts.ERROR_OPERATION_INTERRUPTED, get_back_button("back_to_main_menu"))
 
 @router.message(
@@ -33,9 +32,7 @@ async def handle_unknown_text(message: Message, state: FSMContext):
     if not message.text: return
     if message.text.startswith("/"): return
     
-    # ✅ Очищаем FSM state на случай если пользователь застрял
     await state.clear()
-    
     await render_hub(message.bot, message.chat.id, texts.FALLBACK_UNKNOWN_TEXT, get_back_button("back_to_main_menu"))
 
 @router.callback_query(F.data == "noop_group_header")

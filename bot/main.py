@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 async def global_error_handler(event: ErrorEvent) -> bool:
     logger.critical(f"Unhandled exception: {event.exception}", exc_info=True)
     
-    # ✅ Очищаем FSM state при ошибке
     state = event.data.get("state")
     if state:
         try:
@@ -56,23 +55,17 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     bot = Bot(token=get_settings().BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     
-    # Порядок middleware важен!
-    # 1. DB Session — создает сессию
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
     
-    # 2. Clean Chat — удаляет входящие сообщения (ДО UserContext)
     dp.message.middleware(CleanChatMiddleware())
     
-    # 3. User Context — загружает пользователя
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
     
-    # 4. Throttling — защита от спама
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
     
-    # 5. Chat Action — показывает "печатает..."
     dp.message.middleware(ChatActionMiddleware())
     
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
