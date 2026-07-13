@@ -1,6 +1,6 @@
 """
 Троттлинг для предотвращения спама callback-запросами.
-Каждый callback_data троттится отдельно — разные кнопки НЕ блокируют друг друга.
+КРИТИЧНО: каждый callback_data троттится отдельно — разные кнопки НЕ блокируют друг друга.
 """
 import asyncio
 import logging
@@ -13,11 +13,7 @@ logger = logging.getLogger(__name__)
 
 class ThrottlingMiddleware:
     def __init__(self, limit: float = 0.3):
-        """
-        :param limit: минимальный интервал между одинаковыми callback_data (секунды)
-        """
         self.limit = limit
-        # TTL = 3x limit для надёжного троттлинга
         self._last_call = TTLCache(maxsize=10000, ttl=limit * 3)
     
     async def __call__(self, handler, event, data):
@@ -25,8 +21,7 @@ class ThrottlingMiddleware:
         if not user_id:
             return await handler(event, data)
         
-        # Для callback используем UNIQUE ключ = callback_data
-        # РАЗНЫЕ кнопки НЕ блокируют друг друга!
+        # 🔥 УНИКАЛЬНЫЙ ключ для каждого callback_data
         if isinstance(event, CallbackQuery):
             action_key = f"cb:{event.data}"
         elif hasattr(event, "text"):
@@ -40,15 +35,12 @@ class ThrottlingMiddleware:
         key = f"{user_id}:{action_key}"
         
         if key in self._last_call:
-            # Этот callback_data уже был вызван недавно
             if isinstance(event, CallbackQuery):
                 try:
-                    # Тихий ответ без alert — не раздражать пользователя
-                    await event.answer()
+                    await event.answer()  # Тихий ответ без текста
                 except Exception:
                     pass
-            return  # Пропускаем обработчик
+            return
         
-        # Записываем время вызова
         self._last_call[key] = asyncio.get_running_loop().time()
         return await handler(event, data)
