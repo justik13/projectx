@@ -5,8 +5,9 @@ from bot import texts
 
 
 class ThrottlingMiddleware:
-    def __init__(self, limit: float = 0.5):
+    def __init__(self, limit: float = 0.3):
         self.limit = limit
+        # TTL = 3x limit для надёжного троттлинга
         self._last_call = TTLCache(maxsize=10000, ttl=limit * 3)
     
     async def __call__(self, handler, event, data):
@@ -14,8 +15,10 @@ class ThrottlingMiddleware:
         if not user_id:
             return await handler(event, data)
         
+        # 🔥 КРИТИЧНО: для callback используем UNIQUE ключ = callback_data
+        # раньше был ОДИН ключ "callback" для ВСЕХ кнопок — это вызывало задержки!
         if isinstance(event, CallbackQuery):
-            action_key = "callback"
+            action_key = f"cb:{event.data}"
         elif hasattr(event, "text"):
             action_key = f"msg:{event.text or ''}"
         else:
@@ -25,7 +28,6 @@ class ThrottlingMiddleware:
             return await handler(event, data)
         
         key = f"{user_id}:{action_key}"
-        
         if key in self._last_call:
             if isinstance(event, CallbackQuery):
                 try:
