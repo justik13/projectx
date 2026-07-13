@@ -8,100 +8,120 @@ from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
 
-# 🔥 ИСПРАВЛЕНО: Кэш теперь хранит СПИСОК ID сообщений (а не один ID)
-# Это позволяет удалять несколько сообщений (например, .vpn + .conf) при следующем действии
-_hub_cache = TTLCache(maxsize=50000, ttl=86400)  # chat_id -> List[message_id]
+# 🔥 ИСПРАВЛЕНО: TTL снижен с 7 дней до 24 часов (86400 сек)
+# Структура: {chat_id: {"ids": [msg_id1, msg_id2, ...]}}
+_hub_cache = TTLCache(maxsize=50000, ttl=86400)
 
-async def _safe_delete(bot, chat_id: int, msg_id: int):
-    """Безопасное удаление сообщения в фоне (не блокирует UI)"""
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-    except Exception:
-        pass
+async def _safe_delete_batch(bot, chat_id: int, msg_ids: List[int]):
+    """Безопасное удаление списка сообщений в фоне"""
+    for msg_id in msg_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
 
 def safe(value: Optional[str]) -> str:
     if value is None:
         return "—"
     return html.escape(str(value))
 
+async def clear_and_delete_hub(bot, chat_id: int):
+    """Удаляет все сообщения из кэша хаба и очищает кэш"""
+    cached = _hub_cache.get(chat_id)
+    if cached and "ids" in cached:
+        await _safe_delete_batch(bot, chat_id, cached["ids"])
+    _hub_cache.pop(chat_id, None)
+
 async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup, parse_mode: str = "HTML") -> int:
     """
-    Отправляет текстовый хаб и удаляет ВСЕ предыдущие сообщения из кэша.
+    Очищает весь текущий хаб (все сообщения в кэше) и отправляет новое текстовое сообщение.
     """
     cached = _hub_cache.get(chat_id)
-    if cached:
-        # 🔥 Удаляем ВСЕ сообщения из кэша
-        for msg_id in cached:
-            asyncio.create_task(_safe_delete(bot, chat_id, msg_id))
+    if cached and "ids" in cached:
+        asyncio.create_task(_safe_delete_batch(bot, chat_id, cached["ids"]))
     
     msg = await bot.send_message(
         chat_id=chat_id, text=text,
         reply_markup=reply_markup, parse_mode=parse_mode
     )
-    # 🔥 Сохраняем только ID нового текстового хаба
-    _hub_cache[chat_id] = [msg.message_id]
+    _hub_cache[chat_id] = {"ids": [msg.message_id]}
     return msg.message_id
 
-async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, reply_markup: InlineKeyboardMarkup, parse_mode: str = "HTML") -> int:
+async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
+    """Отправляет фото, удаляя предыдущий хаб"""
     cached = _hub_cache.get(chat_id)
-    if cached:
-        for msg_id in cached:
-            asyncio.create_task(_safe_delete(bot, chat_id, msg_id))
+    if cached and "ids" in cached:
+        asyncio.create_task(_safe_delete_batch(bot, chat_id, cached["ids"]))
+    
     msg = await bot.send_photo(
         chat_id=chat_id, photo=photo, caption=caption,
         reply_markup=reply_markup, parse_mode=parse_mode
     )
-    _hub_cache[chat_id] = [msg.message_id]
+    _hub_cache[chat_id] = {"ids": [msg.message_id]}
     return msg.message_id
 
-async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str, reply_markup: InlineKeyboardMarkup, parse_mode: str = "HTML") -> int:
-    """
-    Отправляет документ и удаляет ВСЕ предыдущие сообщения из кэша.
-    """
+async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
+    """Отправляет документ, удаляя предыдущий хаб"""
     cached = _hub_cache.get(chat_id)
-    if cached:
-        for msg_id in cached:
-            asyncio.create_task(_safe_delete(bot, chat_id, msg_id))
+    if cached and "ids" in cached:
+        asyncio.create_task(_safe_delete_batch(bot, chat_id, cached["ids"]))
+    
     msg = await bot.send_document(
         chat_id=chat_id, document=document, caption=caption,
         reply_markup=reply_markup, parse_mode=parse_mode
     )
-    _hub_cache[chat_id] = [msg.message_id]
-    return msg.message_id
-
-async def send_hub_document_persistent(bot, chat_id: int, document: InputFile, caption: str, parse_mode: str = "HTML") -> int:
-    """
-    🔥 НОВАЯ ФУНКЦИЯ: Отправляет документ и ДОБАВЛЯЕТ его ID в кэш (не удаляя предыдущие).
-    Используется для отправки нескольких файлов подряд (.vpn + .conf).
-    Все файлы будут удалены при следующем вызове render_hub.
-    """
-    msg = await bot.send_document(
-        chat_id=chat_id, document=document, caption=caption,
-        parse_mode=parse_mode
-    )
-    # 🔥 Добавляем ID в список (не заменяем)
-    cached = _hub_cache.get(chat_id, [])
-    cached.append(msg.message_id)
-    _hub_cache[chat_id] = cached
+    _hub_cache[chat_id] = {"ids": [msg.message_id]}
     return msg.message_id
 
 async def send_hub_invoice(bot, chat_id: int, reply_markup: Optional[InlineKeyboardMarkup] = None, **kwargs) -> int:
-    """
-    Отправляет инвойс и удаляет ВСЕ предыдущие сообщения из кэша.
-    """
+    """Отправляет инвойс, удаляя предыдущий хаб"""
     cached = _hub_cache.get(chat_id)
-    if cached:
-        for msg_id in cached:
-            asyncio.create_task(_safe_delete(bot, chat_id, msg_id))
+    if cached and "ids" in cached:
+        asyncio.create_task(_safe_delete_batch(bot, chat_id, cached["ids"]))
     
     if reply_markup:
         kwargs["reply_markup"] = reply_markup
     msg = await bot.send_invoice(chat_id=chat_id, **kwargs)
-    _hub_cache[chat_id] = [msg.message_id]
+    _hub_cache[chat_id] = {"ids": [msg.message_id]}
+    return msg.message_id
+
+async def append_hub_document(bot, chat_id: int, document: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
+    """
+    🔥 НОВАЯ ФУНКЦИЯ: Отправляет документ и ДОБАВЛЯЕТ его в текущий хаб.
+    Используется для отправки нескольких файлов подряд.
+    """
+    msg = await bot.send_document(
+        chat_id=chat_id, document=document, caption=caption,
+        reply_markup=reply_markup, parse_mode=parse_mode
+    )
+    
+    cached = _hub_cache.get(chat_id)
+    if cached and "ids" in cached:
+        cached["ids"].append(msg.message_id)
+    else:
+        _hub_cache[chat_id] = {"ids": [msg.message_id]}
+    
+    return msg.message_id
+
+async def append_hub_message(bot, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
+    """
+    🔥 НОВАЯ ФУНКЦИЯ: Отправляет текстовое сообщение и ДОБАВЛЯЕТ его в текущий хаб.
+    """
+    msg = await bot.send_message(
+        chat_id=chat_id, text=text,
+        reply_markup=reply_markup, parse_mode=parse_mode
+    )
+    
+    cached = _hub_cache.get(chat_id)
+    if cached and "ids" in cached:
+        cached["ids"].append(msg.message_id)
+    else:
+        _hub_cache[chat_id] = {"ids": [msg.message_id]}
+    
     return msg.message_id
 
 def clear_hub_cache(chat_id: int) -> None:
-    """Очищает кэш хаба для конкретного чата (вызывать при ручном удалении)"""
+    """Очищает кэш хаба для конкретного чата (без удаления сообщений)"""
     _hub_cache.pop(chat_id, None)
 
 async def safe_edit_text(message, text: str, **kwargs) -> bool:

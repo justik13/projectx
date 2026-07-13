@@ -17,7 +17,7 @@ from database.repositories.tariffs_repo import get_tariff_by_id
 from services.device_service import DeviceService
 from services.subscription import SubscriptionService
 from utils.formatters import format_datetime, format_traffic
-from utils.telegram import safe, render_hub, send_hub_document
+from utils.telegram import safe, render_hub, clear_and_delete_hub, append_hub_document, append_hub_message
 from utils.vpn_parser import build_vpn_file, build_conf_file, is_valid_vpn_uri
 
 router = Router()
@@ -165,9 +165,8 @@ async def download_conf(
     session: AsyncSession, db_user: User | None = None
 ):
     """
-    🔥 ИСПРАВЛЕНО: Отдача ДВУХ файлов (.vpn и .conf) отдельными сообщениями +
-    текстовый хаб с инструкцией и кнопкой Назад (сохраняет SMH).
-    Также исправлен TypeError: send_hub_document() missing reply_markup.
+    🔥 ИСПРАВЛЕНО: Отдача ДВУХ файлов (.vpn и .conf) + текстовый хаб с инструкцией.
+    Все три сообщения регистрируются в _hub_cache и удаляются вместе при нажатии "Назад".
     """
     await callback.answer("⏳ Генерирую файлы...")
     await state.clear()
@@ -197,28 +196,30 @@ async def download_conf(
     vpn_file = BufferedInputFile(vpn_content.encode("utf-8"), filename=f"{safe_device_name}.vpn")
     conf_file = BufferedInputFile(conf_content.encode("utf-8"), filename=f"{safe_device_name}.conf")
 
-    # 1. Отправляем .vpn через SMH (удаляет старый текстовый хаб)
-    await send_hub_document(
+    # 🔥 ИСПРАВЛЕНО: Удаляем старый хаб (управление устройством)
+    await clear_and_delete_hub(callback.bot, callback.message.chat.id)
+
+    # 1. Отправляем .vpn (создает новый кэш)
+    await append_hub_document(
         callback.bot, callback.message.chat.id,
         document=vpn_file,
         caption=f"📁 <b>Основной клиент Amnezia</b>\n"
                 f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
                 f"<i>Для универсального приложения</i>",
-        parse_mode="HTML",
-        reply_markup=None  # <-- ИСПРАВЛЕНО: передаем None, так как это документ
+        parse_mode="HTML"
     )
-    
-    # 2. Отправляем .conf отдельным сообщением
-    await callback.bot.send_document(
-        chat_id=callback.message.chat.id,
+
+    # 2. Отправляем .conf (добавляет в кэш)
+    await append_hub_document(
+        callback.bot, callback.message.chat.id,
         document=conf_file,
         caption=f"📁 <b>AmneziaWG</b>\n"
                 f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
                 f"<i>Для отдельного легковесного приложения</i>",
         parse_mode="HTML"
     )
-    
-    # 3. Отправляем текстовый хаб с инструкцией (станет новым SMH)
+
+    # 3. Отправляем текстовый хаб с инструкцией (добавляет в кэш)
     instruction_text = (
         "✅ <b>Файлы конфигурации отправлены!</b>\n"
         "📥 <b>Как подключить:</b>\n"
@@ -226,10 +227,11 @@ async def download_conf(
         "2️⃣ <b>.conf</b> — импортируйте в <b>AmneziaWG</b>.\n"
         "<i>💡 Нажмите на файл выше, чтобы открыть его в нужном приложении.</i>"
     )
-    await render_hub(
+    await append_hub_message(
         callback.bot, callback.message.chat.id,
-        instruction_text,
-        get_back_button(f"manage_device:{profile.id}")
+        text=instruction_text,
+        reply_markup=get_back_button(f"manage_device:{profile.id}"),
+        parse_mode="HTML"
     )
 
 @router.callback_query(F.data.startswith("rename_device:"))
