@@ -80,11 +80,23 @@ def get_change_tariff_keyboard(
     return builder.as_markup()
 
 
-def get_payment_method_keyboard(tariff_id: int) -> InlineKeyboardMarkup:
+def get_payment_method_keyboard(tariff_id: int, device_limit: int | None = None) -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора способа оплаты.
+    ✅ ИСПРАВЛЕНО: Кнопка "Назад" ведёт на экран выбора длительности (select_tariff_type),
+    а не на сам экран Checkout.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text="⭐ Telegram Stars", callback_data=f"pay_stars:{tariff_id}")
     builder.button(text="🏦 СБП / Карта", callback_data=f"pay_sbp:{tariff_id}")
-    builder.button(text="← Назад", callback_data=f"select_tariff:{tariff_id}")
+    
+    # ✅ Кнопка "Назад" ведёт к выбору длительности для этого типа тарифа
+    if device_limit is not None:
+        builder.button(text="← Назад", callback_data=f"select_tariff_type:{device_limit}")
+    else:
+        # Fallback для уведомлений (когда device_limit неизвестен)
+        builder.button(text="← В главное меню", callback_data="back_to_main_menu")
+    
     builder.adjust(1)
     return builder.as_markup()
 

@@ -154,11 +154,15 @@ async def select_tariff(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
 ):
-    await callback.answer()
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
-    if not tariff or not tariff.is_active: return
+    if not tariff or not tariff.is_active:
+        await callback.answer(texts.ERROR_TARIFF_UNAVAILABLE, show_alert=True)
+        return
+    
     device_limit = getattr(tariff, 'device_limit', 2)
+    
+    # Блокировка даунгрейда во время активной подписки
     if db_user and await _is_subscription_active(db_user):
         current_limit = db_user.device_limit
         if device_limit < current_limit:
@@ -167,8 +171,14 @@ async def select_tariff(
                 new_limit=device_limit,
                 valid_until=format_datetime(db_user.subscription_end),
             )
-            await render_hub(callback.bot, callback.message.chat.id, text, get_back_button("payment_change_tariff"))
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_back_button("payment_change_tariff"),
+                parse_mode="HTML",
+            )
+            await callback.answer()
             return
+    
     tariff_name = _get_tariff_display_name(device_limit)
     text = texts.PAYMENT_CHECKOUT_TEXT.format(
         tariff_name=tariff_name,
@@ -176,8 +186,14 @@ async def select_tariff(
         price_rub=tariff.price_rub,
         price_stars=tariff.price_stars,
     )
-    await render_hub(callback.bot, callback.message.chat.id, text, get_payment_method_keyboard(tariff.id))
-
+    
+    # ✅ ИСПРАВЛЕНО: Передаём device_limit для корректной кнопки "Назад"
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_payment_method_keyboard(tariff.id, device_limit),
+        parse_mode="HTML",
+    )
+    await callback.answer()
 
 # ============================================================
 # Оплата Stars — с кнопкой отмены

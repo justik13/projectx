@@ -64,7 +64,9 @@ async def subscription_notifications_loop(bot: Bot):
                     if msg:
                         tariff_id = user.current_tariff_id
                         try:
-                            kb = get_payment_method_keyboard(tariff_id) if tariff_id else None
+                            tariff = await get_tariff_by_id(session, user.current_tariff_id) if user.current_tariff_id else None
+                            device_limit = getattr(tariff, 'device_limit', 2) if tariff else None
+                            kb = get_payment_method_keyboard(tariff_id, device_limit) if tariff_id else None
                             await bot.send_message(user.telegram_id, msg, reply_markup=kb, parse_mode="HTML")
                             await session.commit()
                         except TelegramForbiddenError:
