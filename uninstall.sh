@@ -1,17 +1,26 @@
 #!/bin/bash
+# ═══════════════════════════════════════════════════════════════
+# 🗑️  ProjectX Bot — Safe Uninstaller (v2.0)
+# ═══════════════════════════════════════════════════════════════
+# 🔥 ИСПРАВЛЕНО #10: Добавлен set -euo pipefail
+set -euo pipefail
+IFS=$'\n\t'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' 
+NC='\033[0m'
 
-log() { echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"; }
-success() { echo -e "${GREEN}[✓]${NC} $1"; }
-warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
-
+# 🔥 ИСПРАВЛЕНО #15: Логирование в файл
+UNINSTALL_LOG="/var/log/projectx-uninstall.log"
 TEMP_FILES=()
+
+log() { echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "$UNINSTALL_LOG"; }
+success() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$UNINSTALL_LOG"; }
+warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$UNINSTALL_LOG"; }
+error() { echo -e "${RED}[✗]${NC} $1" | tee -a "$UNINSTALL_LOG"; exit 1; }
+
 cleanup() {
     for f in "${TEMP_FILES[@]}"; do
         rm -f "$f" 2>/dev/null
@@ -22,6 +31,9 @@ trap cleanup EXIT INT TERM
 if [[ $EUID -ne 0 ]]; then
     error "Скрипт деинсталляции должен быть запущен с правами root (sudo)."
 fi
+
+mkdir -p /var/log
+echo "=== Uninstall started: $(date) ===" > "$UNINSTALL_LOG"
 
 log "Остановка и отключение фонового сервиса projectx-bot..."
 if systemctl is-active --quiet projectx-bot; then
@@ -34,97 +46,105 @@ fi
 
 log "Сканирование рабочей директории проекта..."
 PROJECT_DIR=$(systemctl show -p WorkingDirectory projectx-bot 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]')
+
 if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "[not set]" ]]; then
     PROJECT_DIR="/opt/projectx-bot"
     warn "Не удалось получить путь из systemd, используется директория по умолчанию: $PROJECT_DIR"
 fi
 
-if [[ "$PROJECT_DIR" == "/" || "$PROJECT_DIR" == "/opt" || "$PROJECT_DIR" == "/usr" || "$PROJECT_DIR" == "/root" || "$PROJECT_DIR" == "/home" || "$PROJECT_DIR" == "/etc" ]]; then
+# 🔥 ИСПРАВЛЕНО #1: Усиленная проверка безопасности пути
+if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "/" || "$PROJECT_DIR" == "/opt" || "$PROJECT_DIR" == "/usr" || "$PROJECT_DIR" == "/root" || "$PROJECT_DIR" == "/home" || "$PROJECT_DIR" == "/etc" || "$PROJECT_DIR" == "/var" || "$PROJECT_DIR" == "/tmp" ]]; then
     error "Обнаружен небезопасный путь для удаления: '$PROJECT_DIR'. Прерывание."
+fi
+
+# Дополнительная проверка: путь должен содержать "projectx"
+if [[ ! "$PROJECT_DIR" =~ projectx ]]; then
+    error "Путь '$PROJECT_DIR' не содержит 'projectx'. Прерывание из соображений безопасности."
 fi
 
 success "Целевая директория для удаления: $PROJECT_DIR"
 
 echo ""
-echo -e "${YELLOW}========================================================${NC}"
+echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${YELLOW}     🗑  ProjectX Bot — Панель Деинсталляции${NC}"
-echo -e "${YELLOW}========================================================${NC}"
+echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "1) ${RED}Полное очищение${NC} (удалить ВСЁ: код, БД, ключи .env, бэкапы, юзера)"
 echo -e "2) ${GREEN}Удаление с сохранением данных${NC} (БД и .env будут упакованы в архив)"
 echo -e "3) Отмена операции (выход без изменений)"
-echo -e "${YELLOW}========================================================${NC}"
+echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
 read -p "Выберите вариант [1-3]: " choice
 
 case $choice in
-1)
-    echo ""
-    read -p "⚠️ ${RED}ВНИМАНИЕ!${NC} Это действие сотрет все подписки и базы данных безвозвратно. Вы уверены? (yes/no): " confirm
-    if [[ "$confirm" != "yes" ]]; then
-        success "Деинсталляция отменена пользователем"
-        exit 0
-    fi
-    log "Выполняется тотальное удаление данных..."
-    
-    if [[ -d "$PROJECT_DIR" ]]; then
+    1)
+        echo ""
+        # 🔥 ИСПРАВЛЕНО #2: Регистронезависимое подтверждение
+        read -p "⚠️ ${RED}ВНИМАНИЕ!${NC} Это действие сотрет все подписки и базы данных безвозвратно. Вы уверены? (yes/no): " confirm
+        confirm_lower=$(echo "$confirm" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        if [[ "$confirm_lower" != "yes" ]]; then
+            success "Деинсталляция отменена пользователем"
+            exit 0
+        fi
+        
+        log "Выполняется тотальное удаление данных..."
+        if [[ -d "$PROJECT_DIR" ]]; then
+            rm -rf "$PROJECT_DIR"
+            success "Директория проекта полностью удалена: $PROJECT_DIR"
+        else
+            warn "Директория проекта не найдена по указанному пути"
+        fi
+        
+        BACKUP_DIR="/root/backups/projectx"
+        if [[ -d "$BACKUP_DIR" ]]; then
+            rm -rf "$BACKUP_DIR"
+            success "Директория системных бэкапов удалена: $BACKUP_DIR"
+        else
+            warn "Директория бэкапов отсутствовала на сервере"
+        fi
+        ;;
+        
+    2)
+        log "Выполняется резервное архивирование перед деструктивными действиями..."
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        SAFE_BACKUP_DIR="/root/projectx-backup-$TIMESTAMP"
+        mkdir -p "$SAFE_BACKUP_DIR"
+        success "Создана папка безопасного сохранения: $SAFE_BACKUP_DIR"
+        
+        DB_FILE="$PROJECT_DIR/bot_data.db"
+        if [[ -f "$DB_FILE" ]]; then
+            sqlite3 "$DB_FILE" ".backup '$SAFE_BACKUP_DIR/bot_data.db'"
+            success "Зарезервирована консистентная копия БД (через sqlite3 .backup)"
+        else
+            warn "Файл БД не найден, копирование пропущено"
+        fi
+        
+        ENV_FILE="$PROJECT_DIR/.env"
+        if [[ -f "$ENV_FILE" ]]; then
+            cp "$ENV_FILE" "$SAFE_BACKUP_DIR/"
+            success "Зарезервирован файл конфигурации: .env"
+        else
+            warn "Файл конфигурации .env отсутствовал"
+        fi
+        
+        SOURCE_BACKUP="/root/backups/projectx"
+        if [[ -d "$SOURCE_BACKUP" ]]; then
+            # 🔥 ИСПРАВЛЕНО #11: cp -aP вместо cp -r (не следует symlink'ам)
+            cp -aP "$SOURCE_BACKUP"/* "$SAFE_BACKUP_DIR/" 2>/dev/null || true
+            success "Все накопленные бэкапы перенесены в безопасную зону"
+        fi
+        
         rm -rf "$PROJECT_DIR"
-        success "Директория проекта полностью удалена: $PROJECT_DIR"
-    else
-        warn "Директория проекта не найдена по указанному пути"
-    fi
-    
-    BACKUP_DIR="/root/backups/projectx"
-    if [[ -d "$BACKUP_DIR" ]]; then
-        rm -rf "$BACKUP_DIR"
-        success "Директория системных бэкапов удалена: $BACKUP_DIR"
-    else
-        warn "Директория бэкапов отсутствовала на сервере"
-    fi
-    ;;
-    
-2)
-    log "Выполняется резервное архивирование перед деструктивными действиями..."
-    
-    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-    SAFE_BACKUP_DIR="/root/projectx-backup-$TIMESTAMP"
-    mkdir -p "$SAFE_BACKUP_DIR"
-    success "Создана папка безопасного сохранения: $SAFE_BACKUP_DIR"
-    
-    DB_FILE="$PROJECT_DIR/bot_data.db"
-    if [[ -f "$DB_FILE" ]]; then
-        sqlite3 "$DB_FILE" ".backup '$SAFE_BACKUP_DIR/bot_data.db'"
-        success "Зарезервирована консистентная копия БД (через sqlite3 .backup)"
-    else
-        warn "Файл БД не найден, копирование пропущено"
-    fi
-    
-    ENV_FILE="$PROJECT_DIR/.env"
-    if [[ -f "$ENV_FILE" ]]; then
-        cp "$ENV_FILE" "$SAFE_BACKUP_DIR/"
-        success "Зарезервирован файл конфигурации: .env"
-    else
-        warn "Файл конфигурации .env отсутствовал"
-    fi
-    
-    SOURCE_BACKUP="/root/backups/projectx"
-    if [[ -d "$SOURCE_BACKUP" ]]; then
-        cp -r "$SOURCE_BACKUP"/* "$SAFE_BACKUP_DIR/" 2>/dev/null || true
-        success "Все накопленные бэкапы перенесены в безопасную зону"
-    fi
-    
-    rm -rf "$PROJECT_DIR"
-    success "Рабочая директория $PROJECT_DIR очищена. Данные сохранены в $SAFE_BACKUP_DIR"
-    ;;
-    
-3)
-    success "Процесс отменен. Никаких изменений не внесено."
-    exit 0
-    ;;
-    
-*)
-    error "Выбран некорректный пункт меню. Выход."
-    ;;
+        success "Рабочая директория $PROJECT_DIR очищена. Данные сохранены в $SAFE_BACKUP_DIR"
+        ;;
+        
+    3)
+        success "Процесс отменен. Никаких изменений не внесено."
+        exit 0
+        ;;
+        
+    *)
+        error "Выбран некорректный пункт меню. Выход."
+        ;;
 esac
-
 
 log "Очистка зависимостей операционной системы..."
 
@@ -140,7 +160,6 @@ success "Конфигурация Systemd успешно обновлена"
 if crontab -l >/dev/null 2>&1; then
     CRONTAB_TMP=$(mktemp)
     TEMP_FILES+=("$CRONTAB_TMP")
-    
     crontab -l | grep -v "projectx-" > "$CRONTAB_TMP" || true
     if [ -s "$CRONTAB_TMP" ]; then
         crontab "$CRONTAB_TMP"
@@ -185,3 +204,5 @@ if [[ "$choice" == "2" ]]; then
     echo -e "${BLUE}   $SAFE_BACKUP_DIR${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
 fi
+
+success "Лог деинсталляции сохранён: $UNINSTALL_LOG"
