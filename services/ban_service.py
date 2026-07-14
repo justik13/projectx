@@ -21,6 +21,7 @@ class BanService:
 
         new_status = not user.is_banned
         await update_user(session, user, is_banned=new_status)
+
         await AuditService.log_action(
             session, admin_id, "BAN" if new_status else "UNBAN", "User", telegram_id
         )
@@ -33,6 +34,7 @@ class BanService:
         profiles = await get_user_profiles(session, user.id)
         server_ids = {p.server_id for p in profiles}
         servers_map = {}
+
         if server_ids:
             stmt = select(Server).where(Server.id.in_(server_ids))
             res = await session.execute(stmt)
@@ -40,6 +42,7 @@ class BanService:
 
         tasks_info = []
         profile_ids_to_update = []
+
         for profile in profiles:
             server = servers_map.get(profile.server_id)
             if server and server.is_active:
@@ -72,7 +75,8 @@ class BanService:
                 .where(VPNProfile.id.in_(profile_ids_to_update))
                 .values(is_active=target_db_status)
             )
-            await session.commit()
+            # 🔥 ИСПРАВЛЕНО #8: flush() вместо commit() для работы внутри DBSessionMiddleware
+            await session.flush()
 
         action = "забанен" if new_status else "разбанен"
         return True, action

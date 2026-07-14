@@ -48,6 +48,7 @@ async def _build_servers_list_text_and_kb(
         f"(стр. {page}/{total_pages}) · Всего: {total}\n"
     )
     builder = InlineKeyboardBuilder()
+
     if not servers:
         rendered += "<i>Серверов пока нет</i>\n"
     else:
@@ -58,13 +59,16 @@ async def _build_servers_list_text_and_kb(
                 text=f"{status} {flag} {safe(server.name)} · {server.protocol}",
                 callback_data=f"admin_server_card:{server.id}",
             )
+
     if page > 1:
         builder.button(text="⬅️", callback_data=f"admin_servers_page:{page - 1}")
     if page < total_pages:
         builder.button(text="➡️", callback_data=f"admin_servers_page:{page + 1}")
+
     builder.button(text="➕ Добавить сервер", callback_data="admin_server_add")
     builder.button(text="← В админку", callback_data="admin_menu")
     builder.adjust(1)
+
     return rendered, builder
 
 
@@ -83,6 +87,7 @@ async def _bulk_update_peer_status(
 ) -> bool:
     if not profiles_data:
         return True
+
     client = AmneziaClient(api_url, api_key)
     sem = asyncio.Semaphore(20)
 
@@ -90,11 +95,21 @@ async def _bulk_update_peer_status(
         async with sem:
             return await client.update_client(client_id=peer_id, status=status)
 
-    results = await asyncio.gather(
-        *[_limited(pid) for _, pid in profiles_data],
-        return_exceptions=True,
-    )
-    return not any(isinstance(r, Exception) or r is False for r in results)
+    # 🔥 ИСПРАВЛЕНО #17: Добавлен общий timeout для операции (5 минут)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                *[_limited(pid) for _, pid in profiles_data],
+                return_exceptions=True,
+            ),
+            timeout=300.0  # 5 минут
+        )
+        return not any(isinstance(r, Exception) or r is False for r in results)
+    except asyncio.TimeoutError:
+        logger.error(
+            f"_bulk_update_peer_status: timeout after 300s for {len(profiles_data)} peers"
+        )
+        return False
 
 
 async def _bulk_delete_peers_from_api(
@@ -102,6 +117,7 @@ async def _bulk_delete_peers_from_api(
 ) -> tuple[int, int]:
     if not profiles_data:
         return 0, 0
+
     client = AmneziaClient(api_url, api_key)
     sem = asyncio.Semaphore(20)
     success = 0
@@ -116,10 +132,20 @@ async def _bulk_delete_peers_from_api(
             else:
                 fail += 1
 
-    await asyncio.gather(
-        *[_delete_limited(pid) for _, pid in profiles_data],
-        return_exceptions=True,
-    )
+    # 🔥 ИСПРАВЛЕНО #17: Добавлен общий timeout для операции (5 минут)
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                *[_delete_limited(pid) for _, pid in profiles_data],
+                return_exceptions=True,
+            ),
+            timeout=300.0  # 5 минут
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            f"_bulk_delete_peers_from_api: timeout after 300s for {len(profiles_data)} peers"
+        )
+
     return success, fail
 
 
@@ -164,6 +190,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     if not message.text:
         await render_hub(
             message.bot, message.chat.id,
@@ -171,6 +198,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             get_back_button("admin_servers")
         )
         return
+
     if message.text.startswith("/"):
         await state.clear()
         await render_hub(
@@ -260,8 +288,8 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             )
             return
         await state.update_data(api_key=api_key)
-
         all_data = await state.get_data()
+
         check_msg = await render_hub(
             message.bot, message.chat.id,
             texts.ADMIN_SERVER_CHECKING,
@@ -270,7 +298,6 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
         )
 
         client = AmneziaClient(all_data["api_url"], all_data["api_key"])
-
         if not await client.healthcheck():
             await render_hub(
                 message.bot, message.chat.id,
@@ -330,9 +357,11 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             protocol="amneziawg2",
             max_clients=api_max_peers,
         )
+
         await AuditService.log_action(
             session, message.from_user.id, "ADD_SERVER", "Server", server.id, api_server_name,
         )
+
         await render_hub(
             message.bot, message.chat.id,
             texts.ADMIN_SERVER_ADDED.format(
@@ -345,6 +374,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             get_back_button("admin_servers"),
             parse_mode="HTML"
         )
+
         logger.info(f"Admin {message.from_user.id} added server: {server.id}")
         await state.clear()
 
@@ -386,16 +416,19 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext, session: Asy
         return
     await state.clear()
     await callback.answer("⏳ Выполняется...")
+
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         return
+
     new_status = not server.is_active
     result = await session.execute(
         select(VPNProfile.id, VPNProfile.peer_id).where(VPNProfile.server_id == server.id),
     )
     profiles_data = result.all()
+
     if profiles_data:
         target_api_status = "active" if new_status else "disabled"
         ok = await _bulk_update_peer_status(
@@ -404,22 +437,27 @@ async def toggle_server(callback: CallbackQuery, state: FSMContext, session: Asy
         if not ok:
             await callback.answer(texts.ADMIN_TOGGLE_NETWORK_FAIL, show_alert=True)
             return
+
         profile_ids = [pid for pid, _ in profiles_data]
         await session.execute(
             update(VPNProfile)
             .where(VPNProfile.id.in_(profile_ids))
             .values(is_active=new_status),
         )
+
     await update_server(session, server, is_active=new_status)
+
     await AuditService.log_action(
         session, callback.from_user.id, "TOGGLE_SERVER", "Server", server_id,
         "enabled" if new_status else "disabled",
     )
     await session.commit()
+
     await callback.answer(
         f"✅ Сервер {'включен' if new_status else 'выключен'}", show_alert=True,
     )
     logger.info(f"Admin {callback.from_user.id} toggled server {server_id} to {new_status}")
+
     refreshed = await get_server_by_id(session, server_id)
     await _show_server_card(callback, session, refreshed)
 
@@ -430,18 +468,23 @@ async def request_delete_server(callback: CallbackQuery, state: FSMContext, sess
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         return
+
     result = await session.execute(
         select(VPNProfile.id).where(VPNProfile.server_id == server.id),
     )
     profiles_count = len(result.all())
+
     flag = server.country_flag or "🌍"
+
     await state.update_data(delete_server_id=server_id)
     await state.set_state(AdminStates.confirming_server_delete)
+
     await callback.message.edit_text(
         texts.ADMIN_SERVER_DELETE_CONFIRM.format(
             flag=flag, name=safe(server.name), profiles_count=profiles_count,
@@ -457,24 +500,29 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     current_state = await state.get_state()
     if current_state != AdminStates.confirming_server_delete:
         await callback.answer("⚠️ Сессия подтверждения истекла", show_alert=True)
         return
+
     await state.clear()
     await callback.answer("⏳ Удаляю сервер и все устройства...", show_alert=False)
+
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         await _show_servers_list(callback, session, page=1)
         return
+
     server_name = server.name
     result = await session.execute(
         select(VPNProfile.id, VPNProfile.peer_id).where(VPNProfile.server_id == server.id),
     )
     profiles_data = result.all()
     profiles_count = len(profiles_data)
+
     if profiles_data:
         api_success, api_fail = await _bulk_delete_peers_from_api(
             profiles_data, server.api_url, server.api_key,
@@ -484,12 +532,15 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
                 f"Server {server_id}: {api_fail}/{profiles_count} peers "
                 f"failed to delete from API"
             )
+
     deleted_profiles = await delete_profiles_by_server_id(session, server_id)
     await delete_server(session, server)
+
     await AuditService.log_action(
         session, callback.from_user.id, "DELETE_SERVER", "Server", server_id,
         f"{server_name}: {deleted_profiles} profiles deleted",
     )
+
     await callback.answer(
         f"✅ Сервер {server_name} удалён ({deleted_profiles} устр.)",
         show_alert=True,
@@ -498,6 +549,7 @@ async def confirm_delete_server(callback: CallbackQuery, state: FSMContext, sess
         f"Admin {callback.from_user.id} fully deleted server {server_id} "
         f"({server_name}) with {deleted_profiles} profiles"
     )
+
     await _show_servers_list(callback, session, page=1)
 
 
@@ -529,6 +581,7 @@ async def start_edit_server_flag(callback: CallbackQuery, state: FSMContext, ses
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         return
+
     current_flag = server.country_flag or "🌍"
     await state.update_data(server_id=server_id, edit_field="flag")
     await state.set_state(AdminStates.editing_server_flag)
@@ -543,6 +596,7 @@ async def process_edit_server_flag(message: Message, state: FSMContext, session:
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     if not message.text:
         await render_hub(
             message.bot, message.chat.id,
@@ -550,6 +604,7 @@ async def process_edit_server_flag(message: Message, state: FSMContext, session:
             get_back_button("admin_servers")
         )
         return
+
     if message.text.startswith("/"):
         await state.clear()
         await render_hub(
@@ -558,6 +613,7 @@ async def process_edit_server_flag(message: Message, state: FSMContext, session:
             get_back_button("admin_servers")
         )
         return
+
     data = await state.get_data()
     server_id = data["server_id"]
     server = await get_server_by_id(session, server_id)
@@ -569,6 +625,7 @@ async def process_edit_server_flag(message: Message, state: FSMContext, session:
         )
         await state.clear()
         return
+
     new_flag = message.text.strip()
     if len(new_flag) > 10:
         await render_hub(
@@ -577,6 +634,7 @@ async def process_edit_server_flag(message: Message, state: FSMContext, session:
             get_back_button("admin_servers")
         )
         return
+
     await update_server(session, server, country_flag=new_flag)
     await render_hub(
         message.bot, message.chat.id,
@@ -592,6 +650,7 @@ async def process_edit_server_name(message: Message, state: FSMContext, session:
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     if not message.text:
         await render_hub(
             message.bot, message.chat.id,
@@ -599,6 +658,7 @@ async def process_edit_server_name(message: Message, state: FSMContext, session:
             get_back_button("admin_servers")
         )
         return
+
     if message.text.startswith("/"):
         await state.clear()
         await render_hub(
@@ -607,6 +667,7 @@ async def process_edit_server_name(message: Message, state: FSMContext, session:
             get_back_button("admin_servers")
         )
         return
+
     data = await state.get_data()
     server_id = data["server_id"]
     server = await get_server_by_id(session, server_id)
@@ -618,6 +679,7 @@ async def process_edit_server_name(message: Message, state: FSMContext, session:
         )
         await state.clear()
         return
+
     new_name = message.text.strip()
     if len(new_name) > 255:
         await render_hub(
@@ -626,6 +688,7 @@ async def process_edit_server_name(message: Message, state: FSMContext, session:
             get_back_button("admin_servers")
         )
         return
+
     await update_server(session, server, name=new_name)
     await render_hub(
         message.bot, message.chat.id,

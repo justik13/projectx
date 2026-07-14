@@ -9,7 +9,7 @@ from bot.constants import HUB_CACHE_MAX_SIZE, HUB_CACHE_TTL
 
 logger = logging.getLogger(__name__)
 
-# 🔥 ИСПРАВЛЕНО: 
+# 🔥 ИСПРАВЛЕНО:
 # - maxsize уменьшен с 50000 до 10000 (достаточно для 1000 пользователей * 10 чатов)
 # - TTL уменьшен с 86400 (24ч) до 43200 (12ч) для более быстрой очистки
 # - Добавлена периодическая очистка при достижении 80% лимита
@@ -19,7 +19,7 @@ _CLEANUP_INTERVAL = 3600.0  # Очищать раз в час
 
 
 async def _safe_delete_batch(bot, chat_id: int, msg_ids: List[int]):
-    """Безопасное удаление списка сообщений в фоне"""
+    """Безопасное удаление списка сообщений"""
     for msg_id in msg_ids:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -39,13 +39,11 @@ def _maybe_cleanup_cache() -> None:
     Предотвращает утечку памяти при длительной работе бота.
     """
     global _last_cleanup_time
-    
     now = asyncio.get_event_loop().time()
     if now - _last_cleanup_time < _CLEANUP_INTERVAL:
         return
-    
+
     _last_cleanup_time = now
-    
     if len(_hub_cache) >= HUB_CACHE_MAX_SIZE * 0.8:
         # TTLCache автоматически удаляет expired записи при доступе
         # Но мы можем форсировать очистку, обратившись к каждому ключу
@@ -55,20 +53,19 @@ def _maybe_cleanup_cache() -> None:
                 _ = _hub_cache[key]  # Это триггерит cleanup expired
             except KeyError:
                 expired_keys.append(key)
-        
+
         for key in expired_keys:
             try:
                 del _hub_cache[key]
             except KeyError:
                 pass
-        
+
         logger.info(f"Hub cache cleanup: {len(expired_keys)} expired entries removed")
 
 
 async def clear_and_delete_hub(bot, chat_id: int):
     """Удаляет все сообщения из кэша хаба и очищает кэш"""
     _maybe_cleanup_cache()
-    
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
         await _safe_delete_batch(bot, chat_id, cached["ids"])
@@ -78,13 +75,15 @@ async def clear_and_delete_hub(bot, chat_id: int):
 async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup, parse_mode: str = "HTML") -> int:
     """
     Очищает весь текущий хаб (все сообщения в кэше) и отправляет новое текстовое сообщение.
+    
+    🔥 ИСПРАВЛЕНО #12: Ждём удаления старых сообщений перед отправкой новых (UX improvement)
     """
     _maybe_cleanup_cache()
-    
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
-        asyncio.create_task(_safe_delete_batch(bot, chat_id, cached["ids"]))
-    
+        # 🔥 ИСПРАВЛЕНО #12: Ждём удаления вместо fire-and-forget
+        await _safe_delete_batch(bot, chat_id, cached["ids"])
+
     msg = await bot.send_message(
         chat_id=chat_id, text=text,
         reply_markup=reply_markup, parse_mode=parse_mode
@@ -94,13 +93,16 @@ async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardM
 
 
 async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
-    """Отправляет фото, удаляя предыдущий хаб"""
-    _maybe_cleanup_cache()
+    """Отправляет фото, удаляя предыдущий хаб
     
+    🔥 ИСПРАВЛЕНО #12: Ждём удаления старых сообщений перед отправкой новых
+    """
+    _maybe_cleanup_cache()
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
-        asyncio.create_task(_safe_delete_batch(bot, chat_id, cached["ids"]))
-    
+        # 🔥 ИСПРАВЛЕНО #12: Ждём удаления вместо fire-and-forget
+        await _safe_delete_batch(bot, chat_id, cached["ids"])
+
     msg = await bot.send_photo(
         chat_id=chat_id, photo=photo, caption=caption,
         reply_markup=reply_markup, parse_mode=parse_mode
@@ -110,13 +112,16 @@ async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, repl
 
 
 async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
-    """Отправляет документ, удаляя предыдущий хаб"""
-    _maybe_cleanup_cache()
+    """Отправляет документ, удаляя предыдущий хаб
     
+    🔥 ИСПРАВЛЕНО #12: Ждём удаления старых сообщений перед отправкой новых
+    """
+    _maybe_cleanup_cache()
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
-        asyncio.create_task(_safe_delete_batch(bot, chat_id, cached["ids"]))
-    
+        # 🔥 ИСПРАВЛЕНО #12: Ждём удаления вместо fire-and-forget
+        await _safe_delete_batch(bot, chat_id, cached["ids"])
+
     msg = await bot.send_document(
         chat_id=chat_id, document=document, caption=caption,
         reply_markup=reply_markup, parse_mode=parse_mode
@@ -126,16 +131,18 @@ async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str
 
 
 async def send_hub_invoice(bot, chat_id: int, reply_markup: Optional[InlineKeyboardMarkup] = None, **kwargs) -> int:
-    """Отправляет инвойс, удаляя предыдущий хаб"""
-    _maybe_cleanup_cache()
+    """Отправляет инвойс, удаляя предыдущий хаб
     
+    🔥 ИСПРАВЛЕНО #12: Ждём удаления старых сообщений перед отправкой новых
+    """
+    _maybe_cleanup_cache()
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
-        asyncio.create_task(_safe_delete_batch(bot, chat_id, cached["ids"]))
-    
+        # 🔥 ИСПРАВЛЕНО #12: Ждём удаления вместо fire-and-forget
+        await _safe_delete_batch(bot, chat_id, cached["ids"])
+
     if reply_markup:
         kwargs["reply_markup"] = reply_markup
-    
     msg = await bot.send_invoice(chat_id=chat_id, **kwargs)
     _hub_cache[chat_id] = {"ids": [msg.message_id]}
     return msg.message_id
@@ -147,18 +154,17 @@ async def append_hub_document(bot, chat_id: int, document: InputFile, caption: s
     Используется для отправки нескольких файлов подряд.
     """
     _maybe_cleanup_cache()
-    
     msg = await bot.send_document(
         chat_id=chat_id, document=document, caption=caption,
         reply_markup=reply_markup, parse_mode=parse_mode
     )
-    
+
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
         cached["ids"].append(msg.message_id)
     else:
         _hub_cache[chat_id] = {"ids": [msg.message_id]}
-    
+
     return msg.message_id
 
 
@@ -167,18 +173,17 @@ async def append_hub_message(bot, chat_id: int, text: str, reply_markup: InlineK
     🔥 НОВАЯ ФУНКЦИЯ: Отправляет текстовое сообщение и ДОБАВЛЯЕТ его в текущий хаб.
     """
     _maybe_cleanup_cache()
-    
     msg = await bot.send_message(
         chat_id=chat_id, text=text,
         reply_markup=reply_markup, parse_mode=parse_mode
     )
-    
+
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
         cached["ids"].append(msg.message_id)
     else:
         _hub_cache[chat_id] = {"ids": [msg.message_id]}
-    
+
     return msg.message_id
 
 

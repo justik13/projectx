@@ -8,6 +8,7 @@
 - build_conf_file(uri) -> str: возвращает готовый .conf (WireGuard INI из last_config)
 - validate_awg2_config(data) -> AWG2ValidationResult: валидация правил AWG 2.0
 """
+
 import base64
 import json
 import zlib
@@ -34,7 +35,6 @@ class AWG2ValidationResult:
 def validate_awg2_config(data: dict) -> AWG2ValidationResult:
     """
     Валидирует AmneziaWG 2.0 конфигурацию по правилам из AmneziaWG-Architect.
-
     Проверяет:
     - S4 <= 32, S3 <= 64
     - S1 + 56 != S2, S2 + 92 != S3
@@ -162,6 +162,7 @@ def _decode_base64url(payload: str) -> Optional[bytes]:
 def _decompress_amnezia_format(data: bytes) -> Optional[str]:
     if len(data) < 4:
         return None
+
     try:
         original_length = struct.unpack(">I", data[:4])[0]
     except struct.error:
@@ -243,7 +244,6 @@ def build_conf_file(uri: str) -> Optional[str]:
         if not containers:
             logger.error("build_conf_file: 'containers' array is empty or missing")
             return None
-
         if not isinstance(containers, list):
             logger.error(
                 f"build_conf_file: 'containers' is not a list, "
@@ -260,7 +260,6 @@ def build_conf_file(uri: str) -> Optional[str]:
         if not last_config_str:
             logger.error("build_conf_file: 'last_config' is missing in awg section")
             return None
-
         if not isinstance(last_config_str, str):
             logger.error(
                 f"build_conf_file: 'last_config' is not a string, "
@@ -290,7 +289,6 @@ def build_conf_file(uri: str) -> Optional[str]:
                 "build_conf_file: 'config' field is missing or empty in last_config"
             )
             return None
-
         if not isinstance(config_str, str):
             logger.error(
                 f"build_conf_file: 'config' is not a string, "
@@ -306,6 +304,12 @@ def build_conf_file(uri: str) -> Optional[str]:
 
 
 def is_valid_vpn_uri(uri: str) -> bool:
+    """
+    Проверяет валидность vpn:// URI.
+    
+    🔥 ИСПРАВЛЕНО #13: Принимает ТОЛЬКО amneziawg2 (не amneziawg/AWG 1.0)
+    Согласно amnezia_docs.md, AWG 1.0 НЕ поддерживается.
+    """
     data = decode_vpn_uri_to_json(uri)
     if not data or not isinstance(data, dict):
         return False
@@ -317,7 +321,8 @@ def is_valid_vpn_uri(uri: str) -> bool:
     for container in containers:
         if not isinstance(container, dict):
             continue
-        for key in ("awg", "amneziawg2", "amneziawg", "awg2"):
+        # 🔥 ИСПРАВЛЕНО #13: Только "awg" и "amneziawg2" (НЕ "amneziawg" / AWG 1.0)
+        for key in ("awg", "amneziawg2"):
             if key in container and isinstance(container[key], dict):
                 return True
 

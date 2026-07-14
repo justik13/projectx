@@ -35,9 +35,13 @@ async def subscription_notifications_loop(bot: Bot):
                     )
                 )
                 users = (await session.execute(stmt)).scalars().all()
+
                 if not users:
                     continue
 
+                # 🔥 ИСПРАВЛЕНО #9: Собираем ID пользователей, заблокировавших бота
+                blocked_user_ids = []
+                
                 for user in users:
                     time_left = user.subscription_end - now
                     msg = None
@@ -68,7 +72,6 @@ async def subscription_notifications_loop(bot: Bot):
                         tariff_id = user.current_tariff_id
                         try:
                             tariff = await get_tariff_by_id(session, user.current_tariff_id) if user.current_tariff_id else None
-
                             kb = InlineKeyboardBuilder()
                             kb.button(text="💳 Продлить доступ", callback_data="menu_subscription")
                             kb.button(text="✅ Прочитано (убрать)", callback_data="dismiss_notification")
@@ -80,17 +83,26 @@ async def subscription_notifications_loop(bot: Bot):
                                 kb.adjust(1)
 
                             await bot.send_message(user.telegram_id, msg, reply_markup=kb.as_markup(), parse_mode="HTML")
-                            await session.commit()
+                            # 🔥 ИСПРАВЛЕНО #9: Убираем commit() из цикла — будет один commit после всех пользователей
                         except TelegramForbiddenError:
                             logger.info(f"User {user.telegram_id} blocked the bot")
-                            try:
-                                async with session_scope() as mark_session:
-                                    await mark_user_bot_blocked(mark_session, user.telegram_id)
-                            except Exception as e:
-                                logger.error(f"Failed to mark user as bot_blocked: {e}")
+                            blocked_user_ids.append(user.telegram_id)
                         except Exception as e:
                             logger.warning(f"Failed to send notification to {user.telegram_id}: {e}")
                             await session.rollback()
+
+                # 🔥 ИСПРАВЛЕНО #9: Один commit после всех уведомлений
+                await session.commit()
+
+                # 🔥 ИСПРАВЛЕНО #9: Batch update для заблокировавших бота
+                if blocked_user_ids:
+                    try:
+                        async with session_scope() as mark_session:
+                            for uid in blocked_user_ids:
+                                await mark_user_bot_blocked(mark_session, uid)
+                    except Exception as e:
+                        logger.error(f"Failed to batch mark users as bot_blocked: {e}")
+
             finally:
                 await session.close()
 

@@ -3,7 +3,7 @@ import asyncio
 import logging
 from typing import Optional, List
 from pydantic import BaseModel, Field
-from bot.constants import AMNEZIA_PROTOCOL, API_TIMEOUT, API_CONCURRENCY_LIMIT
+from bot.constants import AMNEZIA_PROTOCOL, API_TIMEOUT, API_CONCURRENCY_LIMIT, API_RETRY_COUNT
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,8 @@ class AmneziaClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Optional[dict]:
         url = f"{self.api_url}{path}"
-        for attempt in range(2):
+        # 🔥 ИСПРАВЛЕНО #16: API_RETRY_COUNT + 1 попыток (2 retry = 3 попытки)
+        for attempt in range(API_RETRY_COUNT + 1):
             session = await get_http_session()
             try:
                 async with session.request(method, url, headers=self._headers, **kwargs) as response:
@@ -96,12 +97,12 @@ class AmneziaClient:
                         except aiohttp.ContentTypeError:
                             return None
                     else:
-                        if attempt == 0 and response.status >= 500:
+                        if attempt < API_RETRY_COUNT and response.status >= 500:
                             await asyncio.sleep(1)
                             continue
                         return None
             except (aiohttp.ClientError, asyncio.TimeoutError):
-                if attempt == 0:
+                if attempt < API_RETRY_COUNT:
                     await asyncio.sleep(1)
                 else:
                     return None
@@ -165,6 +166,7 @@ class AmneziaClient:
         """Возвращает список клиентов как список DTO."""
         all_clients: List[AmneziaClientListItem] = []
         current_skip = skip
+
         while True:
             result = await self._request(
                 "GET", "/clients",
@@ -172,18 +174,23 @@ class AmneziaClient:
             )
             if result is None:
                 return None
+
             clients_raw = result.get("clients", [])
             if not clients_raw:
                 break
+
             for raw in clients_raw:
                 try:
                     all_clients.append(AmneziaClientListItem(**raw))
                 except Exception as e:
                     logger.warning(f"Failed to parse client item: {e}")
                     continue
+
             if len(clients_raw) < min(limit, 100):
                 break
+
             current_skip += len(clients_raw)
+
         return all_clients
 
     async def delete_client(self, client_id: str) -> bool:
