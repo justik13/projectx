@@ -9,14 +9,20 @@ from database.connection import get_session, session_scope
 from database.repositories.tariffs_repo import get_active_tariffs, get_tariff_by_id
 from database.repositories.users_repo import mark_user_bot_blocked
 from database.models import User
-from bot.constants import NOTIFICATION_INTERVAL
+from bot.constants import NOTIFICATION_INTERVAL, WORKER_ERROR_SLEEP_INTERVAL
 
 logger = logging.getLogger("BackgroundWorker")
 
+
 async def subscription_notifications_loop(bot: Bot):
+    """
+    Фоновый воркер уведомлений о скором истечении подписки.
+    🔥 ИСПРАВЛЕНО: Надежная обработка ошибок с автоматическим перезапуском.
+    """
     while True:
         try:
             await asyncio.sleep(NOTIFICATION_INTERVAL)
+            
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             session = await get_session()
             try:
@@ -32,7 +38,8 @@ async def subscription_notifications_loop(bot: Bot):
                     )
                 )
                 users = (await session.execute(stmt)).scalars().all()
-                if not users: continue
+                if not users:
+                    continue
                 
                 for user in users:
                     time_left = user.subscription_end - now
@@ -59,25 +66,23 @@ async def subscription_notifications_loop(bot: Bot):
                             "Нажмите кнопку ниже для оплаты."
                         )
                         user.notified_3d = True
-                        
+                    
                     if msg:
                         tariff_id = user.current_tariff_id
                         try:
                             tariff = await get_tariff_by_id(session, user.current_tariff_id) if user.current_tariff_id else None
                             device_limit = getattr(tariff, 'device_limit', 2) if tariff else None
                             
-                            # 🔥 ИСПРАВЛЕНО: Уведомления в стиле Broadcast с кнопкой "Прочитано"
                             kb = InlineKeyboardBuilder()
                             kb.button(text="💳 Продлить доступ", callback_data="menu_subscription")
                             kb.button(text="✅ Прочитано (убрать)", callback_data="dismiss_notification")
                             kb.adjust(1)
                             
-                            # Если нет тарифа, просто кнопка убрать
                             if not tariff_id:
                                 kb = InlineKeyboardBuilder()
                                 kb.button(text="✅ Прочитано (убрать)", callback_data="dismiss_notification")
                                 kb.adjust(1)
-                                
+                            
                             await bot.send_message(user.telegram_id, msg, reply_markup=kb.as_markup(), parse_mode="HTML")
                             await session.commit()
                         except TelegramForbiddenError:
@@ -92,6 +97,11 @@ async def subscription_notifications_loop(bot: Bot):
                             await session.rollback()
             finally:
                 await session.close()
+        
+        except asyncio.CancelledError:
+            logger.info("Notifications worker cancelled")
+            break
         except Exception as e:
-            logger.error(f"Ошибка в цикле уведомлений: {e}", exc_info=True)
-        await asyncio.sleep(60)
+            logger.error(f"Критическая ошибка в цикле уведомлений: {e}", exc_info=True)
+            await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
+            continue

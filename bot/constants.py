@@ -19,6 +19,10 @@ NOTIFICATION_INTERVAL = 1800
 CLEANUP_INTERVAL = 86400
 STALE_PAYMENT_THRESHOLD = 3600
 
+# 🔥 НОВОЕ: Worker error recovery intervals
+WORKER_ERROR_SLEEP_INTERVAL = 60  # Sleep после ошибки перед retry
+WORKER_CRITICAL_ERROR_SLEEP = 300  # Sleep после критической ошибки (5 мин)
+
 # API
 API_CONCURRENCY_LIMIT = 20
 API_RETRY_COUNT = 2
@@ -27,3 +31,9 @@ AMNEZIA_PROTOCOL = "amneziawg2"
 
 # Pagination
 ITEMS_PER_PAGE = 10
+
+# 🔥 НОВОЕ: Cache limits для предотвращения утечек памяти
+HUB_CACHE_MAX_SIZE = 10000  # Максимум 10000 чатов в кэше
+HUB_CACHE_TTL = 43200  # 12 часов (было 24 часа)
+USER_CONTEXT_CACHE_MAX_SIZE = 2000  # Максимум 2000 пользователей
+USER_CONTEXT_CACHE_TTL = 5.0  # 5 секунд (было 3 секунды)
