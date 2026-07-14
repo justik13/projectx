@@ -51,10 +51,12 @@ class BanService:
         network_success = True
         if tasks_info:
             sem = asyncio.Semaphore(20)
+
             async def _update_peer(info, status):
                 async with sem:
                     client = AmneziaClient(info['api_url'], info['api_key'])
                     return await client.update_client(client_id=info['peer_id'], status=status)
+
             tasks = [_update_peer(info, target_api_status) for info in tasks_info]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             api_errors = [r for r in results if isinstance(r, Exception) or r is False]

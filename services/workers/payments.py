@@ -13,16 +13,13 @@ logger = logging.getLogger("BackgroundWorker")
 
 
 async def stale_payments_checker_loop(bot: Bot):
-    """
-    Проверяет зависшие платежи и уведомляет админов.
-    🔥 ИСПРАВЛЕНО: Надежная обработка ошибок с автоматическим перезапуском.
-    """
+    """Проверяет зависшие платежи и уведомляет админов."""
     settings = get_settings()
-    
+
     while True:
         try:
             await asyncio.sleep(STALE_PAYMENT_THRESHOLD)
-            
+
             session = await get_session()
             try:
                 threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
@@ -33,14 +30,14 @@ async def stale_payments_checker_loop(bot: Bot):
                 )
                 result = await session.execute(stmt)
                 stale_payments = result.scalars().all()
-                
+
                 for payment in stale_payments[:20]:
                     if payment.external_id and payment.payment_method == "SBPQR":
                         try:
                             await PaymentService.check_platega_payment(session, payment.id)
                         except Exception as e:
                             logger.warning(f"Failed to check Platega payment {payment.id}: {e}")
-                
+
                 if stale_payments:
                     msg = f"⚠️ <b>{len(stale_payments)} зависших платежей (pending > 1ч)</b>\n"
                     for p in stale_payments[:10]:
@@ -48,7 +45,7 @@ async def stale_payments_checker_loop(bot: Bot):
                         msg += f"ID: <code>{p.id}</code> · User: <code>{p.user_id}</code> · {p.amount} {p.currency} · {method}\n"
                     if len(stale_payments) > 10:
                         msg += f"\n<i>... и ещё {len(stale_payments) - 10}</i>"
-                    
+
                     for admin_id in settings.ADMIN_IDS:
                         try:
                             await bot.send_message(admin_id, msg, parse_mode="HTML")
@@ -56,11 +53,12 @@ async def stale_payments_checker_loop(bot: Bot):
                             logger.error(f"Stale alert failed to {admin_id}: {e}")
             finally:
                 await session.close()
-        
+
         except asyncio.CancelledError:
             logger.info("Stale payments worker cancelled")
             break
         except Exception as e:
             logger.error(f"Критическая ошибка в stale_payments_checker: {e}", exc_info=True)
+            # ИСПРАВЛЕНО: используем константу
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
             continue

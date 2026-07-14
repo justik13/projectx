@@ -15,18 +15,20 @@ from config.settings import get_settings
 from database.repositories.profiles_repo import get_user_profiles
 from database.repositories.users_repo import (
     get_user_by_telegram_id, get_user_count, get_user_referrals,
-    get_users_paginated_with_profiles,  # 🔥 ИМПОРТ НОВОЙ ФУНКЦИИ
+    get_users_paginated_with_profiles,
 )
 from services.audit_service import AuditService
 from services.ban_service import BanService
 from services.subscription import SubscriptionService
 from utils.admin import is_admin
-from utils.formatters import format_datetime, format_days_left
+from utils.formatters import format_datetime, format_days_left, format_user_card_text
 from utils.telegram import safe, render_hub
 
 router = Router()
 logger = logging.getLogger(__name__)
+
 USERS_PER_PAGE = 10
+
 
 async def _build_users_list_text_and_kb(
     users, page: int, total_pages: int, total: int,
@@ -44,10 +46,7 @@ async def _build_users_list_text_and_kb(
             ban = "🚫" if user.is_banned else ""
             username = f"@{safe(user.username)}" if user.username else f"ID:{user.telegram_id}"
             days = format_days_left(user.subscription_end)
-            
-            # 🔥 ИСПРАВЛЕНО: Используем загруженные профили (без дополнительного SELECT)
             profiles_count = len(user.profiles) if user.profiles else 0
-            
             builder.button(
                 text=f"{status}{ban} {username} · {days} · {profiles_count} устр.",
                 callback_data=f"admin_user_card:{user.telegram_id}",
@@ -61,6 +60,7 @@ async def _build_users_list_text_and_kb(
     builder.adjust(1)
     return rendered, builder
 
+
 @router.callback_query(F.data == "admin_users")
 async def show_users_list(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -70,14 +70,13 @@ async def show_users_list(callback: CallbackQuery, state: FSMContext, session: A
     await state.clear()
     total_users = await get_user_count(session)
     total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
-    
-    # 🔥 ИСПРАВЛЕНО: Используем функцию с eager loading
     users = await get_users_paginated_with_profiles(session, page=1, per_page=USERS_PER_PAGE)
     rendered, kb = await _build_users_list_text_and_kb(users, 1, total_pages, total_users)
     try:
         await callback.message.edit_text(rendered, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
         pass
+
 
 @router.callback_query(F.data.startswith("admin_users_page:"))
 async def users_pagination(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -89,14 +88,13 @@ async def users_pagination(callback: CallbackQuery, state: FSMContext, session: 
     page = int(callback.data.split(":")[1])
     total_users = await get_user_count(session)
     total_pages = max(1, math.ceil(total_users / USERS_PER_PAGE))
-    
-    # 🔥 ИСПРАВЛЕНО: Используем функцию с eager loading
     users = await get_users_paginated_with_profiles(session, page=page, per_page=USERS_PER_PAGE)
     rendered, kb = await _build_users_list_text_and_kb(users, page, total_pages, total_users)
     try:
         await callback.message.edit_text(rendered, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
         pass
+
 
 @router.callback_query(F.data == "admin_users_search")
 async def start_search_user(callback: CallbackQuery, state: FSMContext):
@@ -112,6 +110,7 @@ async def start_search_user(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
     await state.set_state(AdminStates.searching_user)
+
 
 @router.message(AdminStates.searching_user)
 async def process_search_user(message: Message, state: FSMContext, session: AsyncSession):
@@ -141,6 +140,7 @@ async def process_search_user(message: Message, state: FSMContext, session: Asyn
     await _show_user_card_edit(message, user, session)
     await state.clear()
 
+
 @router.callback_query(F.data.startswith("admin_user_card:"))
 async def show_user_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -155,26 +155,19 @@ async def show_user_card(callback: CallbackQuery, state: FSMContext, session: As
         return
     await _show_user_card_edit(callback.message, user, session)
 
+
 async def _build_user_card_text(user, session: AsyncSession) -> str:
+    """ИСПРАВЛЕНО: использует format_user_card_text из utils/formatters.py."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    has_access = user.subscription_end and user.subscription_end > now
     profiles = await get_user_profiles(session, user.id)
     referrals = await get_user_referrals(session, user.telegram_id)
-    return texts.ADMIN_USER_CARD.format(
-        telegram_id=user.telegram_id, username=safe(user.username),
-        first_name=safe(user.first_name),
-        status=("🟢 Активен" if has_access else "🔴 Неактивен"),
-        ban=("🚫 ЗАБАНЕН" if user.is_banned else "✅ Не забанен"),
-        valid_until=format_datetime(user.subscription_end),
-        days_left=format_days_left(user.subscription_end),
-        devices_count=len(profiles), device_limit=user.device_limit,
-        referrals_count=len(referrals), referral_days=user.referral_days,
-        created_at=format_datetime(user.created_at),
-    )
+    return format_user_card_text(user, profiles, referrals, now)
+
 
 async def _show_user_card(message: Message, user, session: AsyncSession):
     rendered = await _build_user_card_text(user, session)
     await render_hub(message.bot, message.chat.id, rendered, get_admin_user_card_keyboard(user.telegram_id))
+
 
 async def _show_user_card_edit(message, user, session: AsyncSession):
     rendered = await _build_user_card_text(user, session)
@@ -184,6 +177,7 @@ async def _show_user_card_edit(message, user, session: AsyncSession):
         )
     except Exception:
         await render_hub(message.bot, message.chat.id, rendered, get_admin_user_card_keyboard(user.telegram_id))
+
 
 @router.callback_query(F.data.startswith("admin_user_extend:"))
 async def show_extend_options(callback: CallbackQuery, state: FSMContext):
@@ -200,6 +194,7 @@ async def show_extend_options(callback: CallbackQuery, state: FSMContext):
         )
     except Exception:
         pass
+
 
 @router.callback_query(F.data.startswith("admin_extend_days:"))
 async def extend_subscription(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -220,6 +215,7 @@ async def extend_subscription(callback: CallbackQuery, state: FSMContext, sessio
     await callback.answer(f"✅ Подписка продлена на {days_text}", show_alert=True)
     await _show_user_card_edit(callback.message, user, session)
 
+
 @router.callback_query(F.data.startswith("admin_extend_custom:"))
 async def start_custom_extend(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -237,6 +233,7 @@ async def start_custom_extend(callback: CallbackQuery, state: FSMContext):
         pass
     await state.set_state(AdminStates.entering_custom_days)
     await state.update_data(target_user_id=telegram_id)
+
 
 @router.message(AdminStates.entering_custom_days)
 async def process_custom_days(message: Message, state: FSMContext, session: AsyncSession):
@@ -273,6 +270,7 @@ async def process_custom_days(message: Message, state: FSMContext, session: Asyn
     )
     await state.clear()
 
+
 @router.callback_query(F.data.startswith("admin_user_ban:"))
 async def toggle_ban_user(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -292,6 +290,7 @@ async def toggle_ban_user(callback: CallbackQuery, state: FSMContext, session: A
     user = await get_user_by_telegram_id(session, telegram_id)
     await _show_user_card_edit(callback.message, user, session)
     await callback.answer(f"✅ Пользователь {result}", show_alert=True)
+
 
 @router.callback_query(F.data.startswith("admin_user_devices:"))
 async def show_user_devices(callback: CallbackQuery, state: FSMContext, session: AsyncSession):

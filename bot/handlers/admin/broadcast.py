@@ -5,11 +5,11 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.keyboards import get_broadcast_confirm_keyboard, get_back_button
 from bot.keyboards.admin.broadcast import get_broadcast_result_keyboard, get_broadcast_close_keyboard
 from bot.states import AdminStates
 from bot import texts
+from bot.constants import BROADCAST_DELAY
 from database.connection import session_scope
 from database.repositories.users_repo import get_active_users, get_all_users, mark_user_bot_blocked
 from services.audit_service import AuditService
@@ -18,7 +18,9 @@ from utils.telegram import render_hub, send_hub_photo
 
 router = Router()
 logger = logging.getLogger(__name__)
+
 _broadcast_stop_event = asyncio.Event()
+
 
 @router.callback_query(F.data == "admin_broadcast")
 async def start_broadcast(callback: CallbackQuery, state: FSMContext):
@@ -35,23 +37,27 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
         pass
     await state.set_state(AdminStates.entering_broadcast_message)
 
+
 @router.message(AdminStates.entering_broadcast_message)
 async def process_broadcast_message(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     broadcast_text = message.text or message.caption
     if not broadcast_text:
         await render_hub(message.bot, message.chat.id, texts.ERROR_TEXT_OR_MEDIA, get_back_button("admin_menu"))
         return
+
     media_id = None
     content_type = message.content_type
     if message.photo:
         media_id = message.photo[-1].file_id
     elif message.document:
         media_id = message.document.file_id
-        
+
     preview = texts.BROADCAST_PREVIEW.format(content_type=content_type, text=broadcast_text)
+
     try:
         if media_id and content_type == "photo":
             await send_hub_photo(
@@ -76,18 +82,21 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     except Exception as e:
         await render_hub(message.bot, message.chat.id, texts.ERROR_VALIDATION.format(error=e), get_back_button("admin_menu"))
 
+
 async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, content_type, label, admin_id):
     _broadcast_stop_event.clear()
     total_count = len(user_ids)
     success_count = 0
     fail_count = 0
+
     for uid in user_ids:
         if _broadcast_stop_event.is_set():
             break
         try:
             await _dispatch_message(bot, uid, broadcast_text, media_id, content_type)
             success_count += 1
-            await asyncio.sleep(0.04)
+            # ИСПРАВЛЕНО: используем константу вместо магического числа
+            await asyncio.sleep(BROADCAST_DELAY)
         except TelegramRetryAfter as e:
             fail_count += 1
             await asyncio.sleep(e.retry_after + 1)
@@ -106,7 +115,7 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
                 pass
         except Exception:
             fail_count += 1
-            
+
     try:
         await bot.send_message(
             admin_id,
@@ -128,8 +137,9 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
     except Exception:
         pass
 
+
 async def _dispatch_message(bot, uid, text, media_id, content_type):
-    """🔥 ИСПРАВЛЕНО: Добавлена кнопка 'Прочитано' для очистки чата у пользователей"""
+    """Отправляет одно сообщение рассылки."""
     kb = get_broadcast_close_keyboard()
     if content_type == "photo" and media_id:
         await bot.send_photo(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
@@ -137,6 +147,7 @@ async def _dispatch_message(bot, uid, text, media_id, content_type):
         await bot.send_document(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
     else:
         await bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+
 
 @router.callback_query(F.data == "broadcast_send_all", AdminStates.confirming_broadcast)
 async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
@@ -154,18 +165,20 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: 
     content_type = data.get("content_type")
     users = await get_all_users(session)
     user_ids = [u.telegram_id for u in users if not u.is_bot_blocked]
-    
     asyncio.create_task(_send_broadcast_to_users(
         callback.bot, user_ids, broadcast_text, media_id, content_type, "Всего", callback.from_user.id,
     ))
     try:
         await callback.message.edit_text(
-            f"🚀 <b>Рассылка запущена!</b>\nОтправляю {len(user_ids)} пользователям...\nРезультат придёт отдельным сообщением.",
+            f"🚀 <b>Рассылка запущена!</b>\n"
+            f"Отправляю {len(user_ids)} пользователям...\n"
+            f"Результат придёт отдельным сообщением.",
             reply_markup=get_back_button("admin_menu"), parse_mode="HTML",
         )
     except Exception:
         pass
     await state.clear()
+
 
 @router.callback_query(F.data == "broadcast_send_active", AdminStates.confirming_broadcast)
 async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
@@ -183,36 +196,40 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, sessio
     content_type = data.get("content_type")
     users = await get_active_users(session)
     user_ids = [u.telegram_id for u in users]
-    
     asyncio.create_task(_send_broadcast_to_users(
         callback.bot, user_ids, broadcast_text, media_id, content_type, "Активных", callback.from_user.id,
     ))
     try:
         await callback.message.edit_text(
-            f"🚀 <b>Рассылка запущена!</b>\nОтправляю {len(user_ids)} активным пользователям...\nРезультат придёт отдельным сообщением.",
+            f"🚀 <b>Рассылка запущена!</b>\n"
+            f"Отправляю {len(user_ids)} активным пользователям...\n"
+            f"Результат придёт отдельным сообщением.",
             reply_markup=get_back_button("admin_menu"), parse_mode="HTML",
         )
     except Exception:
         pass
     await state.clear()
 
+
 @router.callback_query(F.data == "broadcast_stop")
 async def stop_broadcast(callback: CallbackQuery):
     await callback.answer("⏹ Рассылка остановлена", show_alert=True)
     _broadcast_stop_event.set()
 
+
 @router.callback_query(F.data == "broadcast_dismiss")
 async def dismiss_broadcast_result(callback: CallbackQuery):
-    """Убирает уведомление о результате рассылки у АДМИНА"""
+    """Убирает уведомление о результате рассылки у АДМИНА."""
     await callback.answer()
     try:
         await callback.message.delete()
     except Exception:
         pass
 
-# 🔥 НОВЫЙ ХЕНДЛЕР: Убирает сообщение рассылки у ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ
+
 @router.callback_query(F.data == "dismiss_broadcast")
 async def dismiss_broadcast_message(callback: CallbackQuery):
+    """Убирает сообщение рассылки у ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ."""
     await callback.answer()
     try:
         await callback.message.delete()

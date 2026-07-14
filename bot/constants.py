@@ -15,7 +15,8 @@ NOTIFICATION_INTERVAL = 1800
 CLEANUP_INTERVAL = 86400
 STALE_PAYMENT_THRESHOLD = 3600
 
-# Worker error recovery intervals
+# Worker initial delays (seconds)
+WORKER_INITIAL_DELAY = 600
 WORKER_ERROR_SLEEP_INTERVAL = 60
 WORKER_CRITICAL_ERROR_SLEEP = 300
 
@@ -28,7 +29,7 @@ AMNEZIA_PROTOCOL = "amneziawg2"
 # Pagination
 ITEMS_PER_PAGE = 10
 
-# Cache limits для предотвращения утечек памяти
+# Cache limits
 HUB_CACHE_MAX_SIZE = 10000
 HUB_CACHE_TTL = 43200
 USER_CONTEXT_CACHE_MAX_SIZE = 2000

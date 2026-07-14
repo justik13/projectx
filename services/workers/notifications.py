@@ -6,7 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import select, or_
 from database.connection import get_session, session_scope
-from database.repositories.tariffs_repo import get_active_tariffs, get_tariff_by_id
+from database.repositories.tariffs_repo import get_tariff_by_id
 from database.repositories.users_repo import mark_user_bot_blocked
 from database.models import User
 from bot.constants import NOTIFICATION_INTERVAL, WORKER_ERROR_SLEEP_INTERVAL
@@ -15,15 +15,12 @@ logger = logging.getLogger("BackgroundWorker")
 
 
 async def subscription_notifications_loop(bot: Bot):
-    """
-    Фоновый воркер уведомлений о скором истечении подписки.
-    🔥 ИСПРАВЛЕНО: Надежная обработка ошибок с автоматическим перезапуском.
-    """
+    """Фоновый воркер уведомлений о скором истечении подписки."""
     while True:
         try:
             await asyncio.sleep(NOTIFICATION_INTERVAL)
-            
             now = datetime.now(timezone.utc).replace(tzinfo=None)
+
             session = await get_session()
             try:
                 stmt = select(User).where(
@@ -40,11 +37,11 @@ async def subscription_notifications_loop(bot: Bot):
                 users = (await session.execute(stmt)).scalars().all()
                 if not users:
                     continue
-                
+
                 for user in users:
                     time_left = user.subscription_end - now
                     msg = None
-                    
+
                     if time_left <= timedelta(hours=2) and not user.notified_2h:
                         msg = (
                             "🔴 <b>Ваш доступ отключится через 2 часа!</b>\n"
@@ -66,23 +63,22 @@ async def subscription_notifications_loop(bot: Bot):
                             "Нажмите кнопку ниже для оплаты."
                         )
                         user.notified_3d = True
-                    
+
                     if msg:
                         tariff_id = user.current_tariff_id
                         try:
                             tariff = await get_tariff_by_id(session, user.current_tariff_id) if user.current_tariff_id else None
-                            device_limit = getattr(tariff, 'device_limit', 2) if tariff else None
-                            
+
                             kb = InlineKeyboardBuilder()
                             kb.button(text="💳 Продлить доступ", callback_data="menu_subscription")
                             kb.button(text="✅ Прочитано (убрать)", callback_data="dismiss_notification")
                             kb.adjust(1)
-                            
+
                             if not tariff_id:
                                 kb = InlineKeyboardBuilder()
                                 kb.button(text="✅ Прочитано (убрать)", callback_data="dismiss_notification")
                                 kb.adjust(1)
-                            
+
                             await bot.send_message(user.telegram_id, msg, reply_markup=kb.as_markup(), parse_mode="HTML")
                             await session.commit()
                         except TelegramForbiddenError:
@@ -97,11 +93,12 @@ async def subscription_notifications_loop(bot: Bot):
                             await session.rollback()
             finally:
                 await session.close()
-        
+
         except asyncio.CancelledError:
             logger.info("Notifications worker cancelled")
             break
         except Exception as e:
             logger.error(f"Критическая ошибка в цикле уведомлений: {e}", exc_info=True)
+            # ИСПРАВЛЕНО: используем константу вместо магического числа 60
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
             continue
