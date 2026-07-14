@@ -13,20 +13,11 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
     """
     Обработчик webhook от Platega.io
     Принимает POST запросы с информацией об изменении статуса транзакции
-
-    🔥 ИСПРАВЛЕНО в Фазе 4:
-    - Нормализация status через .upper() для защиты от регистра
-    - Логирование payload в audit_logs для финансового аудита
-    - Правильные HTTP-коды: 404 (не найден), 400 (некорректный JSON), 200 (успех)
-    - Idempotency: повторные callback'и для уже обработанных статусов возвращают 200
-    
-    🔥 ИСПРАВЛЕНО #7: Правильный HTTP 404 при success=False + result_code="not_found"
     """
     transaction_id = None
     status = None
 
     try:
-        # Валидация заголовков
         merchant_id = request.headers.get("X-MerchantId", "")
         secret = request.headers.get("X-Secret", "")
 
@@ -35,7 +26,6 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
             logger.warning(f"Invalid Platega callback credentials: {merchant_id}")
             return web.Response(status=401, text="Unauthorized")
 
-        # Парсим JSON
         try:
             data = await request.json()
         except Exception as e:
@@ -50,31 +40,25 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
             logger.warning(f"Invalid Platega webhook data: {data}")
             return web.Response(status=400, text="Missing required fields")
 
-        # 🔥 ИСПРАВЛЕНО: Нормализация статуса через .upper()
         status = raw_status.upper()
         logger.info(
             f"Platega webhook received: transaction={transaction_id}, "
             f"status={status} (original: {raw_status})"
         )
 
-        # Обрабатываем callback
         async with session_scope() as session:
-            # 🔥 ИСПРАВЛЕНО: Логирование callback в audit_logs для аудита
             try:
                 await AuditService.log_action(
                     session,
-                    admin_id=0,  # Системное действие
+                    admin_id=0,
                     action="PLATEGA_CALLBACK",
                     target_type="Payment",
                     target_id=None,
                     details=f"transaction={transaction_id}, status={status}"
                 )
             except Exception as e:
-                # Аудит не должен блокировать обработку платежа
                 logger.error(f"Failed to log Platega callback to audit: {e}")
 
-            # 🔥 ИСПРАВЛЕНО: handle_platega_callback теперь возвращает tuple[bool, str]
-            # где str - это код результата для HTTP-ответа
             success, result_code = await PaymentService.handle_platega_callback(
                 session=session,
                 transaction_id=transaction_id,
@@ -84,36 +68,29 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
 
             if success:
                 if result_code == "not_found":
-                    # Платёж не найден в БД - 404
                     logger.warning(
                         f"Platega callback: payment not found for transaction={transaction_id}"
                     )
                     return web.Response(status=404, text="Payment not found")
                 elif result_code == "already_processed":
-                    # Idempotency: callback уже обработан - 200
                     logger.info(
                         f"Platega callback: already processed transaction={transaction_id}, status={status}"
                     )
                     return web.Response(status=200, text="OK")
                 else:
-                    # Успешная обработка - 200
                     return web.Response(status=200, text="OK")
             else:
-                # 🔥 ИСПРАВЛЕНО #7: Проверяем result_code даже при success=False
                 if result_code == "not_found":
-                    # Платёж не найден в БД - 404 (не 500!)
                     logger.warning(
                         f"Platega callback: payment not found for transaction={transaction_id}"
                     )
                     return web.Response(status=404, text="Payment not found")
                 elif result_code == "error":
-                    # Внутренняя ошибка обработки - 500
                     logger.error(
                         f"Platega callback processing failed: transaction={transaction_id}, status={status}"
                     )
                     return web.Response(status=500, text="Processing failed")
                 else:
-                    # Неизвестный код - 500
                     logger.error(
                         f"Platega callback unknown result_code: {result_code}, transaction={transaction_id}"
                     )

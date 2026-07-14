@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v4.0 Secure)
+# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v4.1 Secure)
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
@@ -42,11 +42,9 @@ confirm() {
     [[ "$response" =~ ^[Yy]$ ]] && return 0 || return 1
 }
 
-# 🔥 ИСПРАВЛЕНО #8: Безопасная запись в .env с экранированием
 write_env_var() {
     local key=$1
     local value=$2
-    # Экранируем одинарные кавычки и спецсимволы
     value="${value//\'/\'\\\'\'}"
     value="${value//\$/\\\$}"
     value="${value//\`/\\\`}"
@@ -64,20 +62,17 @@ rollback() {
     echo -e "${RED}Error: $error_msg${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
 
-    # Останавливаем сервис если был запущен
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         systemctl stop "$SERVICE_NAME" 2>/dev/null || true
         log "Rollback: stopped $SERVICE_NAME"
     fi
 
-    # Восстанавливаем .env из бэкапа если есть
     local env_backup=$(ls -t "$PROJECT_DIR/.env.backup-"* 2>/dev/null | head -n1)
     if [[ -n "$env_backup" && -f "$env_backup" ]]; then
         cp "$env_backup" "$PROJECT_DIR/.env"
         log "Rollback: restored .env from $env_backup"
     fi
 
-    # Восстанавливаем UFW из snapshot если есть
     local ufw_snapshot=$(ls -t "$SNAPSHOT_DIR/ufw-before-"*.txt 2>/dev/null | head -n1)
     if [[ -n "$ufw_snapshot" && -f "$ufw_snapshot" ]]; then
         warn "Rollback: UFW snapshot available at $ufw_snapshot"
@@ -93,7 +88,6 @@ rollback() {
 preflight_checks() {
     log "Запуск pre-flight проверок..."
 
-    # 🔥 ИСПРАВЛЕНО #13: Проверка что скрипт запущен из директории проекта
     if [[ ! -f "$START_DIR/requirements.txt" ]]; then
         error "requirements.txt не найден в $START_DIR. Запустите скрипт из корня репозитория."
     fi
@@ -117,8 +111,6 @@ preflight_checks() {
         error "Недостаточно места. Доступно: ${avail_gb}GB, нужно 1GB"
     fi
 
-    # 🔥 ИСПРАВЛЕНО #14: Безопасная работа с http_proxy (может быть не установлена)
-    # ${http_proxy+--proxy "$http_proxy"} подставляет аргумент только если переменная установлена
     if ! curl -s --max-time 10 ${http_proxy+--proxy "$http_proxy"} https://archive.ubuntu.com/ubuntu/dists/noble/Release >/dev/null 2>&1; then
         error "Нет доступа к интернету или репозиториям Ubuntu"
     fi
@@ -160,13 +152,11 @@ install_dependencies() {
 setup_firewall() {
     log "Настройка UFW firewall..."
 
-    # 🔥 ИСПРАВЛЕНО #16: Проверка что UFW установлен
     if ! command -v ufw &>/dev/null; then
         warn "UFW не установлен, пропуск настройки firewall"
         return
     fi
 
-    # 🔥 ИСПРАВЛЕНО #7: Безопасное определение SSH порта
     local SSH_PORT=""
     if command -v ss &>/dev/null; then
         SSH_PORT=$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | grep -oE ':[0-9]+$' | grep -oE '[0-9]+' | sort -u | head -n1)
@@ -216,7 +206,6 @@ setup_venv() {
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
 
-    # 🔥 ИСПРАВЛЕНО #12: pip log в PROJECT_DIR вместо /tmp
     local pip_log="$PROJECT_DIR/pip-install.log"
     if ! pip install -r "$PROJECT_DIR/requirements.txt" > "$pip_log" 2>&1; then
         error "Ошибка установки pip. Лог: $pip_log"
@@ -238,43 +227,33 @@ setup_env() {
         fi
     fi
 
-    echo -e "${BLUE}[1/6]${NC} Telegram Bot Token"
+    echo -e "${BLUE}[1/4]${NC} Telegram Bot Token"
     read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN; echo ""
     [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
     if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then
         error "Неверный формат BOT_TOKEN"
     fi
 
-    echo -e "${BLUE}[2/6]${NC} Telegram ID администраторов (через запятую)"
+    echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
     read -p "Введите ADMIN_IDS: " ADMIN_IDS
     if [[ ! "$ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
         error "Неверный формат ADMIN_IDS"
     fi
 
-    echo -e "${BLUE}[3/6]${NC} Username бота (без @)"
-    read -p "Введите BOT_USERNAME: " BOT_USERNAME
-    if [[ ! "$BOT_USERNAME" =~ ^[a-zA-Z0-9_]{3,32}$ ]]; then
-        error "Неверный BOT_USERNAME"
-    fi
-
-    echo -e "${BLUE}[4/6]${NC} Username поддержки [support]"
+    echo -e "${BLUE}[3/4]${NC} Username поддержки [support]"
     read -p "Введите SUPPORT_USERNAME: " SUPPORT_USERNAME
     SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
 
-    echo -e "${BLUE}[5/6]${NC} Бонус рефереру [3]"
-    read -p "Введите REFERRAL_BONUS_DAYS: " REFERRAL_BONUS_DAYS
-    REFERRAL_BONUS_DAYS=${REFERRAL_BONUS_DAYS:-3}
-
-    echo -e "${BLUE}[6/6]${NC} Platega Merchant ID (Enter для пропуска)"
+    echo -e "${BLUE}[4/4]${NC} Platega Merchant ID (Enter для пропуска)"
     read -p "Введите ID: " PLATEGA_MERCHANT_ID
     PLATEGA_SECRET=""
-    PLATEGA_CALLBACK_URL=""
+    PLATEGA_CALLBACK_DOMAIN=""
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET; echo ""
         [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET обязателен"
-        read -p "Введите PLATEGA_CALLBACK_URL (https://...): " PLATEGA_CALLBACK_URL
-        [ -z "$PLATEGA_CALLBACK_URL" ] && error "URL обязателен"
+        read -p "Введите домен для callback (например: just1kbot.1337.cx): " PLATEGA_CALLBACK_DOMAIN
+        [ -z "$PLATEGA_CALLBACK_DOMAIN" ] && error "Домен обязателен"
     fi
 
     local DB_KEY=$("$VENV_DIR/bin/python" -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
@@ -282,18 +261,17 @@ setup_env() {
     : > "$PROJECT_DIR/.env"
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
-    write_env_var "BOT_USERNAME" "$BOT_USERNAME"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
-    write_env_var "REFERRAL_BONUS_DAYS" "$REFERRAL_BONUS_DAYS"
     write_env_var "DB_ENCRYPTION_KEY" "$DB_KEY"
     write_env_var "DB_PATH" "./bot_data.db"
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
+        local CALLBACK_URL="https://${PLATEGA_CALLBACK_DOMAIN}/webhook/platega"
         write_env_var "PLATEGA_MERCHANT_ID" "$PLATEGA_MERCHANT_ID"
         write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
-        write_env_var "PLATEGA_CALLBACK_URL" "$PLATEGA_CALLBACK_URL"
+        write_env_var "PLATEGA_CALLBACK_URL" "$CALLBACK_URL"
         write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
-        write_env_var "PLATEGA_RETURN_URL" "https://t.me/${BOT_USERNAME}"
+        write_env_var "PLATEGA_RETURN_URL" "https://t.me/placeholder"
     fi
 
     chown projectx:projectx "$PROJECT_DIR/.env"
@@ -312,7 +290,6 @@ verify_permissions() {
     success "Права доступа установлены (dir=750, files=600)"
 }
 
-# 🔥 ИСПРАВЛЕНО #3: init_database() ПОСЛЕ verify_permissions()
 init_database() {
     log "Инициализация БД..."
     cd "$PROJECT_DIR"
@@ -345,11 +322,7 @@ EnvironmentFile=$PROJECT_DIR/.env
 ExecStart=$VENV_DIR/bin/python -m bot.main
 Restart=always
 RestartSec=10
-
-# 🔥 ИСПРАВЛЕНО #4: WatchdogSec увеличен до 300 (5 минут)
 WatchdogSec=300
-
-# Максимальная изоляция
 ProtectSystem=strict
 PrivateTmp=true
 ProtectHome=true
@@ -382,9 +355,7 @@ setup_nginx_ssl() {
 
     rm -f /etc/nginx/sites-enabled/default
 
-    # 🔥 ИСПРАВЛЕНО #5: Nginx rate limit увеличен (burst=20)
     cat > "/etc/nginx/sites-available/projectx" << NGINXEOF
-# Защита от DDoS (ограничение запросов)
 limit_req_zone \$binary_remote_addr zone=mylimit:10m rate=10r/s;
 
 server {
@@ -415,7 +386,6 @@ NGINXEOF
 
     read -p "Email для SSL (certbot): " LE_EMAIL
 
-    # 🔥 ИСПРАВЛЕНО #6: certbot с таймаутом
     if ! timeout 120 certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" --redirect >/dev/null 2>&1; then
         warn "SSL не получен (проверьте DNS или таймаут)"
     fi
@@ -472,7 +442,6 @@ start_bot() {
     log "Запуск бота..."
     systemctl start "$SERVICE_NAME"
 
-    # 🔥 ИСПРАВЛЕНО #9: Увеличено время ожидания + проверка статуса
     local wait_count=0
     local max_wait=10
     while [ $wait_count -lt $max_wait ]; do
@@ -500,7 +469,7 @@ show_status() {
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v4.0 (Secure & Stable)${NC}\n"
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v4.1 (Secure & Stable)${NC}\n"
     mkdir -p /var/log "$SNAPSHOT_DIR"
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 
@@ -511,7 +480,6 @@ main() {
     setup_venv || rollback "setup_venv" "Python venv setup failed"
     setup_env || rollback "setup_env" "Environment config failed"
 
-    # 🔥 ИСПРАВЛЕНО #3: verify_permissions ПЕРЕД init_database
     verify_permissions || rollback "verify_permissions" "Permissions setup failed"
     init_database || rollback "init_database" "Database initialization failed"
 

@@ -39,7 +39,6 @@ async def subscription_notifications_loop(bot: Bot):
                 if not users:
                     continue
 
-                # 🔥 ИСПРАВЛЕНО #9: Собираем ID пользователей, заблокировавших бота
                 blocked_user_ids = []
                 
                 for user in users:
@@ -83,7 +82,6 @@ async def subscription_notifications_loop(bot: Bot):
                                 kb.adjust(1)
 
                             await bot.send_message(user.telegram_id, msg, reply_markup=kb.as_markup(), parse_mode="HTML")
-                            # 🔥 ИСПРАВЛЕНО #9: Убираем commit() из цикла — будет один commit после всех пользователей
                         except TelegramForbiddenError:
                             logger.info(f"User {user.telegram_id} blocked the bot")
                             blocked_user_ids.append(user.telegram_id)
@@ -91,10 +89,8 @@ async def subscription_notifications_loop(bot: Bot):
                             logger.warning(f"Failed to send notification to {user.telegram_id}: {e}")
                             await session.rollback()
 
-                # 🔥 ИСПРАВЛЕНО #9: Один commit после всех уведомлений
                 await session.commit()
 
-                # 🔥 ИСПРАВЛЕНО #9: Batch update для заблокировавших бота
                 if blocked_user_ids:
                     try:
                         async with session_scope() as mark_session:
@@ -111,6 +107,5 @@ async def subscription_notifications_loop(bot: Bot):
             break
         except Exception as e:
             logger.error(f"Критическая ошибка в цикле уведомлений: {e}", exc_info=True)
-            # ИСПРАВЛЕНО: используем константу вместо магического числа 60
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
             continue

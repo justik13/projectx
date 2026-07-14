@@ -84,7 +84,6 @@ class AmneziaClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Optional[dict]:
         url = f"{self.api_url}{path}"
-        # 🔥 ИСПРАВЛЕНО #16: API_RETRY_COUNT + 1 попыток (2 retry = 3 попытки)
         for attempt in range(API_RETRY_COUNT + 1):
             session = await get_http_session()
             try:

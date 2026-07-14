@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from typing import List
 from pydantic import field_validator
 
+
 class Settings(BaseSettings):
     BOT_TOKEN: str
     ADMIN_IDS: List[int]
@@ -10,7 +11,7 @@ class Settings(BaseSettings):
     DEFAULT_DEVICE_LIMIT: int = 2
     REFERRAL_BONUS_DAYS: int = 3
     SUPPORT_USERNAME: str = "@support_username"
-    
+
     # Platega.io (СБП)
     PLATEGA_MERCHANT_ID: str = ""
     PLATEGA_SECRET: str = ""
@@ -20,11 +21,12 @@ class Settings(BaseSettings):
     PLATEGA_PAYMENT_METHOD: int = 2
     PLATEGA_RETURN_URL: str = "https://t.me/{bot_username}"
     PLATEGA_FAILED_URL: str = "https://t.me/{bot_username}"
-    
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
-        "case_sensitive": False
+        "case_sensitive": False,
+        "extra": "ignore"
     }
 
     @field_validator("ADMIN_IDS", mode="before")
@@ -38,7 +40,9 @@ class Settings(BaseSettings):
             return [int(x) for x in v]
         return v
 
+
 _settings = None
+
 
 def get_settings() -> Settings:
     global _settings

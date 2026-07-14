@@ -60,7 +60,6 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
         result.errors.append("Missing 'containers' array")
         return result
 
-    # Ищем awg секцию
     awg = None
     for container in containers:
         if isinstance(container, dict):
@@ -73,14 +72,12 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
         result.errors.append("Missing 'awg' section in containers")
         return result
 
-    # Проверка protocol_version
     protocol_version = awg.get("protocol_version", "1")
     if str(protocol_version) != "2":
         result.warnings.append(
             f"protocol_version is '{protocol_version}', expected '2' for AWG 2.0"
         )
 
-    # Извлекаем числовые параметры
     def _safe_int(key: str, default: int = 0) -> int:
         try:
             return int(awg.get(key, default))
@@ -94,7 +91,6 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
     Jc = _safe_int("Jc")
     Jmax = _safe_int("Jmax")
 
-    # Правила из AmneziaWG-Architect
     if S4 > 32:
         result.errors.append(f"S4 = {S4} (must be <= 32)")
     if S3 > 64:
@@ -108,7 +104,6 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
     if Jmax <= 81:
         result.errors.append(f"Jmax = {Jmax} (must be > 81)")
 
-    # H1-H4 — диапазоны
     h_ranges = []
     for h_key in ("H1", "H2", "H3", "H4"):
         h_val = awg.get(h_key, "")
@@ -127,7 +122,6 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
                 f"{h_key}: must be a 'min-max' string, got '{h_val}'"
             )
 
-    # Проверка пересечений диапазонов
     for i in range(len(h_ranges)):
         for j in range(i + 1, len(h_ranges)):
             k1, min1, max1 = h_ranges[i]
@@ -306,8 +300,7 @@ def build_conf_file(uri: str) -> Optional[str]:
 def is_valid_vpn_uri(uri: str) -> bool:
     """
     Проверяет валидность vpn:// URI.
-    
-    🔥 ИСПРАВЛЕНО #13: Принимает ТОЛЬКО amneziawg2 (не amneziawg/AWG 1.0)
+    Принимает ТОЛЬКО amneziawg2 (не amneziawg/AWG 1.0)
     Согласно amnezia_docs.md, AWG 1.0 НЕ поддерживается.
     """
     data = decode_vpn_uri_to_json(uri)
@@ -321,7 +314,6 @@ def is_valid_vpn_uri(uri: str) -> bool:
     for container in containers:
         if not isinstance(container, dict):
             continue
-        # 🔥 ИСПРАВЛЕНО #13: Только "awg" и "amneziawg2" (НЕ "amneziawg" / AWG 1.0)
         for key in ("awg", "amneziawg2"):
             if key in container and isinstance(container[key], dict):
                 return True
