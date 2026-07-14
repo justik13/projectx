@@ -13,6 +13,7 @@ class TestCleanupWorker:
         
         with patch('services.workers.cleanup.get_session') as mock_session:
             with patch('services.workers.cleanup.get_active_servers', return_value=[]):
+                # 🔥 ИСПРАВЛЕНО: SystemExit не ловится except Exception
                 with patch('services.workers.cleanup.asyncio.sleep', side_effect=[None, SystemExit]):
                     mock_sess = AsyncMock()
                     mock_result = MagicMock()
@@ -106,6 +107,7 @@ class TestNotificationsWorker:
         from services.workers.notifications import subscription_notifications_loop
         
         with patch('services.workers.notifications.get_session') as mock_session:
+            # 🔥 ИСПРАВЛЕНО: SystemExit
             with patch('services.workers.notifications.asyncio.sleep', side_effect=SystemExit):
                 mock_sess = AsyncMock()
                 mock_result = MagicMock()
@@ -140,6 +142,7 @@ class TestNotificationsWorker:
             return test_db_session
         
         with patch('services.workers.notifications.get_session', side_effect=mock_get_session):
+            # 🔥 ИСПРАВЛЕНО: Первый sleep проходит, второй прерывает
             with patch('services.workers.notifications.asyncio.sleep', side_effect=[None, SystemExit]):
                 mock_bot.send_message = AsyncMock()
                 
@@ -159,6 +162,7 @@ class TestPaymentsWorker:
         from services.workers.payments import stale_payments_checker_loop
         
         with patch('services.workers.payments.get_session') as mock_session:
+            # 🔥 ИСПРАВЛЕНО: SystemExit не ловится except Exception
             with patch('services.workers.payments.asyncio.sleep', side_effect=SystemExit):
                 mock_sess = AsyncMock()
                 mock_result = MagicMock()
@@ -199,6 +203,7 @@ class TestTrafficWorker:
         """Тест синхронизации трафика с DTO AmneziaClientListItem."""
         from services.workers.traffic import traffic_sync_loop
         from database.models import Server, VPNProfile, User
+        from sqlalchemy import select
         
         user = User(telegram_id=444444444)
         test_db_session.add(user)
@@ -219,7 +224,7 @@ class TestTrafficWorker:
         test_db_session.add(profile)
         await test_db_session.commit()
         
-        # 🔥 ИСПРАВЛЕНО: мок возвращает dict с DTO
+        # 🔥 ИСПРАВЛЕНО: мок возвращает DTO AmneziaClientListItem
         dto = AmneziaClientListItem(
             id="peer_traffic",
             clientName="tg_444_Device_abc",
@@ -247,6 +252,10 @@ class TestTrafficWorker:
                         pass
                     
                     # Проверяем что трафик обновлён
-                    await test_db_session.refresh(profile)
-                    assert profile.traffic_down == 5000
-                    assert profile.traffic_up == 2500
+                    await test_db_session.commit()
+                    result = await test_db_session.execute(
+                        select(VPNProfile).where(VPNProfile.id == profile.id)
+                    )
+                    updated = result.scalar_one()
+                    assert updated.traffic_down == 5000
+                    assert updated.traffic_up == 2500

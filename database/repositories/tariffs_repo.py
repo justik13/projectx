@@ -3,12 +3,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import Tariff
 from typing import Optional, List
 
-
 async def get_all_tariffs(session: AsyncSession) -> List[Tariff]:
     stmt = select(Tariff).order_by(Tariff.device_limit, Tariff.sort_order, Tariff.duration_days)
     result = await session.execute(stmt)
     return result.scalars().all()
-
 
 async def get_active_tariffs(session: AsyncSession) -> List[Tariff]:
     stmt = select(Tariff).where(Tariff.is_active == True).order_by(
@@ -17,12 +15,10 @@ async def get_active_tariffs(session: AsyncSession) -> List[Tariff]:
     result = await session.execute(stmt)
     return result.scalars().all()
 
-
 async def get_tariff_by_id(session: AsyncSession, tariff_id: int) -> Optional[Tariff]:
     stmt = select(Tariff).where(Tariff.id == tariff_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
-
 
 async def create_tariff(
     session: AsyncSession,
@@ -40,30 +36,29 @@ async def create_tariff(
         sort_order=sort_order,
     )
     session.add(tariff)
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
     await session.refresh(tariff)
     return tariff
-
 
 async def update_tariff(session: AsyncSession, tariff: Tariff, **kwargs) -> Tariff:
     for key, value in kwargs.items():
         if hasattr(tariff, key):
             setattr(tariff, key, value)
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
     await session.refresh(tariff)
     return tariff
 
-
 async def delete_tariff(session: AsyncSession, tariff: Tariff) -> None:
     await session.delete(tariff)
-    await session.commit()
-
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
 
 async def get_tariff_count(session: AsyncSession) -> int:
     stmt = select(func.count(Tariff.id))
     result = await session.execute(stmt)
     return result.scalar_one()
-
 
 async def get_tariffs_paginated(session: AsyncSession, page: int = 1, per_page: int = 10) -> list[Tariff]:
     offset = (page - 1) * per_page

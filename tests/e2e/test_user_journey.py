@@ -14,11 +14,9 @@ class TestUserJourneyE2E:
     async def test_complete_new_user_flow(self, test_db_session, mock_bot):
         """E2E: Новый пользователь проходит весь путь от /start до активного использования"""
         from bot.handlers.start import cmd_start
-        from bot.handlers.payment import select_tariff, pay_stars, process_successful_payment
-        from bot.handlers.connection import start_add_device, select_server, enter_device_name
-        from database.models import User, Server, Tariff, Payment
+        from bot.handlers.payment import select_tariff, pay_stars
+        from database.models import User, Server, Tariff
 
-        # === SETUP ===
         server = Server(
             name="Test Server", api_url="http://test:4001",
             api_key="test_key", protocol="amneziawg2", max_clients=50,
@@ -31,7 +29,6 @@ class TestUserJourneyE2E:
         test_db_session.add(tariff)
         await test_db_session.commit()
 
-        # === ШАГ 1: /start ===
         message = MagicMock()
         message.from_user = TelegramUser(id=111111111, is_bot=False, first_name="Test", username="testuser")
         message.chat = MagicMock()
@@ -61,7 +58,6 @@ class TestUserJourneyE2E:
                             await cmd_start(message, state, command, test_db_session)
                             mock_render.assert_called_once()
 
-        # === ШАГ 2: Выбор тарифа ===
         callback = MagicMock(spec=CallbackQuery)
         callback.from_user = MagicMock()
         callback.from_user.id = 111111111
@@ -76,7 +72,6 @@ class TestUserJourneyE2E:
             await select_tariff(callback, state, new_user, test_db_session)
             callback.message.edit_text.assert_called_once()
 
-        # === ШАГ 3: Оплата Stars ===
         callback = MagicMock(spec=CallbackQuery)
         callback.from_user = MagicMock()
         callback.from_user.id = 111111111
@@ -97,8 +92,6 @@ class TestUserJourneyE2E:
                 await pay_stars(callback, state, new_user, test_db_session)
                 callback.answer.assert_called()
 
-        # === ШАГ 4-7: пропущены для краткости ===
-
     @pytest.mark.e2e
     @pytest.mark.asyncio
     async def test_referral_system_flow(self, test_db_session, mock_bot):
@@ -106,7 +99,6 @@ class TestUserJourneyE2E:
         from services.payment_service import PaymentService
         from database.models import User, Tariff, Payment
 
-        # === SETUP: Создаём реферера ===
         referrer = User(
             telegram_id=999999999,
             username="referrer",
@@ -115,7 +107,6 @@ class TestUserJourneyE2E:
         )
         test_db_session.add(referrer)
 
-        # Создаём тариф
         tariff = Tariff(
             duration_days=30, device_limit=2,
             price_rub=100, price_stars=100,
@@ -123,7 +114,6 @@ class TestUserJourneyE2E:
         test_db_session.add(tariff)
         await test_db_session.commit()
 
-        # === ШАГ 1: Создаём реферала ===
         referral = User(
             telegram_id=888888888,
             username="referral",
@@ -132,32 +122,28 @@ class TestUserJourneyE2E:
         test_db_session.add(referral)
         await test_db_session.commit()
 
-        # === ШАГ 2: Создаём pending платёж ===
         payment = Payment(
             user_id=referral.id,
             tariff_id=tariff.id,
             amount=100,
             currency="stars",
-            status="pending",  # 🔥 ВАЖНО: pending, а не completed
+            status="pending",
         )
         test_db_session.add(payment)
         await test_db_session.commit()
 
-        # === ШАГ 3: Вызываем РЕАЛЬНУЮ бизнес-логику ===
-        # НЕ мокаем handle_successful_payment — даём ей отработать
         result = await PaymentService.handle_successful_payment(
             test_db_session, payment.id
         )
         assert result is True
 
-        # === ШАГ 4: Проверяем что платёж стал completed ===
+        # 🔥 ИСПРАВЛЕНО: commit перед refresh
+        await test_db_session.commit()
         await test_db_session.refresh(payment)
         assert payment.status == "completed"
 
-        # === ШАГ 5: Проверяем что реферер получил бонус ===
         await test_db_session.refresh(referrer)
-        assert referrer.referral_days == 3  # REFERRAL_BONUS_DAYS = 3
+        assert referrer.referral_days == 3
 
-        # === ШАГ 6: Проверяем что подписка реферера продлена ===
         old_end = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=10)
         assert referrer.subscription_end > old_end

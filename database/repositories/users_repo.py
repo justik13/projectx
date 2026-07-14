@@ -23,14 +23,12 @@ class UserUpdateFields(TypedDict, total=False):
     notified_2h: bool
     tos_accepted: bool
 
-
 async def get_user_by_telegram_id(
     session: AsyncSession, telegram_id: int
 ) -> Optional[User]:
     stmt = select(User).where(User.telegram_id == telegram_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
-
 
 async def create_user(
     session: AsyncSession, telegram_id: int,
@@ -42,10 +40,10 @@ async def create_user(
         first_name=first_name, referred_by=referred_by,
     )
     session.add(user)
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
     await session.refresh(user)
     return user
-
 
 async def update_user(
     session: AsyncSession, user: User, **kwargs: UserUpdateFields
@@ -53,14 +51,14 @@ async def update_user(
     """
     Обновляет пользователя.
     🔥 ИСПРАВЛЕНО: kwargs типизирован через UserUpdateFields для mypy.
+    🔥 ИСПРАВЛЕНО: flush() вместо commit() для работы внутри begin_nested().
     """
     for key, value in kwargs.items():
         if hasattr(user, key):
             setattr(user, key, value)
-    await session.commit()
+    await session.flush()
     await session.refresh(user)
     return user
-
 
 async def extend_subscription(
     session: AsyncSession, user: User, days: int
@@ -76,7 +74,6 @@ async def extend_subscription(
         new_end = current_end + timedelta(days=days)
     return await update_user(session, user, subscription_end=new_end)
 
-
 async def get_all_users(
     session: AsyncSession, limit: int | None = None, offset: int = 0
 ) -> List[User]:
@@ -88,19 +85,16 @@ async def get_all_users(
     result = await session.execute(stmt)
     return result.scalars().all()
 
-
 async def get_user_count(session: AsyncSession) -> int:
     stmt = select(func.count(User.id))
     result = await session.execute(stmt)
     return result.scalar_one()
-
 
 async def get_active_subscriptions_count(session: AsyncSession) -> int:
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
     stmt = select(func.count(User.id)).where(User.subscription_end > now_naive)
     result = await session.execute(stmt)
     return result.scalar_one()
-
 
 async def get_new_users_count_24h(session: AsyncSession) -> int:
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -110,7 +104,6 @@ async def get_new_users_count_24h(session: AsyncSession) -> int:
     result = await session.execute(stmt)
     return result.scalar_one()
 
-
 async def get_users_paginated(
     session: AsyncSession, page: int = 1, per_page: int = 10
 ) -> list[User]:
@@ -119,7 +112,6 @@ async def get_users_paginated(
         select(User).order_by(User.created_at.desc()).offset(offset).limit(per_page)
     )
     return result.scalars().all()
-
 
 async def get_users_paginated_with_profiles(
     session: AsyncSession, page: int = 1, per_page: int = 10
@@ -139,7 +131,6 @@ async def get_users_paginated_with_profiles(
     result = await session.execute(stmt)
     return result.scalars().unique().all()
 
-
 async def get_active_users(session: AsyncSession) -> list[User]:
     """Исключает пользователей, заблокировавших бота"""
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -152,7 +143,6 @@ async def get_active_users(session: AsyncSession) -> list[User]:
     )
     return result.scalars().all()
 
-
 async def get_user_referrals(
     session: AsyncSession, telegram_id: int
 ) -> list[User]:
@@ -163,7 +153,6 @@ async def get_user_referrals(
     )
     result = await session.execute(stmt)
     return result.scalars().all()
-
 
 async def get_user_with_referrals(
     session: AsyncSession, telegram_id: int
@@ -179,7 +168,6 @@ async def get_user_with_referrals(
     )
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
-
     if user:
         referrals_stmt = (
             select(User)
@@ -188,9 +176,7 @@ async def get_user_with_referrals(
         )
         referrals_result = await session.execute(referrals_stmt)
         user._referrals_cache = referrals_result.scalars().all()
-
     return user
-
 
 async def mark_user_bot_blocked(
     session: AsyncSession, telegram_id: int
@@ -199,8 +185,8 @@ async def mark_user_bot_blocked(
     await session.execute(
         update(User).where(User.telegram_id == telegram_id).values(is_bot_blocked=True)
     )
-    await session.commit()
-
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
 
 async def count_users_with_tariff(
     session: AsyncSession, tariff_id: int

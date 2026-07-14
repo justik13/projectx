@@ -28,7 +28,8 @@ async def create_profile(session: AsyncSession, user_id: int, server_id: int, de
         raw_config=raw_config
     )
     session.add(profile)
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit() для работы внутри begin_nested()
+    await session.flush()
     await session.refresh(profile)
     return profile
 
@@ -40,13 +41,15 @@ async def update_profile(session: AsyncSession, profile: VPNProfile, **kwargs) -
     for key, value in kwargs.items():
         if key in ALLOWED_PROFILE_UPDATE_FIELDS:
             setattr(profile, key, value)
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
     await session.refresh(profile)
     return profile
 
 async def delete_profile(session: AsyncSession, profile: VPNProfile) -> None:
     await session.delete(profile)
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
 
 async def get_user_profiles_count(session: AsyncSession, user_id: int) -> int:
     stmt = select(func.count(VPNProfile.id)).where(VPNProfile.user_id == user_id)

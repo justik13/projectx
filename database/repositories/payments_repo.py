@@ -12,14 +12,16 @@ async def create_payment(session: AsyncSession, user_id: int, tariff_id: int, am
         currency=currency
     )
     session.add(payment)
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
     await session.refresh(payment)
     return payment
 
 async def mark_payment_as_paid(session: AsyncSession, payment: Payment) -> Payment:
     payment.status = 'completed'
     payment.paid_at = datetime.now(timezone.utc)
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
     await session.refresh(payment)
     return payment
 
@@ -36,7 +38,6 @@ async def get_last_payment(session: AsyncSession, user_id: int) -> Optional[Paym
 async def get_payment_by_id(session: AsyncSession, payment_id: int) -> Optional[Payment]:
     """Получить платёж по ID с загрузкой связей"""
     from sqlalchemy.orm import selectinload
-    
     result = await session.execute(
         select(Payment)
         .options(
@@ -46,6 +47,7 @@ async def get_payment_by_id(session: AsyncSession, payment_id: int) -> Optional[
         .where(Payment.id == payment_id)
     )
     return result.scalar_one_or_none()
+
 async def mark_payment_as_cancelled(session: AsyncSession, payment_id: int) -> bool:
     """Помечает платёж как отменённый"""
     from sqlalchemy import update
@@ -54,7 +56,8 @@ async def mark_payment_as_cancelled(session: AsyncSession, payment_id: int) -> b
         .where(Payment.id == payment_id, Payment.status == 'pending')
         .values(status='cancelled')
     )
-    await session.commit()
+    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+    await session.flush()
     return result.rowcount > 0
 
 async def get_payment_by_id_simple(session: AsyncSession, payment_id: int) -> Optional[Payment]:
