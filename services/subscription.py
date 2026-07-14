@@ -31,10 +31,8 @@ class SubscriptionService:
         """
         user = await get_user_by_telegram_id(session, telegram_id)
         if user:
-            # Пользователь уже существует — не трогаем referred_by
             return user
 
-        # 🔥 Пользователь новый — проверяем реферала
         referred_by = None
         if ref_id is not None and ref_id != telegram_id:
             ref_user = await get_user_by_telegram_id(session, ref_id)
@@ -60,10 +58,8 @@ class SubscriptionService:
         current_end = user.subscription_end if (
             user.subscription_end and user.subscription_end > now
         ) else now
-
         new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else current_end + timedelta(days=days)
-        
-        # Сбрасываем флаги уведомлений при продлении
+
         user.subscription_end = new_end
         user.notified_3d = False
         user.notified_1d = False
@@ -74,12 +70,14 @@ class SubscriptionService:
         if new_tariff_id is not None:
             user.current_tariff_id = new_tariff_id
 
-        await session.commit()
+        # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
+        # - Внутри begin_nested() (savepoint): не release savepoint преждевременно
+        # - Вне savepoint: update_user/create_audit_log всё равно делают commit()
+        await session.flush()
         return user
 
     @staticmethod
     async def get_expires_timestamp(user: User) -> Optional[int]:
         if not user.subscription_end or user.subscription_end.year >= 2100:
             return None
-        # naive UTC datetime -> добавляем tzinfo UTC -> timestamp
         return int(user.subscription_end.replace(tzinfo=timezone.utc).timestamp())
