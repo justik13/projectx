@@ -213,7 +213,7 @@ async def process_add_server(message: Message, state: FSMContext, session: Async
             return
 
         # 🔥 ИСПРАВЛЕНО: Защита от SSRF
-        if not is_safe_url(api_url):
+        if not await is_safe_url(api_url):
             await render_hub(
                 message.bot, message.chat.id,
                 "⚠️ <b>URL запрещен правилами безопасности</b>\n"

@@ -313,25 +313,28 @@ async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: As
 
 @router.callback_query(F.data.startswith("pay_sbp:"))
 async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
-    """Создание платежа через Platega.io СБП"""
     await callback.answer("⏳ Создаю платеж...")
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(texts.ERROR_TARIFF_NOT_FOUND, show_alert=True)
         return
-        
+    
     db_user = await get_user_by_telegram_id(session, callback.from_user.id)
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
-
+    
+    # 🔥 ИСПРАВЛЕНО: Получаем username бота динамически
+    bot_info = await callback.bot.get_me()
+    
     payment, _ = await PaymentService.create_platega_payment(
         session=session,
         user_id=db_user.id,
         tariff_id=tariff.id,
         amount=float(tariff.price_rub),
-        telegram_id=db_user.telegram_id
+        telegram_id=db_user.telegram_id,
+        bot_username=bot_info.username  # 🔥 ПЕРЕДАЕМ USERNAME
     )
     
     if not payment or not payment.payment_url:
@@ -341,16 +344,14 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSess
             get_back_button(f"select_tariff:{tariff_id}")
         )
         return
-
+    
     await state.update_data(payment_id=payment.id)
     
     text = texts.PAYMENT_SBP_INSTRUCTIONS.format(
         amount=tariff.price_rub,
         payment_url=payment.payment_url
     )
-
-    # 🔥 ИСПРАВЛЕНО: Убираем генерацию и отправку QR-кода ботом.
-    # Отправляем только ссылку на платежную страницу Platega (SMH).
+    
     await render_hub(
         callback.bot, callback.message.chat.id,
         text,

@@ -57,7 +57,13 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
         logger.error(f"Platega webhook error: {e}", exc_info=True)
         return web.Response(status=500, text="Internal server error")
 
+async def healthcheck_handler(request: web.Request) -> web.Response:
+    """Эндпоинт для мониторинга (UptimeRobot, Healthchecks.io)"""
+    return web.Response(status=200, text="OK")
+
 def setup_webhook_routes(app: web.Application):
     """Регистрирует webhook маршруты"""
     app.router.add_post("/webhook/platega", platega_webhook_handler)
+    app.router.add_get("/health", healthcheck_handler)  # 🔥 ДОБАВИТЬ
     logger.info("Platega webhook route registered: POST /webhook/platega")
+    logger.info("Healthcheck endpoint registered: GET /health")

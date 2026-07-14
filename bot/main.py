@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 
 async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
-    """Глобальный обработчик ошибок"""
+    """Глобальный обработчик ошибок с алертом админам"""
+    import traceback
     logger.critical(f"Unhandled exception: {event.exception}", exc_info=event.exception)
     
     state = kwargs.get("state")
@@ -32,7 +33,23 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             await state.clear()
         except Exception:
             pass
-
+    
+    # 🔥 НОВОЕ: Отправка traceback админам
+    try:
+        settings = get_settings()
+        error_traceback = traceback.format_exc(limit=15)
+        error_msg = (
+            f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА БОТА</b>\n"
+            f"<pre><code>{error_traceback[:3500]}</code></pre>"
+        )
+        for admin_id in settings.ADMIN_IDS:
+            try:
+                await event.bot.send_message(admin_id, error_msg, parse_mode="HTML")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"Failed to send error alert: {e}")
+    
     try:
         if event.update.callback_query:
             await event.update.callback_query.answer(
@@ -44,7 +61,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             )
     except Exception:
         pass
-
     return True
 
 
@@ -99,17 +115,14 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
 
 async def start_webhook_server(port: int):
-    """Запускает aiohttp сервер для webhook"""
     app = web.Application()
     setup_webhook_routes(app)
-    
     runner = web.AppRunner(app)
     await runner.setup()
-    
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    # 🔥 ИСПРАВЛЕНО: Слушаем только localhost, Nginx проксирует сюда
+    site = web.TCPSite(runner, "127.0.0.1", port) 
     await site.start()
-    
-    logger.info(f"Webhook server started on port {port}")
+    logger.info(f"Webhook server started on 127.0.0.1:{port}")
     return runner
 
 
