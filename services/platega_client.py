@@ -1,10 +1,15 @@
 import aiohttp
 import logging
 from typing import Optional, Dict
+from aiohttp import ClientTimeout
 from config.settings import get_settings
-from services.amnezia_client import get_http_session  # 🔥 ДОБАВИТЬ ИМПОРТ
+from services.amnezia_client import get_http_session
 
 logger = logging.getLogger(__name__)
+
+# 🔥 ИСПРАВЛЕНО: Явный ClientTimeout для aiohttp 3.14+ (убирает deprecation warning)
+PLATEGA_TIMEOUT = ClientTimeout(total=30, connect=10)
+
 
 class PlategaClient:
     def __init__(self):
@@ -43,10 +48,9 @@ class PlategaClient:
             "payload": payload
         }
         try:
-            # 🔥 ИСПРАВЛЕНО: Используем глобальную сессию
             session = await get_http_session()
             async with session.post(
-                url, json=data, headers=self._get_headers(), timeout=30
+                url, json=data, headers=self._get_headers(), timeout=PLATEGA_TIMEOUT
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -63,10 +67,9 @@ class PlategaClient:
     async def check_status(self, transaction_id: str) -> Optional[Dict]:
         url = f"{self.base_url}/transaction/{transaction_id}"
         try:
-            # 🔥 ИСПРАВЛЕНО: Используем глобальную сессию
             session = await get_http_session()
             async with session.get(
-                url, headers=self._get_headers(), timeout=30
+                url, headers=self._get_headers(), timeout=PLATEGA_TIMEOUT
             ) as response:
                 if response.status == 200:
                     result = await response.json()

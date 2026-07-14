@@ -18,53 +18,97 @@ class PaymentService:
     async def handle_successful_payment(
         session: AsyncSession, payment_id: int
     ) -> bool:
-        """Обрабатывает успешную оплату. Возвращает True при успехе."""
-        stmt = (
-            update(Payment)
-            .where(Payment.id == payment_id, Payment.status == 'pending')
-            .values(status='completed', paid_at=datetime.now(timezone.utc).replace(tzinfo=None))
-        )
-        result = await session.execute(stmt)
-        if result.rowcount == 0:
-            return True
-
-        result = await session.execute(
-            select(Payment)
-            .options(selectinload(Payment.user), selectinload(Payment.tariff))
-            .where(Payment.id == payment_id)
-        )
-        payment = result.scalar_one()
-        tariff = payment.tariff
-        user = payment.user
-
-        if not tariff or not user:
-            await session.rollback()
-            return False
-
-        new_device_limit = getattr(tariff, 'device_limit', user.device_limit)
-        await SubscriptionService.extend_subscription(
-            session,
-            user.telegram_id,
-            tariff.duration_days,
-            new_device_limit=new_device_limit,
-            new_tariff_id=tariff.id,
-        )
-
-        payments = await get_user_payments(session, user.id)
-        completed_payments = [p for p in payments if p.status == 'completed']
-        is_first_payment = len(completed_payments) == 1
-
-        if is_first_payment and user.referred_by:
-            await ReferralService.process_bonus(session, user.telegram_id, user.referred_by)
-
-        user.last_payment_at = datetime.now(timezone.utc).replace(tzinfo=None)
-
+        """
+        Обрабатывает успешную оплату. Возвращает True при успехе.
+        
+        🔥 ИСПРАВЛЕНО: Атомарность через savepoint (begin_nested).
+        Раньше: если extend_subscription падал после commit,
+                платёж оставался completed, но подписка не продлялась.
+        Теперь: все изменения (платёж + подписка + реферал) в одной транзакции.
+        """
         try:
+            # 🔥 ИСПРАВЛЕНО: Вложенная транзакция (savepoint)
+            async with session.begin_nested() as savepoint:
+                # 1. Помечаем платёж как completed
+                stmt = (
+                    update(Payment)
+                    .where(Payment.id == payment_id, Payment.status == 'pending')
+                    .values(
+                        status='completed',
+                        paid_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                    )
+                )
+                result = await session.execute(stmt)
+                if result.rowcount == 0:
+                    # Idempotency: платёж уже обработан
+                    await savepoint.commit()
+                    return True
+
+                # 2. Загружаем платёж с связями
+                result = await session.execute(
+                    select(Payment)
+                    .options(selectinload(Payment.user), selectinload(Payment.tariff))
+                    .where(Payment.id == payment_id)
+                )
+                payment = result.scalar_one()
+                tariff = payment.tariff
+                user = payment.user
+
+                if not tariff or not user:
+                    logger.error(f"Payment {payment_id}: missing tariff or user")
+                    await savepoint.rollback()
+                    return False
+
+                # 3. Продлеваем подписку (если упадёт — savepoint откатится)
+                new_device_limit = getattr(tariff, 'device_limit', user.device_limit)
+                try:
+                    await SubscriptionService.extend_subscription(
+                        session,
+                        user.telegram_id,
+                        tariff.duration_days,
+                        new_device_limit=new_device_limit,
+                        new_tariff_id=tariff.id,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to extend subscription for payment {payment_id}: {e}",
+                        exc_info=True
+                    )
+                    await savepoint.rollback()
+                    return False
+
+                # 4. Реферальный бонус (не критично, но в той же транзакции)
+                payments = await get_user_payments(session, user.id)
+                completed_payments = [p for p in payments if p.status == 'completed']
+                is_first_payment = len(completed_payments) == 1
+
+                if is_first_payment and user.referred_by:
+                    try:
+                        await ReferralService.process_bonus(
+                            session, user.telegram_id, user.referred_by
+                        )
+                    except Exception as e:
+                        # Реферальный бонус не должен блокировать оплату
+                        logger.warning(
+                            f"Referral bonus failed for payment {payment_id}: {e}"
+                        )
+
+                # 5. Обновляем last_payment_at
+                user.last_payment_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+                # 6. Фиксируем savepoint
+                await savepoint.commit()
+
+            # 7. Финальный commit основной транзакции
             await session.commit()
+            logger.info(
+                f"Payment {payment_id} processed successfully for user {user.telegram_id}"
+            )
             return True
+
         except Exception as e:
             await session.rollback()
-            logger.error(f"Failed to commit payment {payment_id}: {e}", exc_info=True)
+            logger.error(f"Failed to process payment {payment_id}: {e}", exc_info=True)
             return False
 
     @staticmethod
@@ -74,7 +118,7 @@ class PaymentService:
         tariff_id: int,
         amount: float,
         telegram_id: int,
-        bot_username: str  # 🔥 ДОБАВИТЬ ПАРАМЕТР
+        bot_username: str
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
         settings = get_settings()
@@ -86,15 +130,14 @@ class PaymentService:
             amount=int(amount),
             currency="RUB"
         )
-    
+
         description = f"Оплата подписки. TgId:{telegram_id} UserId:{user_id}"
-    
-    # 🔥 ИСПРАВЛЕНО: Используем переданный bot_username
+
         clean_username = bot_username.lstrip("@")
         return_url = settings.PLATEGA_RETURN_URL.format(bot_username=clean_username)
         failed_url = settings.PLATEGA_FAILED_URL.format(bot_username=clean_username)
         payload = f"payment_{payment.id}"
-    
+
         client = PlategaClient()
         transaction = await client.create_transaction(
             amount=amount,
@@ -104,19 +147,19 @@ class PaymentService:
             failed_url=failed_url,
             payload=payload
         )
-    
+
         if not transaction:
             payment.status = "failed"
             await session.commit()
             return payment, None
-    
+
         payment.external_id = transaction.get("transactionId")
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get("paymentMethod", "SBPQR")
         await session.commit()
-    
+
         return payment, None
-    
+
     @staticmethod
     async def handle_platega_callback(
         session: AsyncSession,
@@ -132,53 +175,48 @@ class PaymentService:
         )
         result = await session.execute(stmt)
         payment = result.scalar_one_or_none()
-        
+
         if not payment:
             logger.warning(f"Platega callback: payment not found for {transaction_id}")
             return False
-        
+
         logger.info(f"Platega callback: payment {payment.id} status={status}")
-        
+
         if status == "CONFIRMED":
             return await PaymentService.handle_successful_payment(session, payment.id)
-        
         elif status == "CANCELED":
             payment.status = "cancelled"
             await session.commit()
             return True
-        
         elif status == "CHARGEBACKED":
             payment.status = "refunded"
             await session.commit()
             logger.warning(f"Chargeback for payment {payment.id}")
             return True
-        
+
         return False
 
     @staticmethod
     async def check_platega_payment(session: AsyncSession, payment_id: int) -> bool:
         """Проверяет статус платежа в Platega (для кнопки 'Проверить оплату')"""
         payment = await get_payment_by_id(session, payment_id)
-        
         if not payment or not payment.external_id:
             return False
-        
+
         if payment.status != "pending":
             return payment.status == "completed"
-        
+
         client = PlategaClient()
         status_data = await client.check_status(payment.external_id)
-        
         if not status_data:
             return False
-        
+
         status = status_data.get("status")
-        
         if status == "CONFIRMED":
             return await PaymentService.handle_successful_payment(session, payment.id)
         elif status == "CANCELED":
             payment.status = "cancelled"
             await session.commit()
             return False
-        
+
         return False
