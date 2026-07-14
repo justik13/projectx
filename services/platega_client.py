@@ -47,6 +47,7 @@ class PlategaClient:
             "failedUrl": failed_url,
             "payload": payload
         }
+        
         try:
             session = await get_http_session()
             async with session.post(
@@ -73,6 +74,9 @@ class PlategaClient:
             ) as response:
                 if response.status == 200:
                     result = await response.json()
+                    # 🔥 ИСПРАВЛЕНО: Нормализация status через .upper()
+                    if "status" in result and isinstance(result["status"], str):
+                        result["status"] = result["status"].upper()
                     return result
                 elif response.status == 404:
                     logger.warning(f"Platega transaction {transaction_id} not found")

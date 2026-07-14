@@ -48,15 +48,12 @@ async def test_db_session():
         echo=False,
         connect_args={"check_same_thread": False},
     )
-    
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     
     async_session = async_sessionmaker(engine, expire_on_commit=False)
-    
     async with async_session() as session:
         yield session
-    
     await engine.dispose()
 
 
@@ -87,6 +84,10 @@ def mock_bot():
 
 @pytest.fixture
 def sample_vpn_uri():
+    """
+    🔥 ИСПРАВЛЕНО: Корректный sample_vpn_uri с полным client_priv_key.
+    Используется для тестов vpn_parser и device_service.
+    """
     import base64, zlib, json
     
     config_data = {
@@ -105,13 +106,13 @@ def sample_vpn_uri():
                 "I1": "<r 2><b 0x8580>",
                 "I2": "", "I3": "", "I4": "", "I5": "",
                 "last_config": json.dumps({
-                    "config": "[Interface]\nAddress = 10.8.1.34/32\nDNS = 1.1.1.1, 1.0.0.1\nPrivateKey = test_priv_key\nJc = 4\nJmin = 10\nJmax = 50\nS1 = 79\nS2 = 115\nS3 = 5\nS4 = 1\nH1 = 169154911-1234371153\nH2 = 2057051984-2121122945\nH3 = 2132872968-2133668229\nH4 = 2136455412-2141801388\nh1 = <r 2><b 0x8580>\nh2 = \nh3 = \nh4 = \nh5 = \n\n[Peer]\nPublicKey = test_pub_key\nPresharedKey = test_psk\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = test.server.com:1234\nPersistentKeepalive = 25",
+                    "config": "[Interface]\nAddress = 10.8.1.34/32\nDNS = 1.1.1.1, 1.0.0.1\nPrivateKey = uC6xUgdQDF4+fAOiw37ZQCG7XljilDsnBCl7VH7bAl8=\nJc = 4\nJmin = 10\nJmax = 50\nS1 = 79\nS2 = 115\nS3 = 5\nS4 = 1\nH1 = 169154911-1234371153\nH2 = 2057051984-2121122945\nH3 = 2132872968-2133668229\nH4 = 2136455412-2141801388\nh1 = <r 2><b 0x8580>\nh2 = \nh3 = \nh4 = \nh5 = \n\n[Peer]\nPublicKey = bRqF9LY7lnONibMDWH3u0QbeC7QbrLYPufdO4QMm53o=\nPresharedKey = PGh2rNsBmWVJC7qpa3fZ1dwB6tLjBUVKsxSZK6pMQRY=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = test.server.com:1234\nPersistentKeepalive = 25",
                     "mtu": "1376",
                     "client_ip": "10.8.1.34",
-                    "client_priv_key": "test_priv_key",
-                    "client_pub_key": "test_client_pub",
-                    "server_pub_key": "test_pub_key",
-                    "psk_key": "test_psk",
+                    "client_priv_key": "uC6xUgdQDF4+fAOiw37ZQCG7XljilDsnBCl7VH7bAl8=",
+                    "client_pub_key": "dwvGfuluZKlNwickCgPb6DLiUE36icqZPiQWX/BHwBk=",
+                    "server_pub_key": "bRqF9LY7lnONibMDWH3u0QbeC7QbrLYPufdO4QMm53o=",
+                    "psk_key": "PGh2rNsBmWVJC7qpa3fZ1dwB6tLjBUVKsxSZK6pMQRY=",
                     "hostName": "test.server.com",
                     "port": 1234,
                     "persistent_keep_alive": "25",

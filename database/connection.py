@@ -23,10 +23,12 @@ async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
     db_url = f"sqlite+aiosqlite:///{settings.DB_PATH}"
-    
-    _engine = create_async_engine(db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30}, pool_pre_ping=True)
+    _engine = create_async_engine(
+        db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30},
+        pool_pre_ping=True
+    )
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
-    
+
     @event.listens_for(_engine.sync_engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
@@ -36,12 +38,12 @@ async def init_db():
         cursor.execute("PRAGMA cache_size=-64000")
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
-    
+
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _run_migrations(conn)
         await _seed_default_tariffs()
-    
+
     logging.info(f"Database initialized at {settings.DB_PATH}")
     return _engine, _sessionmaker
 
@@ -73,7 +75,6 @@ async def _run_migrations(conn):
             
             # Миграция таблицы payments
             payment_columns = {col['name'] for col in inspector.get_columns('payments')}
-            
             # 🔥 ИСПРАВЛЕНО: Жестко заданный список миграций для безопасности
             # Все имена полей и типы определены в коде, не в пользовательском вводе
             PAYMENT_MIGRATIONS = [
@@ -82,11 +83,24 @@ async def _run_migrations(conn):
                 ("qr_code", "TEXT"),
                 ("payment_method", "VARCHAR(50)"),
             ]
-            
             for field_name, field_type in PAYMENT_MIGRATIONS:
                 if field_name not in payment_columns:
                     # БЕЗОПАСНО: field_name и field_type из жестко заданного списка выше
                     sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {field_name} {field_type}"))
+            
+            # 🔥 НОВОЕ: Unique constraint на peer_id для защиты от race condition
+            # Проверяем, существует ли уже индекс
+            indexes = inspector.get_indexes('vpn_profiles')
+            index_names = {idx['name'] for idx in indexes}
+            if 'uq_vpn_profiles_peer_id' not in index_names:
+                try:
+                    sync_conn.execute(
+                        text("CREATE UNIQUE INDEX uq_vpn_profiles_peer_id ON vpn_profiles(peer_id)")
+                    )
+                    logging.info("Migration: created unique index on vpn_profiles.peer_id")
+                except Exception as e:
+                    # Если индекс уже существует или есть дубликаты — логируем и продолжаем
+                    logging.warning(f"Migration: failed to create unique index on peer_id: {e}")
         
         await conn.run_sync(check_and_migrate)
     except Exception as e:
