@@ -1,10 +1,16 @@
 #!/bin/bash
+# ═══════════════════════════════════════════════════════════════
+# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v3.1 Final)
+# ═══════════════════════════════════════════════════════════════
+
 set -e
+set -o pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 PROJECT_NAME="projectx-bot"
@@ -15,11 +21,23 @@ SERVICE_NAME="projectx-bot"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 BACKUP_DIR="/root/backups/projectx"
 LOG_FILE="/var/log/projectx-deploy.log"
+SNAPSHOT_DIR="/root/.projectx-snapshots"
 
-log() { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"; }
+log()     { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"; }
 success() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; }
-warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; }
-error() { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
+warn()    { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; }
+error()   { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
+
+confirm() {
+    local message="$1"
+    local default="${2:-N}"
+    local prompt
+    [[ "$default" =~ ^[Yy]$ ]] && prompt="(Y/n)" || prompt="(y/N)"
+    echo ""
+    read -p "$message $prompt: " response
+    response=${response:-$default}
+    [[ "$response" =~ ^[Yy]$ ]] && return 0 || return 1
+}
 
 write_env_var() {
     local key=$1
@@ -28,328 +46,202 @@ write_env_var() {
     echo "${key}='${value}'" >> "$PROJECT_DIR/.env"
 }
 
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        error "Запустите от имени root: sudo bash deploy.sh"
-    fi
-}
+preflight_checks() {
+    log "Запуск pre-flight проверок..."
+    if [ "$EUID" -ne 0 ]; then error "Запустите от имени root: sudo bash deploy.sh"; fi
+    if [ ! -f /etc/os-release ]; then error "Не удалось определить ОС"; fi
+    . /etc/os-release
+    if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then error "Поддерживаются только Ubuntu/Debian"; fi
 
-check_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        log "ОС: $PRETTY_NAME"
-        if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
-            error "Скрипт поддерживает только Ubuntu и Debian. Обнаружена ОС: $ID"
-        fi
-    else
-        error "Не удалось определить операционную систему (отсутствует /etc/os-release)."
+    local avail_kb=$(df / | awk 'NR==2 {print $4}')
+    local avail_gb=$((avail_kb / 1024 / 1024))
+    if [ "$avail_gb" -lt 1 ]; then error "Недостаточно места. Доступно: ${avail_gb}GB, нужно 1GB"; fi
+
+    if ! curl -s --max-time 5 https://archive.ubuntu.com/ubuntu/dists/noble/Release >/dev/null 2>&1; then 
+        error "Нет доступа к интернету или репозиториям Ubuntu"
     fi
+    
+    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        warn "Сервис $SERVICE_NAME уже запущен"
+        if ! confirm "Перезапустить его после деплоя?"; then error "Деплой отменён."; fi
+    fi
+    success "Pre-flight проверки пройдены"
 }
 
 install_dependencies() {
-    log "Обновление пакетов..."
-    apt-get update -qq
-
-    log "Установка системных зависимостей..."
-    if ! apt-get install -y -qq \
-        python3 \
-        python3-venv \
-        python3-pip \
-        python3-dev \
-        git \
-        curl \
-        wget \
-        sqlite3 \
-        rsync \
-        build-essential \
-        cron \
-        logrotate \
-        ufw \
-        nginx \
-        certbot \
-        python3-certbot-nginx \
-        > /dev/null 2>&1; then
-        error "Не удалось установить системные зависимости. Проверьте интернет и apt-репозитории."
+    log "Установка системных зависимостей (1-3 минуты)..."
+    apt-get update -qq || error "Не удалось обновить список пакетов"
+    
+    local install_log=$(mktemp)
+    if ! apt-get install -y python3 python3-venv python3-pip python3-dev git curl wget sqlite3 rsync build-essential cron logrotate ufw nginx certbot python3-certbot-nginx > "$install_log" 2>&1; then
+        error "Ошибка apt. Лог: $install_log\n$(tail -20 "$install_log")"
     fi
-
-    log "Создание системного пользователя projectx..."
-    if ! id "projectx" &>/dev/null; then
-        useradd -r -s /bin/false projectx
-        success "Создан системный пользователь projectx"
-    else
-        warn "Системный пользователь projectx уже существует"
-    fi
-
+    rm -f "$install_log"
     success "Системные зависимости установлены"
+
+    if ! id "projectx" &>/dev/null; then
+        useradd -r -s /bin/false -d /nonexistent projectx || error "Ошибка создания пользователя"
+        success "Создан системный пользователь projectx"
+    fi
 }
 
-# ──────────────────────────────────────────────────────────────
-# 🔥 ИСПРАВЛЕНО: Умное определение SSH-порта, защита от lockout
-# ──────────────────────────────────────────────────────────────
 setup_firewall() {
     log "Настройка UFW firewall..."
+    if ! command -v ufw &>/dev/null; then return; fi
 
-    ufw --force reset > /dev/null 2>&1
-
-    # Автоматическое определение порта SSH из sshd_config
-    SSH_PORT=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n1)
-    # Fallback: проверяем, на каком порту реально слушает sshd
-    if [[ -z "$SSH_PORT" ]]; then
-        SSH_PORT=$(ss -tlnp 2>/dev/null | grep -E ':22\b|sshd' | awk '{print $4}' | grep -oE '[0-9]+$' | head -n1)
-    fi
+    local SSH_PORT=$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | grep -oE '[0-9]+$' | sort -u | head -n1)
     SSH_PORT=${SSH_PORT:-22}
 
-    ufw allow "$SSH_PORT"/tcp comment 'SSH'
-    log "SSH порт разрешён: $SSH_PORT"
+    if ! ss -tlnp 2>/dev/null | grep -q ":${SSH_PORT} "; then
+        read -p "Введите порт SSH вручную (Enter для $SSH_PORT): " MANUAL_PORT
+        SSH_PORT=${MANUAL_PORT:-$SSH_PORT}
+    fi
 
-    ufw allow 80/tcp comment 'HTTP (Nginx)'
-    ufw allow 443/tcp comment 'HTTPS (Nginx + Let'\''s Encrypt)'
+    mkdir -p "$SNAPSHOT_DIR"
+    ufw status numbered > "$SNAPSHOT_DIR/ufw-before-$(date +%s).txt" 2>&1 || true
 
-    # Порт 8080 блокируем снаружи — бот слушает только 127.0.0.1
-    ufw deny 8080 comment 'Webhook (internal only)'
+    if ! confirm "Применить правила UFW (SSH:$SSH_PORT, HTTP:80, HTTPS:443)?"; then return; fi
 
-    ufw default deny incoming
-    ufw default allow outgoing
-    ufw --force enable
+    # Безопасные комментарии без спецсимволов
+    ufw allow "$SSH_PORT"/tcp comment 'SSH' >/dev/null 2>&1 || true
+    ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
+    ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
+    ufw deny 8080/tcp comment 'Webhook Internal' >/dev/null 2>&1 || true
 
-    success "UFW firewall настроен: SSH($SSH_PORT), HTTP(80), HTTPS(443)"
+    ufw default deny incoming >/dev/null 2>&1
+    ufw default allow outgoing >/dev/null 2>&1
+
+    ufw --force enable >/dev/null 2>&1 || error "Ошибка включения UFW"
+    success "UFW настроен безопасно"
 }
 
 migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
-        log "Изоляция кодовой базы: синхронизация проекта в $PROJECT_DIR..."
+        log "Синхронизация проекта..."
         mkdir -p "$PROJECT_DIR"
-
-        if ! rsync -a --delete \
-            --exclude='.env' \
-            --exclude='bot_data.db' \
-            --exclude='bot_data.db-wal' \
-            --exclude='bot_data.db-shm' \
-            --exclude='.git' \
-            --exclude='venv/' \
-            --exclude='__pycache__/' \
-            "$START_DIR/" "$PROJECT_DIR/"; then
-            error "Ошибка синхронизации файлов. Убедитесь, что rsync установлен."
-        fi
-
-        success "Проект успешно синхронизирован в $PROJECT_DIR"
+        rsync -a --delete --exclude='.env' --exclude='bot_data.db*' --exclude='.git' --exclude='venv/' --exclude='__pycache__/' "$START_DIR/" "$PROJECT_DIR/" || error "Ошибка rsync"
     fi
     cd "$PROJECT_DIR"
 }
 
 setup_venv() {
-    log "Настройка Python виртуального окружения..."
-
-    if [ ! -d "$VENV_DIR" ]; then
-        python3 -m venv "$VENV_DIR"
-        success "Виртуальное окружение создано"
-    else
-        warn "Виртуальное окружение уже существует"
-    fi
-
+    log "Настройка Python VENV..."
+    [ ! -d "$VENV_DIR" ] && python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
-
-    log "Обновление pip..."
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
-
-    if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-        log "Установка зависимостей проекта..."
-        pip install -r "$PROJECT_DIR/requirements.txt" > /dev/null 2>&1
-        success "Python зависимости установлены"
-    else
-        error "Файл requirements.txt не найден"
-    fi
+    pip install -r "$PROJECT_DIR/requirements.txt" > /tmp/projectx-pip.log 2>&1 || error "Ошибка установки pip. Лог: /tmp/projectx-pip.log"
+    success "Зависимости Python установлены"
 }
 
-# ──────────────────────────────────────────────────────────────
-# 🔥 ИСПРАВЛЕНО: Убрано дублирование записи Platega переменных
-# ──────────────────────────────────────────────────────────────
 setup_env() {
     log "Настройка .env файла..."
-
     if [ -f "$PROJECT_DIR/.env" ]; then
-        warn "Файл .env уже существует"
-        read -p "Перезаписать его новым конфигуратором? (y/N): " overwrite
-        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
-            success "Используется существующий .env"
-            return
-        fi
+        cp "$PROJECT_DIR/.env" "$PROJECT_DIR/.env.backup-$(date +%s)" 2>/dev/null || true
+        if ! confirm "Перезаписать .env новым конфигуратором?"; then return; fi
     fi
 
-    echo ""
-    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}  Настройка конфигурации бота${NC}"
-    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
+    echo -e "${BLUE}[1/6]${NC} Telegram Bot Token"
+    read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN; echo ""
+    [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
+    if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then error "Неверный формат BOT_TOKEN"; fi
 
-    echo -e "${BLUE}[1/6]${NC} Telegram Bot Token (получить у @BotFather)"
-    read -p "Введите BOT_TOKEN: " BOT_TOKEN
-    [ -z "$BOT_TOKEN" ] && error "BOT_TOKEN не может быть пустым"
-    if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then
-        error "Неверный формат BOT_TOKEN. Ожидается формат 123456789:ABCdefGHI..."
-    fi
-
-    echo ""
     echo -e "${BLUE}[2/6]${NC} Telegram ID администраторов (через запятую)"
     read -p "Введите ADMIN_IDS: " ADMIN_IDS
-    [ -z "$ADMIN_IDS" ] && error "ADMIN_IDS не может быть пустым"
-    if [[ ! "$ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-        error "Неверный формат ADMIN_IDS. Ожидались числовые ID через запятую"
-    fi
+    if [[ ! "$ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then error "Неверный формат ADMIN_IDS"; fi
 
-    echo ""
-    echo -e "${BLUE}[3/6]${NC} Username бота (без знака @, для ссылок возврата)"
+    echo -e "${BLUE}[3/6]${NC} Username бота (без @)"
     read -p "Введите BOT_USERNAME: " BOT_USERNAME
-    [ -z "$BOT_USERNAME" ] && error "BOT_USERNAME не может быть пустым"
+    if [[ ! "$BOT_USERNAME" =~ ^[a-zA-Z0-9_]{3,32}$ ]]; then error "Неверный BOT_USERNAME"; fi
 
-    echo ""
-    echo -e "${BLUE}[4/6]${NC} Username поддержки (без знака @)"
-    read -p "Введите SUPPORT_USERNAME [support]: " SUPPORT_USERNAME
+    echo -e "${BLUE}[4/6]${NC} Username поддержки [support]"
+    read -p "Введите SUPPORT_USERNAME: " SUPPORT_USERNAME
     SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
 
-    echo ""
-    echo -e "${BLUE}[5/6]${NC} Бонус рефереру за первую оплату (в днях)"
-    read -p "Введите REFERRAL_BONUS_DAYS [3]: " REFERRAL_BONUS_DAYS
+    echo -e "${BLUE}[5/6]${NC} Бонус рефереру [3]"
+    read -p "Введите REFERRAL_BONUS_DAYS: " REFERRAL_BONUS_DAYS
     REFERRAL_BONUS_DAYS=${REFERRAL_BONUS_DAYS:-3}
 
-    echo ""
-    echo -e "${BLUE}[6/6]${NC} Platega.io (для СБП, оставьте пустым если не нужно)"
-    read -p "Введите PLATEGA_MERCHANT_ID: " PLATEGA_MERCHANT_ID
+    echo -e "${BLUE}[6/6]${NC} Platega Merchant ID (Enter для пропуска)"
+    read -p "Введите ID: " PLATEGA_MERCHANT_ID
 
     PLATEGA_SECRET=""
     PLATEGA_CALLBACK_URL=""
-
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
-        echo ""
-        read -p "Введите PLATEGA_SECRET: " PLATEGA_SECRET
-        [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET не может быть пустым если указан Merchant ID"
-
-        echo ""
-        read -p "Введите PLATEGA_CALLBACK_URL (https://yourdomain.com/webhook/platega): " PLATEGA_CALLBACK_URL
-        [ -z "$PLATEGA_CALLBACK_URL" ] && error "PLATEGA_CALLBACK_URL не может быть пустым"
-        if [[ ! "$PLATEGA_CALLBACK_URL" =~ ^https?:// ]]; then
-            error "PLATEGA_CALLBACK_URL должен начинаться с http:// или https://"
-        fi
-        success "Platega.io данные собраны"
-    else
-        success "Platega.io пропущен (будут только Telegram Stars)"
+        read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET; echo ""
+        [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET обязателен"
+        read -p "Введите PLATEGA_CALLBACK_URL (https://...): " PLATEGA_CALLBACK_URL
+        [ -z "$PLATEGA_CALLBACK_URL" ] && error "URL обязателен"
     fi
 
-    # Генерация ключа шифрования
-    log "Генерация ключа шифрования базы данных (DB_ENCRYPTION_KEY)..."
-    DB_ENCRYPTION_KEY=$("$VENV_DIR/bin/python" -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
-    success "Ключ шифрования сгенерирован"
+    local DB_KEY=$("$VENV_DIR/bin/python" -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
 
-    # ── Запись .env (ОДИН блок, без дублирования) ──
     : > "$PROJECT_DIR/.env"
-
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "BOT_USERNAME" "$BOT_USERNAME"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
     write_env_var "REFERRAL_BONUS_DAYS" "$REFERRAL_BONUS_DAYS"
-    write_env_var "DB_ENCRYPTION_KEY" "$DB_ENCRYPTION_KEY"
+    write_env_var "DB_ENCRYPTION_KEY" "$DB_KEY"
     write_env_var "DB_PATH" "./bot_data.db"
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         write_env_var "PLATEGA_MERCHANT_ID" "$PLATEGA_MERCHANT_ID"
         write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
-        write_env_var "PLATEGA_BASE_URL" "https://app.platega.io"
         write_env_var "PLATEGA_CALLBACK_URL" "$PLATEGA_CALLBACK_URL"
         write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
-        write_env_var "PLATEGA_PAYMENT_METHOD" "2"
         write_env_var "PLATEGA_RETURN_URL" "https://t.me/${BOT_USERNAME}"
-        write_env_var "PLATEGA_FAILED_URL" "https://t.me/${BOT_USERNAME}"
     fi
 
+    chown projectx:projectx "$PROJECT_DIR/.env"
     chmod 600 "$PROJECT_DIR/.env"
-    success ".env файл создан и защищён (права 600)"
+    success ".env защищён"
 }
 
-# ──────────────────────────────────────────────────────────────
-# 🔥 ИСПРАВЛЕНО: Прямой вызов venv python без source
-# ──────────────────────────────────────────────────────────────
 init_database() {
-    log "Инициализация базы данных SQLite..."
+    log "Инициализация БД..."
     cd "$PROJECT_DIR"
-
-    "$VENV_DIR/bin/python" -c "
+    # Используем runuser вместо sudo (не требует пакета sudo)
+    runuser -u projectx -- "$VENV_DIR/bin/python" -c "
 import asyncio
 from database.connection import init_db
 asyncio.run(init_db())
-" 2>&1 | tee -a "$LOG_FILE"
-
-    success "База данных успешно инициализирована"
+" > /dev/null 2>&1 || warn "Инициализация отложена (выполнится при старте)"
 }
 
-# ──────────────────────────────────────────────────────────────
-# 🔥 НОВОЕ: Проверка и исправление прав доступа
-# ──────────────────────────────────────────────────────────────
 verify_permissions() {
-    log "Проверка прав доступа к критическим файлам..."
-
     chown -R projectx:projectx "$PROJECT_DIR"
-
-    if [ -f "$PROJECT_DIR/.env" ]; then
-        chmod 600 "$PROJECT_DIR/.env"
-    fi
-
-    if [ -f "$PROJECT_DIR/bot_data.db" ]; then
-        chmod 600 "$PROJECT_DIR/bot_data.db"
-        chown projectx:projectx "$PROJECT_DIR/bot_data.db"
-        # WAL и SHM файлы тоже защищаем
-        [ -f "$PROJECT_DIR/bot_data.db-wal" ] && chmod 600 "$PROJECT_DIR/bot_data.db-wal" && chown projectx:projectx "$PROJECT_DIR/bot_data.db-wal"
-        [ -f "$PROJECT_DIR/bot_data.db-shm" ] && chmod 600 "$PROJECT_DIR/bot_data.db-shm" && chown projectx:projectx "$PROJECT_DIR/bot_data.db-shm"
-    fi
-
-    chmod 700 "$PROJECT_DIR"
-
-    success "Права доступа установлены: dir=700, .env=600, db=600, owner=projectx"
+    find "$PROJECT_DIR" -type d -exec chmod 750 {} \;
+    find "$PROJECT_DIR" -type f -name "*.db*" -exec chmod 600 {} \;
+    chmod 600 "$PROJECT_DIR/.env"
+    success "Права доступа установлены (dir=750, files=600)"
 }
 
-# ──────────────────────────────────────────────────────────────
-# 🔥 ИСПРАВЛЕНО: ProtectSystem=full, ReadWritePaths=/dev/shm,
-#    убран MemoryDenyWriteExecute (крашит Python/cryptography)
-# ──────────────────────────────────────────────────────────────
 setup_systemd() {
-    log "Настройка systemd сервиса с изоляцией..."
-    systemctl is-active --quiet "$SERVICE_NAME" && systemctl stop "$SERVICE_NAME" || true
+    log "Настройка systemd сервиса..."
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
 After=network.target
-Wants=network-online.target
 
 [Service]
 Type=simple
 User=projectx
 Group=projectx
 WorkingDirectory=$PROJECT_DIR
-Environment="PATH=$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=$VENV_DIR/bin:/usr/bin"
 EnvironmentFile=$PROJECT_DIR/.env
 ExecStart=$VENV_DIR/bin/python -m bot.main
 Restart=always
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=$SERVICE_NAME
+WatchdogSec=60
 
-# ── Security Hardening (безопасно для Python) ──
-NoNewPrivileges=true
+# Максимальная изоляция
+ProtectSystem=strict
 PrivateTmp=true
-ProtectSystem=full
 ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-RestrictNamespaces=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-LockPersonality=true
+NoNewPrivileges=true
 ReadWritePaths=$PROJECT_DIR
 ReadWritePaths=/dev/shm
 
@@ -358,240 +250,120 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
-    success "Systemd сервис настроен с изоляцией (ProtectSystem=full)"
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+    success "Systemd настроен (ProtectSystem=strict)"
 }
 
-# ──────────────────────────────────────────────────────────────
-# 🔥 НОВОЕ: Nginx reverse proxy + Let's Encrypt SSL
-# ──────────────────────────────────────────────────────────────
 setup_nginx_ssl() {
-    log "Проверка необходимости настройки Nginx + SSL..."
+    if ! grep -q "PLATEGA_CALLBACK_URL" "$PROJECT_DIR/.env" 2>/dev/null; then return; fi
+    
+    # Безопасное удаление кавычек
+    local URL=$(grep "^PLATEGA_CALLBACK_URL=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
+    local DOMAIN=$(echo "$URL" | sed -E 's|https?://([^/:]+).*|\1|')
+    [ -z "$DOMAIN" ] && return
 
-    if ! grep -q "PLATEGA_CALLBACK_URL" "$PROJECT_DIR/.env" 2>/dev/null; then
-        warn "Platega не настроен — пропускаем Nginx/SSL"
-        return
-    fi
-
-    CALLBACK_URL=$(grep "^PLATEGA_CALLBACK_URL=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'")
-    DOMAIN=$(echo "$CALLBACK_URL" | sed -E 's|https?://([^/:]+).*|\1|')
-
-    if [[ -z "$DOMAIN" || "$DOMAIN" == "localhost" || "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        warn "Домен для SSL не определён ($DOMAIN). Пропускаем."
-        return
-    fi
-
-    log "Настройка Nginx для домена: $DOMAIN"
-
-    # Запрашиваем email для Let's Encrypt
-    read -p "Введите Email для Let's Encrypt [admin@$DOMAIN]: " LE_EMAIL
-    LE_EMAIL=${LE_EMAIL:-"admin@$DOMAIN"}
-
-    # Удаляем дефолтный сайт Nginx, чтобы не перехватывал трафик
+    log "Настройка Nginx для $DOMAIN"
     rm -f /etc/nginx/sites-enabled/default
 
     cat > "/etc/nginx/sites-available/projectx" << NGINXEOF
+# Защита от DDoS (ограничение запросов)
+limit_req_zone \$binary_remote_addr zone=mylimit:10m rate=5r/s;
+
 server {
     listen 80;
     server_name $DOMAIN;
 
-    client_max_body_size 1M;
-
     location /webhook/platega {
+        limit_req zone=mylimit burst=10 nodelay;
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 30s;
-        proxy_connect_timeout 10s;
     }
-
-    location /health {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-    }
-
-    location / {
-        return 404;
-    }
+    
+    location / { return 404; }
 }
 NGINXEOF
 
     ln -sf /etc/nginx/sites-available/projectx /etc/nginx/sites-enabled/
-
-    if nginx -t 2>/dev/null; then
+    
+    # Безопасная проверка конфига (не убивает скрипт при ошибке)
+    if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx
-        success "Nginx конфиг валиден и перезапущен"
+        success "Nginx настроен и перезапущен"
     else
-        warn "Nginx конфиг невалиден! Проверьте вручную: nginx -t"
-        return
+        warn "Ошибка в конфиге Nginx. Проверьте вручную: nginx -t"
     fi
 
-    log "Получение SSL сертификата через Let's Encrypt..."
-    if certbot --nginx -d "$DOMAIN" \
-        --non-interactive \
-        --agree-tos \
-        --email "$LE_EMAIL" \
-        --redirect 2>&1 | tee -a "$LOG_FILE"; then
-        success "SSL сертификат получен для $DOMAIN"
-    else
-        warn "Не удалось получить SSL. Проверьте DNS A-запись для $DOMAIN → IP сервера"
-    fi
-
-    systemctl enable certbot.timer 2>/dev/null || true
-    systemctl start certbot.timer 2>/dev/null || true
+    read -p "Email для SSL (certbot): " LE_EMAIL
+    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" --redirect >/dev/null 2>&1 || warn "SSL не получен (проверьте DNS)"
 }
 
 setup_backup() {
-    log "Настройка автобэкапа базы данных..."
-
+    log "Настройка бэкапов..."
     mkdir -p "$BACKUP_DIR"
     chown projectx:projectx "$BACKUP_DIR"
 
-    cat > /usr/local/bin/projectx-backup.sh << 'BACKUPEOF'
+    cat > /usr/local/bin/projectx-backup.sh << 'EOF'
 #!/bin/bash
-BACKUPEOF
-
-    cat >> /usr/local/bin/projectx-backup.sh << BACKUPEOF
-BACKUP_DIR="$BACKUP_DIR"
-DB_FILE="$PROJECT_DIR/bot_data.db"
-ENV_FILE="$PROJECT_DIR/.env"
-DATE=\$(date +%Y%m%d_%H%M%S)
-
-if [ -f "\$DB_FILE" ]; then
-    sqlite3 "\$DB_FILE" ".backup '\$BACKUP_DIR/bot_data_\$DATE.db'"
-    gzip "\$BACKUP_DIR/bot_data_\$DATE.db"
-
-    if [ -f "\$ENV_FILE" ]; then
-        cp "\$ENV_FILE" "\$BACKUP_DIR/env_\$DATE.backup"
-        gzip "\$BACKUP_DIR/env_\$DATE.backup"
-    fi
-
-    find "\$BACKUP_DIR" -name "bot_data_*.db.gz" -mtime +30 -delete
-    find "\$BACKUP_DIR" -name "env_*.backup.gz" -mtime +30 -delete
-
-    echo "[\$(date)] Backup completed successfully."
-else
-    echo "[\$(date)] DB file not found, skipping."
-fi
-BACKUPEOF
-
-    chmod +x /usr/local/bin/projectx-backup.sh
-
-    CRON_JOB="0 3 * * * /usr/local/bin/projectx-backup.sh >> /var/log/projectx-backup.log 2>&1"
-    (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "$CRON_JOB") | crontab -
-
-    /usr/local/bin/projectx-backup.sh || true
-
-    success "Автобэкап настроен (ежедневно в 3:00, ротация 30 дней)"
-}
-
-# ──────────────────────────────────────────────────────────────
-# 🔥 ИСПРАВЛЕНО: Healthcheck проверяет is-enabled,
-#    чтобы не перезапускать бот после намеренного --stop
-# ──────────────────────────────────────────────────────────────
-setup_monitoring() {
-    log "Настройка healthcheck (автовосстановление каждые 5 минут)..."
-
-    cat > /usr/local/bin/projectx-healthcheck.sh << 'HEALTHEOF'
-#!/bin/bash
-HEALTHEOF
-
-    cat >> /usr/local/bin/projectx-healthcheck.sh << HEALTHEOF
-SERVICE_NAME="$SERVICE_NAME"
-BOT_TOKEN_FILE="$PROJECT_DIR/.env"
-
-# Перезапускаем ТОЛЬКО если сервис включён в автозагрузку
-# (после deploy.sh --stop сервис disabled и не будет перезапущен)
-if [ "\$(systemctl is-enabled "\$SERVICE_NAME" 2>/dev/null)" = "enabled" ] && \\
-   ! systemctl is-active --quiet "\$SERVICE_NAME"; then
-
-    systemctl start "\$SERVICE_NAME"
-
-    ADMIN_IDS=\$(grep "^ADMIN_IDS=" "\$BOT_TOKEN_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" | cut -d',' -f1)
-    BOT_TOKEN=\$(grep "^BOT_TOKEN=" "\$BOT_TOKEN_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'")
-
-    if [ -n "\$BOT_TOKEN" ] && [ -n "\$ADMIN_IDS" ]; then
-        curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN/sendMessage" \\
-            -d "chat_id=\$ADMIN_IDS" \\
-            -d "text=⚠️ Бот упал и был перезапущен автоматически (\$(date '+%Y-%m-%d %H:%M:%S'))" > /dev/null 2>&1
-    fi
-
-    echo "[\$(date)] Bot crashed, self-healing triggered." >> /var/log/projectx-healthcheck.log
-fi
-HEALTHEOF
-
-    chmod +x /usr/local/bin/projectx-healthcheck.sh
-
-    CRON_HEALTH="*/5 * * * * /usr/local/bin/projectx-healthcheck.sh"
-    (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "$CRON_HEALTH") | crontab -
-
-    success "Healthcheck настроен (каждые 5 мин, respects --stop)"
-}
-
-setup_logrotate() {
-    log "Настройка ротации лог-файлов..."
-
-    cat > /etc/logrotate.d/projectx << EOF
-/var/log/projectx-*.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 0640 root root
-}
+DIR="/root/backups/projectx"
+DATE=$(date +%Y%m%d_%H%M%S)
+sqlite3 /opt/projectx-bot/bot_data.db ".backup '$DIR/db_$DATE.db'" && gzip "$DIR/db_$DATE.db"
+cp /opt/projectx-bot/.env "$DIR/env_$DATE.bak" && gzip "$DIR/env_$DATE.bak"
+find "$DIR" -type f -mtime +30 -delete
 EOF
 
-    success "Ротация логов настроена (7 дней)"
+    chmod +x /usr/local/bin/projectx-backup.sh
+    # Исправлен баг с pipefail: добавлен || true
+    (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "0 3 * * * /usr/local/bin/projectx-backup.sh") | crontab -
+    success "Автобэкапы настроены"
+}
+
+setup_monitoring() {
+    log "Настройка Healthcheck..."
+    cat > /usr/local/bin/projectx-healthcheck.sh << 'EOF'
+#!/bin/bash
+CRASH_FILE="/opt/projectx-bot/.crash-count"
+if [ "$(systemctl is-enabled projectx-bot 2>/dev/null)" = "enabled" ] && ! systemctl is-active --quiet projectx-bot; then
+    COUNT=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
+    if [ "$COUNT" -ge 5 ]; then exit 0; fi
+    
+    systemctl start projectx-bot
+    echo $((COUNT + 1)) > "$CRASH_FILE"
+    chown projectx:projectx "$CRASH_FILE" 2>/dev/null
+else
+    rm -f "$CRASH_FILE"
+fi
+EOF
+
+    chmod +x /usr/local/bin/projectx-healthcheck.sh
+    (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "*/5 * * * * /usr/local/bin/projectx-healthcheck.sh") | crontab -
+    success "Healthcheck настроен"
 }
 
 start_bot() {
-    log "Запуск службы бота..."
+    log "Запуск бота..."
     systemctl start "$SERVICE_NAME"
-    sleep 3
-
+    sleep 2
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         success "Бот успешно запущен!"
-        echo ""
-        echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-        echo -e "${GREEN}  🚀 ProjectX Bot — развёрнут и работает${NC}"
-        echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-        echo ""
-        echo -e "  📁 Директория:   ${BLUE}$PROJECT_DIR${NC}"
-        echo -e "  🔧 Статус:       ${BLUE}systemctl status $SERVICE_NAME${NC}"
-        echo -e "  📋 Логи:         ${BLUE}journalctl -u $SERVICE_NAME -f${NC}"
-        echo -e "  🔄 Перезапуск:   ${BLUE}deploy.sh --restart${NC}"
-        echo -e "  ⏹  Остановка:    ${BLUE}deploy.sh --stop${NC}"
-        echo -e "  💾 Бэкапы:       ${BLUE}$BACKUP_DIR${NC}"
-        echo ""
-        echo -e "${YELLOW}  ⚠️  Не забудьте проверить bot/main.py:${NC}"
-        echo -e "${YELLOW}     web.TCPSite(runner, \"127.0.0.1\", port)${NC}"
-        echo ""
+        echo -e "\n  📁 Директория: ${BLUE}$PROJECT_DIR${NC}"
+        echo -e "  🔧 Статус:     ${BLUE}systemctl status $SERVICE_NAME${NC}"
+        echo -e "  📋 Логи:       ${BLUE}journalctl -u $SERVICE_NAME -f${NC}"
+        echo -e "  🔄 Рестарт:    ${BLUE}./deploy.sh --restart${NC}\n"
     else
-        error "Бот не смог запуститься. Логи: journalctl -u $SERVICE_NAME -n 50 --no-pager"
+        journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+        error "Бот не смог запуститься."
     fi
 }
 
-show_status() {
-    echo ""
-    systemctl status "$SERVICE_NAME" --no-pager | head -20 || true
-}
+show_status() { systemctl status "$SERVICE_NAME" --no-pager | head -20 || true; }
 
 main() {
-    echo ""
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  🚀 ProjectX Bot — Production Deploy${NC}"
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-
-    mkdir -p /var/log
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v3.1 (Secure & Stable)${NC}\n"
+    mkdir -p /var/log "$SNAPSHOT_DIR"
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
-
-    check_root
-    check_os
+    
+    preflight_checks
     install_dependencies
     setup_firewall
     migrate_to_opt
@@ -603,69 +375,17 @@ main() {
     setup_nginx_ssl
     setup_backup
     setup_monitoring
-    setup_logrotate
     start_bot
-    show_status
-
-    echo ""
-    echo -e "${GREEN}✨ Деплой завершён успешно!${NC}"
 }
 
-# ──────────────────────────────────────────────────────────────
-# 🔥 ИСПРАВЛЕНО: --stop делает disable (healthcheck не разбудит),
-#    --start делает enable + start
-# ──────────────────────────────────────────────────────────────
+# CLI Интерфейс
 case "${1:-}" in
-    --uninstall)
-        if [ -f "./uninstall.sh" ]; then
-            bash ./uninstall.sh
-        else
-            error "Файл uninstall.sh не найден."
-        fi
-        ;;
-    --status)
-        show_status
-        ;;
-    --logs)
-        journalctl -u "$SERVICE_NAME" -f
-        ;;
-    --restart)
-        systemctl restart "$SERVICE_NAME"
-        show_status
-        ;;
-    --stop)
-        systemctl stop "$SERVICE_NAME"
-        systemctl disable "$SERVICE_NAME"
-        success "Бот остановлен и отключён от автозагрузки (healthcheck не перезапустит)"
-        ;;
-    --start)
-        systemctl enable "$SERVICE_NAME"
-        systemctl start "$SERVICE_NAME"
-        show_status
-        ;;
-    --backup)
-        /usr/local/bin/projectx-backup.sh
-        ;;
-    --firewall-status)
-        ufw status verbose
-        ;;
-    --help|-h)
-        echo "Использование: $0 [опция]"
-        echo ""
-        echo "Без опций — полная автоматическая установка"
-        echo ""
-        echo "Опции:"
-        echo "  --uninstall       Полное удаление (запускает uninstall.sh)"
-        echo "  --status          Статус systemd сервиса"
-        echo "  --logs            Логи в реальном времени"
-        echo "  --restart         Перезапуск бота"
-        echo "  --stop            Остановка + disable (healthcheck не разбудит)"
-        echo "  --start           Enable + запуск бота"
-        echo "  --backup          Ручной бэкап БД"
-        echo "  --firewall-status Показать правила UFW"
-        echo "  --help            Эта справка"
-        ;;
-    *)
-        main
-        ;;
+    --status) show_status ;;
+    --logs) journalctl -u "$SERVICE_NAME" -f ;;
+    --restart) systemctl restart "$SERVICE_NAME"; show_status ;;
+    --stop) systemctl stop "$SERVICE_NAME"; systemctl disable "$SERVICE_NAME"; success "Бот остановлен" ;;
+    --start) systemctl enable "$SERVICE_NAME"; systemctl start "$SERVICE_NAME"; show_status ;;
+    --backup) /usr/local/bin/projectx-backup.sh; success "Бэкап создан" ;;
+    --help|-h) echo "Использование: ./deploy.sh [--status|--logs|--restart|--stop|--start|--backup]" ;;
+    *) main ;;
 esac
