@@ -60,17 +60,18 @@ async def _run_migrations(conn):
     try:
         def check_and_migrate(sync_conn):
             inspector = inspect(sync_conn)
-
+            
             tariff_columns = {col['name'] for col in inspector.get_columns('tariffs')}
             if 'device_limit' not in tariff_columns:
                 sync_conn.execute(text("ALTER TABLE tariffs ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 2"))
-
+            
             user_columns = {col['name'] for col in inspector.get_columns('users')}
             if 'device_limit' not in user_columns:
                 sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0"))
+            
             if 'current_tariff_id' not in user_columns:
                 sync_conn.execute(text("ALTER TABLE users ADD COLUMN current_tariff_id INTEGER DEFAULT NULL"))
-
+            
             payment_columns = {col['name'] for col in inspector.get_columns('payments')}
             PAYMENT_MIGRATIONS = [
                 ("external_id", "VARCHAR(255)"),
@@ -81,7 +82,7 @@ async def _run_migrations(conn):
             for field_name, field_type in PAYMENT_MIGRATIONS:
                 if field_name not in payment_columns:
                     sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {field_name} {field_type}"))
-
+            
             indexes = inspector.get_indexes('vpn_profiles')
             index_names = {idx['name'] for idx in indexes}
             if 'uq_vpn_profiles_peer_id' not in index_names:
@@ -92,19 +93,20 @@ async def _run_migrations(conn):
                     logging.info("Migration: created unique index on vpn_profiles.peer_id")
                 except Exception as e:
                     logging.warning(f"Migration: failed to create unique index on peer_id: {e}")
-
+            
             # 🔥 ИСПРАВЛЕНО #13 (из Части 6): Миграция для soft delete полей
             if 'is_deleted' not in user_columns:
                 sync_conn.execute(
                     text("ALTER TABLE users ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0")
                 )
                 logging.info("Migration: added is_deleted column to users")
+            
             if 'deleted_at' not in user_columns:
                 sync_conn.execute(
                     text("ALTER TABLE users ADD COLUMN deleted_at DATETIME DEFAULT NULL")
                 )
                 logging.info("Migration: added deleted_at column to users")
-
+            
             indexes = inspector.get_indexes('users')
             index_names = {idx['name'] for idx in indexes}
             if 'ix_users_is_deleted' not in index_names:
@@ -115,14 +117,21 @@ async def _run_migrations(conn):
                     logging.info("Migration: created index on users.is_deleted")
                 except Exception as e:
                     logging.warning(f"Migration: failed to create index on is_deleted: {e}")
-
+            
             # 🔥 ИСПРАВЛЕНО #18: Миграция для notification_retry_count
             if 'notification_retry_count' not in user_columns:
                 sync_conn.execute(
                     text("ALTER TABLE users ADD COLUMN notification_retry_count INTEGER NOT NULL DEFAULT 0")
                 )
                 logging.info("Migration: added notification_retry_count column to users")
-
+            
+            # 🔥 ИСПРАВЛЕНО #6 (из Части 7): Миграция для last_notification_attempt
+            if 'last_notification_attempt' not in user_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE users ADD COLUMN last_notification_attempt DATETIME DEFAULT NULL")
+                )
+                logging.info("Migration: added last_notification_attempt column to users")
+        
         await conn.run_sync(check_and_migrate)
     except Exception as e:
         logging.warning(f"Migration check failed: {e}")

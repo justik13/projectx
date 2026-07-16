@@ -10,7 +10,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -37,14 +37,21 @@ class User(Base):
     # После 4 неудач (16ч суммарно) — сбрасывается в 0 при следующем цикле.
     notification_retry_count: Mapped[int] = mapped_column(Integer, default=0)
     
+    # 🔥 ИСПРАВЛЕНО #6 (из Части 7): Timestamp последней попытки уведомления.
+    # Используется для точного расчёта backoff delay.
+    # Worker проверяет: if now - last_notification_attempt < backoff_delay: skip
+    last_notification_attempt: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
+    
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-
+    
     notified_3d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_1d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_2h: Mapped[bool] = mapped_column(Boolean, default=False)
-
+    
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
