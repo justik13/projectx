@@ -1,6 +1,7 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import Server, VPNProfile
+from services.slots_cache import get_real_peer_count
 from typing import Optional, List, TypedDict
 
 # 🔥 ИСПРАВЛЕНО: TypedDict для типизации update kwargs
@@ -16,15 +17,18 @@ class ServerUpdateFields(TypedDict, total=False):
 # 🔥 ИСПРАВЛЕНО: Поля, которые нельзя обновлять через update_server
 PROTECTED_SERVER_FIELDS = {"id", "api_key", "created_at"}
 
+
 async def get_all_servers(session: AsyncSession) -> List[Server]:
     stmt = select(Server).order_by(Server.name)
     result = await session.execute(stmt)
     return result.scalars().all()
 
+
 async def get_active_servers(session: AsyncSession) -> List[Server]:
     stmt = select(Server).where(Server.is_active == True).order_by(Server.name)
     result = await session.execute(stmt)
     return result.scalars().all()
+
 
 async def get_available_servers(session: AsyncSession) -> List[Server]:
     stmt_counts = (
@@ -33,15 +37,19 @@ async def get_available_servers(session: AsyncSession) -> List[Server]:
     )
     counts_result = await session.execute(stmt_counts)
     counts_map = {row.server_id: row.profile_count for row in counts_result.all()}
+
     stmt = select(Server).where(Server.is_active == True).order_by(Server.name)
     result = await session.execute(stmt)
     active_servers = result.scalars().all()
+
     available = []
     for server in active_servers:
         current_count = counts_map.get(server.id, 0)
         if current_count < server.max_clients:
             available.append(server)
+
     return available
+
 
 async def get_server_by_id(
     session: AsyncSession, server_id: int
@@ -49,6 +57,7 @@ async def get_server_by_id(
     stmt = select(Server).where(Server.id == server_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
 
 async def create_server(
     session: AsyncSession, name: str, api_url: str, api_key: str,
@@ -66,6 +75,7 @@ async def create_server(
     await session.refresh(server)
     return server
 
+
 async def update_server(
     session: AsyncSession, server: Server, **kwargs: ServerUpdateFields
 ) -> Server:
@@ -81,34 +91,61 @@ async def update_server(
             continue
         if hasattr(server, key):
             setattr(server, key, value)
+
     await session.flush()
     await session.refresh(server)
     return server
+
 
 async def delete_server(session: AsyncSession, server: Server) -> None:
     await session.delete(server)
     # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
 
+
 async def get_total_free_ips(session: AsyncSession) -> int:
-    result = await session.execute(
-        select(func.sum(Server.max_clients)).where(Server.is_active == True)
-    )
-    total_capacity = result.scalar() or 0
-    active_server_ids = (
-        select(Server.id).where(Server.is_active == True).scalar_subquery()
-    )
-    stmt = select(func.count(VPNProfile.id)).where(
-        VPNProfile.server_id.in_(active_server_ids)
-    )
-    result = await session.execute(stmt)
-    used_profiles = result.scalar() or 0
-    return max(0, total_capacity - used_profiles)
+    """
+    🔥 ИСПРАВЛЕНО: Использует кэш из slots_cache.py для точности.
+    Учитывает клиентов, созданных вне бота (через API напрямую).
+    
+    Логика:
+    1. Получаем все активные серверы
+    2. Для каждого сервера получаем реальное количество пиров через кэш
+    3. Считаем: сумма(max_clients) - сумма(real_peer_count)
+    
+    Кэш обновляется каждые 5 минут, поэтому данные могут быть устаревшими на 5 минут.
+    Для dashboard это допустимо (не критично).
+    """
+    active_servers = await get_active_servers(session)
+    if not active_servers:
+        return 0
+    
+    total_free = 0
+    for server in active_servers:
+        # Используем кэш (без force_refresh для производительности)
+        real_count = await get_real_peer_count(server, force_refresh=False)
+        
+        if real_count == -1:
+            # API недоступен — используем данные из БД как fallback
+            # Это неточно, но лучше чем ничего
+            stmt = select(func.count(VPNProfile.id)).where(
+                VPNProfile.server_id == server.id
+            )
+            result = await session.execute(stmt)
+            db_count = result.scalar_one() or 0
+            real_count = db_count
+        
+        free_slots = server.max_clients - real_count
+        total_free += max(0, free_slots)
+    
+    return total_free
+
 
 async def get_server_count(session: AsyncSession) -> int:
     stmt = select(func.count(Server.id))
     result = await session.execute(stmt)
     return result.scalar_one()
+
 
 async def get_servers_paginated(
     session: AsyncSession, page: int = 1, per_page: int = 10
@@ -119,6 +156,7 @@ async def get_servers_paginated(
     )
     return result.scalars().all()
 
+
 async def get_server_by_api_url(
     session: AsyncSession, api_url: str
 ) -> Optional[Server]:
@@ -126,6 +164,7 @@ async def get_server_by_api_url(
     stmt = select(Server).where(Server.api_url == api_url)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
 
 async def delete_profiles_by_server_id(
     session: AsyncSession, server_id: int
