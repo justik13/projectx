@@ -1,4 +1,5 @@
 import aiohttp
+import hmac
 import logging
 from typing import Optional, Dict
 from aiohttp import ClientTimeout
@@ -47,7 +48,6 @@ class PlategaClient:
             "failedUrl": failed_url,
             "payload": payload
         }
-        
         try:
             session = await get_http_session()
             async with session.post(
@@ -90,4 +90,18 @@ class PlategaClient:
             return None
 
     def validate_callback(self, merchant_id: str, secret: str) -> bool:
-        return merchant_id == self.merchant_id and secret == self.secret
+        """
+        Валидирует callback от Platega.io.
+        🔥 ИСПРАВЛЕНО: Использует hmac.compare_digest() для защиты от timing attack.
+        Обычное сравнение через == уязвимо: злоумышленник может подобрать
+        секрет посимвольно, измеряя время ответа.
+        """
+        merchant_ok = hmac.compare_digest(
+            merchant_id.encode("utf-8"),
+            self.merchant_id.encode("utf-8")
+        )
+        secret_ok = hmac.compare_digest(
+            secret.encode("utf-8"),
+            self.secret.encode("utf-8")
+        )
+        return merchant_ok and secret_ok

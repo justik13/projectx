@@ -47,18 +47,25 @@ USERS_PER_PAGE = 10
 PERMANENT_SUBSCRIPTION_DAYS = 36500
 PERMANENT_END_DATE = datetime(2099, 12, 31, 23, 59, 59)
 
-# 🔥 Защита от double-click
+# ⚠️ In-memory locks — сбрасываются при рестарте бота.
+# Для single-worker это acceptable risk.
+# ThrottlingMiddleware (0.1s) защищает от double-click.
+# DB unique constraints и savepoints защищают от race conditions.
 _applying_tariffs: set[int] = set()
 _applying_extends: set[int] = set()
 _applying_reduces: set[int] = set()
 _applying_grants: set[int] = set()
 _deleting_admin_devices: set[int] = set()
 
+logger.debug(
+    "admin/users.py loaded: in-memory locks initialized "
+    "(cleared on restart, protected by DB constraints)"
+)
+
 
 # ──────────────────────────────────────────────────────────
 # 🔧 ВСПОМОГАТЕЛЬНЫЕ
 # ──────────────────────────────────────────────────────────
-
 def _is_subscription_active(user: User) -> bool:
     if not user.subscription_end:
         return False
@@ -131,7 +138,6 @@ async def _get_user_with_profiles(session: AsyncSession, telegram_id: int):
 # ──────────────────────────────────────────────────────────
 # 📋 СПИСОК ПОЛЬЗОВАТЕЛЕЙ
 # ──────────────────────────────────────────────────────────
-
 async def _build_users_list_text_and_kb(
     users, page: int, total_pages: int, total: int,
 ) -> tuple[str, InlineKeyboardBuilder]:
@@ -246,7 +252,6 @@ async def process_search_user(message: Message, state: FSMContext, session: Asyn
 # ──────────────────────────────────────────────────────────
 # 👤 КАРТОЧКА ПОЛЬЗОВАТЕЛЯ
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_user_card:"))
 async def show_user_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -298,7 +303,6 @@ async def _show_user_card_edit(message, user, session: AsyncSession):
 # ──────────────────────────────────────────────────────────
 # 📅 ПОДМЕНЮ ПОДПИСКИ
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_subscription:"))
 async def admin_subscription_menu(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -351,9 +355,8 @@ async def admin_subscription_menu(callback: CallbackQuery, session: AsyncSession
 
 
 # ──────────────────────────────────────────────────────────
-# 💎 СМЕНА ТАРИФА (показывает 3 группы вместо всех тарифов)
+# 💎 СМЕНА ТАРИФА
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_sub_change_tariff:"))
 async def admin_sub_change_tariff(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -521,7 +524,6 @@ async def admin_sub_apply_tariff(callback: CallbackQuery, session: AsyncSession)
 # ──────────────────────────────────────────────────────────
 # ➕ ПРОДЛЕНИЕ ПОДПИСКИ
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_sub_extend:"))
 async def admin_sub_extend(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -704,7 +706,6 @@ async def admin_sub_extend_custom_process(
 # ──────────────────────────────────────────────────────────
 # ➖ УМЕНЬШЕНИЕ ДНЕЙ
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_sub_reduce:"))
 async def admin_sub_reduce_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -827,9 +828,8 @@ async def admin_sub_apply_reduce(callback: CallbackQuery, session: AsyncSession)
 
 
 # ──────────────────────────────────────────────────────────
-# 🎫 ВЫДАЧА ДОСТУПА (показывает 3 группы вместо всех тарифов)
+# 🎫 ВЫДАЧА ДОСТУПА
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_sub_grant:"))
 async def admin_sub_grant(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -1053,7 +1053,6 @@ async def admin_sub_grant_apply(callback: CallbackQuery, session: AsyncSession):
 # ──────────────────────────────────────────────────────────
 # 🔧 УПРАВЛЕНИЕ УСТРОЙСТВАМИ + УДАЛЕНИЕ
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_user_devices:"))
 async def admin_user_devices(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -1174,7 +1173,6 @@ async def admin_delete_device_apply(callback: CallbackQuery, session: AsyncSessi
 # ──────────────────────────────────────────────────────────
 # 🚫 БАН / РАЗБАН (с подтверждением)
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_ban:"))
 async def admin_ban_confirm(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()

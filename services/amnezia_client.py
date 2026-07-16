@@ -1,6 +1,7 @@
 import aiohttp
 import asyncio
 import logging
+import time
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from bot.constants import AMNEZIA_PROTOCOL, API_TIMEOUT, API_CONCURRENCY_LIMIT, API_RETRY_COUNT
@@ -9,15 +10,68 @@ logger = logging.getLogger(__name__)
 
 _http_session: Optional[aiohttp.ClientSession] = None
 
+
+# ============================================================
+# 🔥 НОВОЕ: TOKEN BUCKET RATE LIMITER
+# ============================================================
+class TokenBucketRateLimiter:
+    """
+    Token Bucket Rate Limiter для ограничения запросов к Amnezia API.
+    Агрессивный режим: 10 запросов/сек sustained, burst 20.
+    Защита от slowloris и DoS через исчерпание пула соединений.
+    """
+
+    def __init__(self, rate: float = 10.0, burst: int = 20):
+        self.rate = rate
+        self.burst = burst
+        self.tokens = float(burst)
+        self.last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, timeout: float = 30.0) -> bool:
+        """
+        Пытается получить токен для запроса.
+        Возвращает False если timeout истёк (сервер перегружен).
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                elapsed = now - self.last_refill
+                self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
+                self.last_refill = now
+
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return True
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(1.0 / self.rate, remaining))
+
+
+# Глобальные rate limiters per server URL.
+# ⚠️ Сбрасываются при рестарте бота (acceptable risk для single-worker).
+_rate_limiters: dict[str, TokenBucketRateLimiter] = {}
+
+
+def _get_rate_limiter(api_url: str) -> TokenBucketRateLimiter:
+    """Возвращает rate limiter для конкретного сервера. Создаёт при первом обращении."""
+    if api_url not in _rate_limiters:
+        _rate_limiters[api_url] = TokenBucketRateLimiter(rate=10.0, burst=20)
+    return _rate_limiters[api_url]
+
+
 # ============================================================
 # DTO MODELS (Pydantic)
 # ============================================================
-
 class AmneziaClientCreateResponse(BaseModel):
     """Ответ API при создании клиента."""
     id: str
     config: str
     protocol: str = AMNEZIA_PROTOCOL
+
 
 class AmneziaClientTraffic(BaseModel):
     """Трафик клиента."""
@@ -27,10 +81,10 @@ class AmneziaClientTraffic(BaseModel):
     received: int = 0
     sent: int = 0
 
+
 class AmneziaClientListItem(BaseModel):
     """
     Элемент списка клиентов из GET /clients.
-    
     🔥 ИСПРАВЛЕНО: Реальная структура API:
     {
       "username": "tg_872658825_IPhone_7fb6",
@@ -57,12 +111,12 @@ class AmneziaClientListItem(BaseModel):
     lastHandshake: Optional[float] = None
     lastSeen: Optional[float] = None
     updatedAt: Optional[float] = None
-    
+
     # Алиасы для обратной совместимости
     @property
     def clientName(self) -> str:
         return self.username
-    
+
     @property
     def name(self) -> str:
         return self.peer_name
@@ -84,7 +138,6 @@ class AmneziaServerInfo(BaseModel):
 # ============================================================
 # HTTP SESSION
 # ============================================================
-
 async def get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if _http_session is None:
@@ -93,16 +146,17 @@ async def get_http_session() -> aiohttp.ClientSession:
         _http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
     return _http_session
 
+
 async def close_http_session():
     global _http_session
     if _http_session:
         await _http_session.close()
         _http_session = None
 
+
 # ============================================================
 # CLIENT
 # ============================================================
-
 class AmneziaClient:
     def __init__(self, api_url: str, api_key: str):
         self.api_url = api_url.rstrip("/")
@@ -111,7 +165,19 @@ class AmneziaClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Optional[dict]:
         url = f"{self.api_url}{path}"
+
+        # 🔥 НОВОЕ: Rate limiting per-server (агрессивный: 10 req/s, burst 20, timeout 30s)
+        limiter = _get_rate_limiter(self.api_url)
+
         for attempt in range(API_RETRY_COUNT + 1):
+            # 🔥 НОВОЕ: Проверяем rate limit перед каждым запросом
+            if not await limiter.acquire(timeout=30.0):
+                logger.warning(
+                    f"Rate limit timeout for {self.api_url}{path} "
+                    f"(attempt {attempt + 1}/{API_RETRY_COUNT + 1})"
+                )
+                return None
+
             session = await get_http_session()
             try:
                 async with session.request(method, url, headers=self._headers, **kwargs) as response:
@@ -191,7 +257,6 @@ class AmneziaClient:
     ) -> Optional[List[AmneziaClientListItem]]:
         """
         Возвращает список клиентов как список DTO.
-        
         🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
         - API возвращает поле "items" (НЕ "clients")
         - Каждый item содержит массив "peers" — один username может иметь несколько пиров
@@ -199,44 +264,39 @@ class AmneziaClient:
         - Общее количество = сумма всех peers во всех items
         """
         all_clients: List[AmneziaClientListItem] = []
-        
+
         # Используем total из API для определения окончания пагинации
         result = await self._request(
             "GET", "/clients",
             params={"skip": skip, "limit": min(limit, 100)}
         )
-        
         if result is None:
             return None
-        
+
         # 🔥 ИСПРАВЛЕНО: Поле называется "items", а не "clients"
         items_raw = result.get("items", [])
-        
         if not items_raw:
             return all_clients
-        
+
         # 🔥 ИСПРАВЛЕНО: Flatten структуры
         # API: {"items": [{"username": "...", "peers": [{...}, {...}]}]}
         # Нам нужно: плоский список AmneziaClientListItem, где каждый peer = отдельный элемент
         for item in items_raw:
             if not isinstance(item, dict):
                 continue
-            
             username = item.get("username", "")
             peers = item.get("peers", [])
-            
             if not isinstance(peers, list):
                 continue
-            
+
             # Каждый peer - отдельный клиент
             for peer in peers:
                 if not isinstance(peer, dict):
                     continue
-                
                 peer_id = peer.get("id", "")
                 if not peer_id:
                     continue
-                
+
                 # Маппинг полей API в наш DTO
                 traffic_raw = peer.get("traffic", {})
                 if isinstance(traffic_raw, dict):
@@ -248,7 +308,7 @@ class AmneziaClient:
                     )
                 else:
                     traffic = AmneziaClientTraffic()
-                
+
                 try:
                     client_item = AmneziaClientListItem(
                         id=peer_id,
@@ -264,12 +324,11 @@ class AmneziaClient:
                 except Exception as e:
                     logger.warning(f"Failed to parse peer item: {e}, peer={peer}")
                     continue
-        
+
         logger.info(
             f"get_all_clients: parsed {len(all_clients)} peers "
             f"from {len(items_raw)} usernames"
         )
-        
         return all_clients
 
     async def delete_client(self, client_id: str) -> bool:
