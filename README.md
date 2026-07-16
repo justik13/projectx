@@ -65,9 +65,4 @@ python -m bot.main
 
 - **[Amnezia API](https://github.com/kyoresuas/amnezia-api)** — REST-обёртка над Amnezia
 - **[AmneziaVPN Client](https://github.com/amnezia-vpn/amnezia-client)** — основной клиент
-- **[AmneziaWG Architect](https://github.com/Vadim-Khristenko/AmneziaWG-Architect)** — валидатор параметров
-
 README описывает **архитектурный уровень** проекта, а не его реализацию. Детали живут в коде и отдельных документах (`amnezia_docs.md`), которые обновляются по мере необходимости.
-
-[![codecov](https://codecov.io/gh/justik13/projectx/branch/main/graph/badge.svg)](https://codecov.io/gh/justik13/projectx)
-[![Tests](https://github.com/justik13/projectx/actions/workflows/ci.yml/badge.svg)](https://github.com/justik13/projectx/actions/workflows/ci.yml)
