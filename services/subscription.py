@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class SubscriptionService:
-
     @staticmethod
     async def check_access(session: AsyncSession, telegram_id: int) -> bool:
         user = await get_user_by_telegram_id(session, telegram_id)
@@ -44,6 +43,24 @@ class SubscriptionService:
         new_device_limit: Optional[int] = None,
         new_tariff_id: Optional[int] = None,
     ) -> Optional[User]:
+        """
+        Продлевает подписку пользователя.
+
+        🔥 ИСПРАВЛЕНО: Сброс daily device creation счётчика при апгрейде тарифа.
+        Если new_device_limit > текущего user.device_limit — сбрасываем
+        device_creations_today в 0 и last_creation_date в None.
+        Это даёт пользователю "чистый лист" после апгрейда.
+
+        Args:
+            session: SQLAlchemy async session
+            telegram_id: Telegram ID пользователя
+            days: Количество дней продления
+            new_device_limit: Новый лимит устройств (None = не менять)
+            new_tariff_id: ID нового тарифа (None = не менять)
+
+        Returns:
+            User если успешно, None если пользователь не найден
+        """
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user:
             return None
@@ -52,6 +69,7 @@ class SubscriptionService:
         current_end = user.subscription_end if (
             user.subscription_end and user.subscription_end > now
         ) else now
+
         new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else current_end + timedelta(days=days)
 
         user.subscription_end = new_end
@@ -59,8 +77,23 @@ class SubscriptionService:
         user.notified_1d = False
         user.notified_2h = False
 
+        # 🔥 ИСПРАВЛЕНО: Сброс daily счётчика при АПГРЕЙДЕ тарифа
+        # (Вариант A из согласования)
         if new_device_limit is not None:
+            old_device_limit = user.device_limit
             user.device_limit = new_device_limit
+
+            # Сбрасываем daily счётчик ТОЛЬКО при апгрейде (новое > старое)
+            # При даунгрейде или продлении того же тарифа — не сбрасываем
+            if new_device_limit > old_device_limit:
+                user.device_creations_today = 0
+                user.last_creation_date = None
+                logger.info(
+                    f"extend_subscription: user {telegram_id} upgraded from "
+                    f"{old_device_limit} to {new_device_limit} devices. "
+                    f"Daily creations counter reset to 0."
+                )
+
         if new_tariff_id is not None:
             user.current_tariff_id = new_tariff_id
 
@@ -71,7 +104,7 @@ class SubscriptionService:
     async def get_expires_timestamp(user: User) -> Optional[int]:
         """
         Возвращает Unix timestamp для expiresAt или None для бессрочного доступа.
-        
+
         🔥 ИСПРАВЛЕНО #19: Логирование когда expiresAt=null отправляется в API.
         Это нормально для «навсегда» подписок, но полезно для отладки.
         """
@@ -82,6 +115,5 @@ class SubscriptionService:
                 f"sending expiresAt=null to API"
             )
             return None
-
         expires_ts = int(user.subscription_end.replace(tzinfo=timezone.utc).timestamp())
         return expires_ts

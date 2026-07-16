@@ -1,8 +1,7 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# 🗑️  ProjectX Bot — Safe Uninstaller (v2.0)
+# 🗑️  ProjectX Bot — Safe Uninstaller (v2.0.1 Clean)
 # ═══════════════════════════════════════════════════════════════
-# 🔥 ИСПРАВЛЕНО #10: Добавлен set -euo pipefail
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -12,7 +11,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# 🔥 ИСПРАВЛЕНО #15: Логирование в файл
 UNINSTALL_LOG="/var/log/projectx-uninstall.log"
 TEMP_FILES=()
 
@@ -52,7 +50,7 @@ if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "[not set]" ]]; then
     warn "Не удалось получить путь из systemd, используется директория по умолчанию: $PROJECT_DIR"
 fi
 
-# 🔥 ИСПРАВЛЕНО #1: Усиленная проверка безопасности пути
+# Усиленная проверка безопасности пути
 if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "/" || "$PROJECT_DIR" == "/opt" || "$PROJECT_DIR" == "/usr" || "$PROJECT_DIR" == "/root" || "$PROJECT_DIR" == "/home" || "$PROJECT_DIR" == "/etc" || "$PROJECT_DIR" == "/var" || "$PROJECT_DIR" == "/tmp" ]]; then
     error "Обнаружен небезопасный путь для удаления: '$PROJECT_DIR'. Прерывание."
 fi
@@ -66,7 +64,7 @@ success "Целевая директория для удаления: $PROJECT_D
 
 echo ""
 echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
-echo -e "${YELLOW}     🗑  ProjectX Bot — Панель Деинсталляции${NC}"
+echo -e "${YELLOW}    🗑  ProjectX Bot — Панель Деинсталляции${NC}"
 echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "1) ${RED}Полное очищение${NC} (удалить ВСЁ: код, БД, ключи .env, бэкапы, юзера)"
 echo -e "2) ${GREEN}Удаление с сохранением данных${NC} (БД и .env будут упакованы в архив)"
@@ -77,7 +75,6 @@ read -p "Выберите вариант [1-3]: " choice
 case $choice in
     1)
         echo ""
-        # 🔥 ИСПРАВЛЕНО #2: Регистронезависимое подтверждение
         read -p "⚠️ ${RED}ВНИМАНИЕ!${NC} Это действие сотрет все подписки и базы данных безвозвратно. Вы уверены? (yes/no): " confirm
         confirm_lower=$(echo "$confirm" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         if [[ "$confirm_lower" != "yes" ]]; then
@@ -127,7 +124,6 @@ case $choice in
         
         SOURCE_BACKUP="/root/backups/projectx"
         if [[ -d "$SOURCE_BACKUP" ]]; then
-            # 🔥 ИСПРАВЛЕНО #11: cp -aP вместо cp -r (не следует symlink'ам)
             cp -aP "$SOURCE_BACKUP"/* "$SAFE_BACKUP_DIR/" 2>/dev/null || true
             success "Все накопленные бэкапы перенесены в безопасную зону"
         fi
@@ -147,6 +143,18 @@ case $choice in
 esac
 
 log "Очистка зависимостей операционной системы..."
+
+# Очистка конфигурации Nginx (если она была создана)
+NGINX_AVAILABLE="/etc/nginx/sites-available/projectx"
+NGINX_ENABLED="/etc/nginx/sites-enabled/projectx"
+if [[ -f "$NGINX_AVAILABLE" || -L "$NGINX_ENABLED" ]]; then
+    rm -f "$NGINX_ENABLED" "$NGINX_AVAILABLE"
+    success "Конфигурация Nginx удалена"
+    if systemctl is-active --quiet nginx; then
+        systemctl reload nginx
+        success "Конфигурация Nginx перезагружена"
+    fi
+fi
 
 SERVICE_FILE="/etc/systemd/system/projectx-bot.service"
 if [[ -f "$SERVICE_FILE" ]]; then
@@ -201,7 +209,7 @@ if [[ "$choice" == "2" ]]; then
     echo ""
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}📦 Архив ваших критических данных находится по адресу:${NC}"
-    echo -e "${BLUE}   $SAFE_BACKUP_DIR${NC}"
+    echo -e "${BLUE}    $SAFE_BACKUP_DIR${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
 fi
 

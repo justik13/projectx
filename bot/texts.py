@@ -17,7 +17,7 @@
 - "подключение" вместо "VPN-подключение"
 
 Автоматическая проверка перед деплоем:
-    grep -riE '\b(vpn|впн|обход блокировок|глушилки|белые списки|lte)\b' bot/texts.py
+grep -riE '\b(vpn|впн|обход блокировок|глушилки|белые списки|lte)\b' bot/texts.py
 
 Если найдено — заменить на нейтральные синонимы.
 
@@ -72,18 +72,14 @@ REFERRAL_TEXT = (
 )
 
 REFERRAL_LIST_HEADER = "👥 <b>Ваши рефералы</b>\n"
-
 REFERRAL_LIST_EMPTY = (
     "<i>Список рефералов пока пуст.</i>\n"
     "Пригласите друзей по вашей ссылке, чтобы они появились здесь."
 )
-
 REFERRAL_LIST_FOOTER = "\nВсего приглашено: {count} пользователей"
 
 CONNECTION_LIST_HEADER = "🔌 <b>Ваши устройства</b> ({count}/{limit})\n"
-
 CONNECTION_EMPTY = "<i>У вас пока нет подключённых устройств.</i>"
-
 CONNECTION_SELECT_SERVER = "🌍 <b>Выберите локацию для подключения:</b>\n"
 
 DEVICE_CARD = (
@@ -91,9 +87,7 @@ DEVICE_CARD = (
     "{last_connected_text}\n"
     "↓ {traffic_down}  ↑ {traffic_up}  Σ {traffic_total}\n"
 )
-
 DEVICE_NOT_CONNECTED = "⏱ Ещё не подключалось"
-
 DEVICE_RECENTLY_ACTIVE = "⏱ Активно недавно ({last_connected})"
 
 DEVICE_MANAGE_HEADER = (
@@ -150,8 +144,6 @@ SUPPORT_TEXT = (
 )
 
 # 🔥 ИСПРАВЛЕНО #25: Заменено «шифрования» на «защищённые протоколы»
-# Слово «шифрования» может триггерить фильтры Telegram.
-# Также НЕ используются запрещённые слова (VPN, обход блокировок и т.д.)
 FAQ_TEXT = (
     "❓ <b>Частые вопросы</b>\n"
     "<b>1. Как подключить устройство?</b>\n"
@@ -262,9 +254,7 @@ PAYMENT_DELAYED = (
 )
 
 HISTORY_HEADER = "🧾 <b>История оплат</b>\n"
-
 HISTORY_EMPTY = "<i>История пуста. У вас пока не было оплат.</i>"
-
 HISTORY_LIMIT_NOTE = "\n<i>Показаны последние 10 из {count} оплат</i>"
 
 FALLBACK_MEDIA_TEXT = (
@@ -278,7 +268,6 @@ FALLBACK_UNKNOWN_TEXT = (
 )
 
 TOS_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19"
-
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-04-01-26"
 
 DOWNLOAD_CONF_FALLBACK = (
@@ -288,96 +277,62 @@ DOWNLOAD_CONF_FALLBACK = (
 )
 
 ERROR_ACCESS_DENIED = "⛔️ Нет доступа"
-
 ERROR_ACCESS_PANEL = "⛔️ У вас нет доступа к админ-панели."
 
 ERROR_BANNED_MESSAGE = (
     "⛔️ У вас заблокирован доступ к сервису.\n"
     "Если вы считаете, что это ошибка, свяжитесь с поддержкой."
 )
-
 ERROR_BANNED_ALERT = "⛔️ У вас заблокирован доступ к сервису."
-
 ERROR_ADMIN_BAN_FORBIDDEN = "⛔️ Нельзя банить администраторов"
 
 ERROR_TEXT_REQUIRED = "⚠️ Пожалуйста, отправьте текстовое сообщение."
-
 ERROR_TEXT_EXPECTED = "⚠️ Ожидается текстовый ввод."
-
 ERROR_TEXT_OR_MEDIA = "⚠️ Отправьте текст или фото/документ с описанием."
-
 ERROR_NUMERIC_ID = "⚠️ Отправьте числовой Telegram ID:"
-
 ERROR_NUMBER_GT_ZERO = "⚠️ Введите число больше 0:"
-
 ERROR_POSITIVE_NUMBER = "⚠️ Введите положительное число:"
-
 ERROR_NAME_TOO_LONG = "⚠️ Слишком длинное имя (макс. {max} символов)."
-
 ERROR_URL_TOO_LONG = "⚠️ Слишком длинный URL (макс. {max} символов)."
-
 ERROR_API_KEY_SHORT = "⚠️ API ключ слишком короткий (минимум {min} символов)."
-
 ERROR_DAYS_RANGE = "⚠️ Введите число от {min} до {max}:"
-
 ERROR_STARS_POSITIVE = "⚠️ Введите число больше 0 (Stars требует положительную сумму):"
-
 ERROR_INVALID_URL = (
     "⚠️ Некорректный формат URL.\n"
     "URL должен начинаться с <code>http://</code> или <code>https://</code>\n"
     "Пример: <code>http://127.0.0.1:4001</code>"
 )
-
 ERROR_INVALID_DEVICE_NAME = (
     "⚠️ Имя устройства должно быть от 1 до 16 символов (латиница, цифры, пробелы, дефисы):"
 )
-
 ERROR_VALIDATION = (
     "❌ Ошибка валидации: {error}\n"
     "Введите заново:"
 )
-
 ERROR_OPERATION_CANCELLED = "⚠️ Операция прервана."
-
 ERROR_OPERATION_INTERRUPTED = (
     "⚠️ <b>Операция прервана.</b>\n"
     "Я ожидаю текстовый ввод или нажатие кнопок.\n"
     "Пожалуйста, используйте меню или вернитесь назад."
 )
-
 ERROR_USER_NOT_FOUND = "❌ Пользователь не найден"
-
 ERROR_SERVER_NOT_FOUND = "❌ Сервер не найден"
-
 ERROR_TARIFF_NOT_FOUND = "❌ Тариф не найден"
-
 ERROR_PROFILE_NOT_FOUND = "❌ Профиль не найден"
-
 ERROR_DEVICE_NOT_FOUND = "❌ Устройство не найдено"
-
 ERROR_LOCATION_NOT_FOUND = "❌ Локация не найдена"
-
 ERROR_TARIFF_UNAVAILABLE = "❌ Выбранный тариф сейчас недоступен"
-
 ERROR_PAYMENT_DATA_INVALID = "❌ Ошибка данных"
-
 ERROR_TARIFF_INVALID_PRICE = "❌ Ошибка тарифа: некорректная цена."
-
 ERROR_TEXT_EMPTY = "❌ Текст сообщения пуст"
-
 ERROR_TECHNICAL_MESSAGE = (
     "⚠️ <b>Ошибка сервера</b>\n"
     "Мы уже чиним проблему. Попробуйте позже."
 )
-
 ERROR_TECHNICAL_ALERT = "⚠️ Ведутся технические работы. Попробуйте через минуту."
-
 ERROR_TOO_FREQUENT = "⏳ Слишком часто!"
-
 ERROR_ACTION_IN_PROGRESS = "⏳ Выполняется предыдущее действие..."
-
 ERROR_SERVER_UNAVAILABLE_GENERIC = "⚠️ Сервер недоступен. Попробуйте позже."
-
 ERROR_SERVER_UNREACHABLE = (
     "❌ <b>Сервер недоступен!</b>\n"
     "Не удалось подключиться к API по указанному адресу.\n"
@@ -388,47 +343,38 @@ ERROR_SERVER_UNREACHABLE = (
     "• API-сервис не запущен\n"
     "Проверьте данные и попробуйте снова."
 )
-
 ERROR_SERVER_API_INFO_FAILED = (
     "❌ <b>Ошибка подключения к API!</b>\n"
     "Сервер отвечает на healthcheck, но не удалось получить информацию.\n"
     "Возможно, неверный API ключ."
 )
-
 ERROR_PROTOCOL_NOT_SUPPORTED = (
     "⚠️ <b>Протокол amneziawg2 не поддерживается!</b>\n"
     "Доступные протоколы на сервере: <code>{protocols}</code>\n"
     "Этот бот работает только с протоколом <b>amneziawg2</b>."
 )
-
 ADMIN_TOGGLE_NETWORK_FAIL = "⚠️ API недоступен. Статус сервера не изменён."
-
 ADMIN_DELETE_SERVER_NETWORK_FAIL = "⚠️ Ошибка сети: не удалось отключить устройства на сервере. БД не изменена."
 
 ERROR_NO_SUBSCRIPTION = (
     "⚠️ <b>У вас нет активной подписки.</b>\n"
     "Продлите доступ, чтобы подключать устройства."
 )
-
 ERROR_DEVICE_LIMIT_REACHED = (
     "⚠️ <b>Достигнут лимит устройств</b> ({limit}).\n"
     "Удалите одно из устройств или перейдите на тариф с большим лимитом."
 )
-
 ERROR_SERVER_UNAVAILABLE = (
     "⚠️ <b>Выбранный сервер временно недоступен.</b>\n"
     "Попробуйте другую локацию или обратитесь в поддержку."
 )
-
 ERROR_NO_FREE_SLOTS = "❌ На всех серверах закончились свободные слоты."
-
 ERROR_PAYMENT_SERVICE = "❌ Ошибка платежной системы Telegram. Попробуйте позже."
 
 ADMIN_SERVER_CHECKING = (
     "🔍 <b>Проверяю доступность сервера...</b>\n"
     "Ожидайте, это может занять несколько секунд."
 )
-
 ADMIN_SERVER_ADDED = (
     "✅ <b>Сервер добавлен и проверен!</b>\n"
     "{flag} <b>{name}</b>\n"
@@ -436,7 +382,6 @@ ADMIN_SERVER_ADDED = (
     "Макс клиентов (из API): {max_clients}\n"
     "API: <code>{api_url}</code>"
 )
-
 ADMIN_SERVER_CARD = (
     "🛠 Админка › 🌍 Серверы › {flag} <b>{name}</b>\n"
     "<b>ID:</b> {id}\n"
@@ -445,23 +390,17 @@ ADMIN_SERVER_CARD = (
     "<b>API URL:</b> {api_url}\n"
     "<b>Макс клиентов:</b> {max_clients}"
 )
-
 ADMIN_SERVER_NAME_PROMPT = (
     "🛠 Админка › 🌍 Серверы › ➕ <b>Новый сервер</b>\n"
     "✏️ Введите имя сервера (например: Нидерланды):"
 )
-
 ADMIN_SERVER_FLAG_PROMPT = "🏳️ Введите флаг страны (эмодзи, например: 🇳🇱):"
-
 ADMIN_SERVER_URL_PROMPT = "🔗 Введите API URL сервера (например: http://127.0.0.1:4001):"
-
 ADMIN_SERVER_KEY_PROMPT = "🔑 Введите API ключ сервера:"
-
 ADMIN_SERVER_RENAME_PROMPT = (
     "🛠 Админка › 🌍 Серверы › ✏️ <b>Редактирование</b>\n"
     "✏️ Введите новое имя сервера:"
 )
-
 ADMIN_SERVER_RENAMED = "✅ Имя сервера изменено на: {name}"
 
 ADMIN_TARIFF_CARD = (
@@ -473,22 +412,18 @@ ADMIN_TARIFF_CARD = (
     "<b>Цена ⭐:</b> {price_stars}\n"
     "<b>Статус:</b> {status}"
 )
-
 ADMIN_TARIFF_EDIT_DAYS_PROMPT = (
     "🛠 Админка › 💰 Тарифы › ⏱ <b>Изменить дни</b>\n"
     "⏱ Введите новое количество дней:"
 )
-
 ADMIN_TARIFF_EDIT_DEVICES_PROMPT = (
     "🛠 Админка › 💰 Тарифы › 📱 <b>Изменить лимит устройств</b>\n"
     "📱 Введите новый лимит устройств (число ≥ 1):"
 )
-
 ADMIN_TARIFF_EDIT_RUB_PROMPT = (
     "🛠 Админка › 💰 Тарифы › 💵 <b>Изменить цену ₽</b>\n"
     "💵 Введите новую цену в рублях:"
 )
-
 ADMIN_TARIFF_EDIT_STARS_PROMPT = (
     "🛠 Админка › 💰 Тарифы › ⭐ <b>Изменить цену Stars</b>\n"
     "⭐ Введите новую цену в Stars:"
@@ -498,14 +433,11 @@ ADMIN_USERS_HEADER = (
     "🛠 Админка › 👥 <b>Пользователи</b>\n"
     "(стр. {page}/{total_pages}) · Всего: {total}\n"
 )
-
 ADMIN_USERS_EMPTY = "<i>Пользователей пока нет</i>\n"
-
 ADMIN_USER_SEARCH_PROMPT = (
     "🛠 Админка › 👥 Пользователи › 🔍 <b>Поиск</b>\n"
     "Введите Telegram ID пользователя:"
 )
-
 ADMIN_USER_CARD = (
     "🛠 Админка › 👥 Пользователи › 👤 <b>Карточка</b>\n"
     "<b>ID:</b> <code>{telegram_id}</code>\n"
@@ -525,12 +457,10 @@ ADMIN_EXTEND_HEADER = (
     "🛠 Админка › 👥 Пользователи › ⏰ <b>Продление доступа</b>\n"
     "Выберите срок продления для <code>{telegram_id}</code>:"
 )
-
 ADMIN_CUSTOM_EXTEND_HEADER = (
     "🛠 Админка › 👥 Пользователи › ⌨️ <b>Ручное продление</b>\n"
     "Введите количество дней для продления <code>{telegram_id}</code>:"
 )
-
 ADMIN_EXTENDED_CUSTOM = (
     "✅ Подписка пользователя <code>{telegram_id}</code> продлена на {days} дней.\n"
     "Действует до: {valid_until}"
@@ -540,22 +470,18 @@ ADMIN_USER_DEVICES_HEADER = (
     "🛠 Админка › 👥 Пользователи › 🔧 <b>Устройства</b>\n"
     "Пользователь <code>{telegram_id}</code>\n"
 )
-
 ADMIN_USER_DEVICES_EMPTY = "<i>Устройств нет</i>\n"
 
 AUDIT_LOG_HEADER = (
     "🛠 Админка › 📜 <b>Аудит-лог</b>\n"
     "<i>Последние 10 действий администраторов:</i>\n"
 )
-
 AUDIT_LOG_EMPTY = "<i>Лог действий пуст.</i>"
-
 AUDIT_ENTRY = (
     "[{date}]\n"
     "Admin <code>{admin_id}</code>\n"
     "➡️ {action}{target}{details}\n"
 )
-
 AUDIT_ACTIONS = {
     "EXTEND": "⏰ Продлил",
     "BAN": "🚫 Забанил",
@@ -571,13 +497,14 @@ AUDIT_ACTIONS = {
     "REDUCE": "➖ Уменьшил дни",
     "GRANT": "🎫 Выдал доступ",
     "DELETE_DEVICE": "🗑 Удалил устройство",
+    # 🔥 ИСПРАВЛЕНО: Daily device limit blocked
+    "DEVICE_CREATE_BLOCKED": "🚫 Блокировка создания (daily limit)",
 }
 
 DASHBOARD_HEADER = (
     "🛠 <b>Админ-панель</b>\n"
     "📊 <b>Статистика:</b>\n"
 )
-
 DASHBOARD_STATS = (
     "👥 Всего пользователей: {total_users}\n"
     "✅ Активных подписок: {active_subs}\n"
@@ -590,9 +517,7 @@ BROADCAST_PROMPT = (
     "📢 Введите текст сообщения для рассылки:\n"
     "Поддерживается HTML-разметка (<b>жирный</b>, <i>курсив</i>, <code>код</code>)"
 )
-
 BROADCAST_PREVIEW = "📢 <b>Предпросмотр рассылки ({content_type}):</b>\n{text}"
-
 BROADCAST_RESULT = (
     "✅ Рассылка завершена!\n"
     "📤 Отправлено: {success_count}\n"
@@ -621,21 +546,17 @@ ADMIN_SERVER_DELETE_CONFIRM = (
     "• Сам сервер будет удалён из системы\n"
     "<i>Это действие необратимо.</i>"
 )
-
 ADMIN_SERVER_DELETED = (
     "✅ <b>Сервер полностью удалён</b>\n"
     "{flag} {name}\n"
     "Удалено устройств: {profiles_count}"
 )
-
 ADMIN_SERVER_FLAG_PROMPT_EDIT = (
     "🛠 Админка › 🌍 Серверы › 🏳 <b>Изменить флаг</b>\n"
     "Текущий флаг: {current_flag}\n"
     "Введите новый флаг страны (эмодзи, например: 🇩🇪):"
 )
-
 ADMIN_SERVER_FLAG_UPDATED = "✅ Флаг сервера изменён на: {flag}"
-
 ERROR_SERVER_DUPLICATE_URL = (
     "⚠️ <b>Сервер с таким API URL уже существует!</b>\n"
     "URL: <code>{api_url}</code>\n"
@@ -827,4 +748,14 @@ ADMIN_DELETE_DEVICE_SUCCESS = (
     "✅ <b>Устройство удалено</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
     "Устройство: <b>{device_name}</b>"
+)
+
+# 🔥 ИСПРАВЛЕНО: Daily device creation limit error
+ERROR_DEVICE_DAILY_LIMIT = (
+    "⚠️ <b>Превышен суточный лимит</b>\n"
+    "Вы пересоздали слишком много конфигураций за последние 24 часа. "
+    "В целях безопасности генерация новых ключей временно ограничена.\n\n"
+    "Все ваши созданные устройства продолжают работать в обычном режиме. "
+    "Лимит генераций обновится в 00:00. "
+    "Если у вас возникли трудности с настройкой, пожалуйста, обратитесь в <b>💬 Поддержку</b>."
 )

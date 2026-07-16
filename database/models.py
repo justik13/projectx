@@ -1,6 +1,6 @@
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, ForeignKey, Index
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, String, Text, ForeignKey, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from utils.encryption import EncryptedString
 
 
@@ -10,7 +10,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -27,31 +27,34 @@ class User(Base):
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    
     # 🔥 ИСПРАВЛЕНО #13 (из Части 6): Soft delete поля
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-    
     # 🔥 ИСПРАВЛЕНО #18: Счётчик неудачных попыток отправки уведомлений.
     # Используется для exponential backoff: 1ч → 2ч → 4ч → 8ч.
     # После 4 неудач (16ч суммарно) — сбрасывается в 0 при следующем цикле.
     notification_retry_count: Mapped[int] = mapped_column(Integer, default=0)
-    
     # 🔥 ИСПРАВЛЕНО #6 (из Части 7): Timestamp последней попытки уведомления.
     # Используется для точного расчёта backoff delay.
     # Worker проверяет: if now - last_notification_attempt < backoff_delay: skip
     last_notification_attempt: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=False), nullable=True
     )
-    
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-    
     notified_3d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_1d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_2h: Mapped[bool] = mapped_column(Boolean, default=False)
     
+    # 🔥 ИСПРАВЛЕНО: Daily device creation limit (Spam protection)
+    # Счётчик созданных устройств за текущий день (МСК).
+    # Сбрасывается в 0 при наступлении нового дня по МСК.
+    # Лимит: DEVICE_DAILY_LIMIT (25) из bot/constants.py
+    # Админы исключены из лимита.
+    device_creations_today: Mapped[int] = mapped_column(Integer, default=0)
+    last_creation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])

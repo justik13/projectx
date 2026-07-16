@@ -1,7 +1,9 @@
 """
 Heartbeat worker — обновление timestamp для мониторинга живости polling process.
+
 🔥 ИСПРАВЛЕНО #17: Bot health check.
 🔥 ИСПРАВЛЕНО #7: Алерт админу при падении Amnezia API (CircuitBreaker OPEN).
+🔥 ИСПРАВЛЕНО #22: Экспорт get_bot_ref() для использования в PaymentService (chargeback alerts).
 
 Проблема:
 Webhook server имеет /health endpoint (для UptimeRobot/Healthchecks.io).
@@ -17,6 +19,7 @@ Webhook server имеет /health endpoint (для UptimeRobot/Healthchecks.io).
 🔥 ИСПРАВЛЕНО #7: Дополнительно проверяет CircuitBreaker для каждого сервера.
 Если CB перешёл в OPEN — шлёт алерт админу в Telegram.
 """
+
 import asyncio
 import logging
 import os
@@ -43,7 +46,6 @@ async def heartbeat_loop(shutdown_event: asyncio.Event):
     Фоновый worker обновления heartbeat timestamp + мониторинг CircuitBreaker.
     """
     logger.info(f"Heartbeat worker started, file={HEARTBEAT_FILE}")
-
     # Первая запись сразу после старта
     _write_heartbeat()
 
@@ -59,7 +61,6 @@ async def heartbeat_loop(shutdown_event: asyncio.Event):
                 pass
 
             _write_heartbeat()
-
             # 🔥 ИСПРАВЛЕНО #7: Проверка CircuitBreaker
             await _check_circuit_breakers()
 
@@ -112,7 +113,7 @@ async def _check_circuit_breakers():
         except Exception:
             pass
 
-        # Формируем и отправляем алерт
+        # Формируем алерт
         alert_msg = (
             f"⚠️ <b>Сервер Amnezia недоступен!</b>\n"
             f"🌍 <b>{server_name}</b>\n"
@@ -122,32 +123,20 @@ async def _check_circuit_breakers():
             f"💡 Проверьте сервер вручную"
         )
 
-        for admin_id in settings.ADMIN_IDS:
-            try:
-                # Импортируем bot из глобального контекста —
-                # но у нас нет прямой ссылки на bot в heartbeat.
-                # Используем aiohttp для отправки через Telegram Bot API.
-                # Проще: логируем и используем bot из параметра.
-                pass
-            except Exception:
-                pass
-
-        # 🔥 Альтернатива: логируем как WARNING (видно в journalctl)
-        logger.warning(
-            "🚨 CircuitBreaker OPEN for server '%s' (%s). "
-            "Admins should be notified.",
-            server_name, api_url,
-        )
-
-        # 🔥 Отправляем алерт через bot (передаём bot в heartbeat_loop)
-        # Для этого нужно модифицировать signature heartbeat_loop.
-        # Но чтобы не ломать интерфейс, используем глобальный _bot_ref.
+        # 🔥 ИСПРАВЛЕНО: Отправляем алерт через _bot_ref
         if _bot_ref is not None:
             for admin_id in settings.ADMIN_IDS:
                 try:
                     await _bot_ref.send_message(admin_id, alert_msg, parse_mode="HTML")
+                    logger.info(f"CircuitBreaker alert sent to admin {admin_id} for {server_name}")
                 except Exception as e:
                     logger.warning(f"Failed to send CB alert to admin {admin_id}: {e}")
+        else:
+            logger.warning(
+                "🚨 CircuitBreaker OPEN for server '%s' (%s). "
+                "bot_ref is None, cannot send alert.",
+                server_name, api_url,
+            )
 
         _api_alert_sent[api_url] = now
 
@@ -160,6 +149,17 @@ def set_bot_ref(bot):
     """Устанавливает ссылку на bot для отправки алертов."""
     global _bot_ref
     _bot_ref = bot
+
+
+def get_bot_ref():
+    """
+    🔥 ИСПРАВЛЕНО #22: Возвращает ссылку на bot для использования в других сервисах.
+    Используется в PaymentService для отправки chargeback alerts.
+
+    Returns:
+        Bot instance или None если бот ещё не инициализирован
+    """
+    return _bot_ref
 
 
 def _write_heartbeat(final: bool = False):
@@ -177,7 +177,6 @@ def _write_heartbeat(final: bool = False):
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-
         os.replace(temp_file, HEARTBEAT_FILE)
 
         try:
@@ -189,6 +188,9 @@ def _write_heartbeat(final: bool = False):
             logger.debug("Heartbeat: written STOPPED marker")
         else:
             logger.debug("Heartbeat: timestamp updated")
-
     except Exception as e:
         logger.warning(f"Failed to write heartbeat file: {e}")
+
+def get_bot_ref():
+    """Возвращает ссылку на bot для использования в других сервисах."""
+    return _bot_ref

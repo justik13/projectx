@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 class PaymentService:
-
     @staticmethod
     async def handle_successful_payment(
         session: AsyncSession, payment_id: int
@@ -38,7 +38,6 @@ class PaymentService:
                     )
                 )
                 result = await session.execute(stmt)
-
                 if result.rowcount == 0:
                     await savepoint.commit()
                     return True
@@ -58,7 +57,6 @@ class PaymentService:
                     return False
 
                 new_device_limit = getattr(tariff, 'device_limit', user.device_limit)
-
                 try:
                     await SubscriptionService.extend_subscription(
                         session, user.telegram_id, tariff.duration_days,
@@ -105,7 +103,6 @@ class PaymentService:
                     f"Payment {payment_id} processed successfully for user {user.telegram_id}"
                 )
                 return True
-
         except Exception as e:
             await session.rollback()
             logger.error(f"Failed to process payment {payment_id}: {e}", exc_info=True)
@@ -117,8 +114,8 @@ class PaymentService:
         amount: float, telegram_id: int, bot_username: str
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
-
         settings = get_settings()
+
         payment = await create_payment(
             session=session, user_id=user_id, tariff_id=tariff_id,
             amount=int(amount), currency="RUB"
@@ -139,7 +136,6 @@ class PaymentService:
         if not transaction:
             payment.status = "failed"
             await session.commit()
-
             # 🔥 ИСПРАВЛЕНО #11: Аудит-лог для failed платежа
             try:
                 await AuditService.log_action(
@@ -149,14 +145,12 @@ class PaymentService:
                 )
             except Exception as e:
                 logger.error(f"Failed to log payment failure to audit: {e}")
-
             return payment, None
 
         payment.external_id = transaction.get("transactionId")
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get("paymentMethod", "SBPQR")
         await session.commit()
-
         return payment, None
 
     @staticmethod
@@ -164,7 +158,6 @@ class PaymentService:
         session: AsyncSession, transaction_id: str,
         status: str, payload: str
     ) -> tuple[bool, str]:
-
         stmt = (
             select(Payment)
             .options(selectinload(Payment.user), selectinload(Payment.tariff))
@@ -190,7 +183,6 @@ class PaymentService:
 
             payment.status = "cancelled"
             await session.commit()
-
             # 🔥 ИСПРАВЛЕНО #11: Аудит-лог для cancelled платежа
             try:
                 await AuditService.log_action(
@@ -200,7 +192,6 @@ class PaymentService:
                 )
             except Exception as e:
                 logger.error(f"Failed to log payment cancellation to audit: {e}")
-
             return True, "success"
 
         elif status == "CHARGEBACKED":
@@ -210,7 +201,6 @@ class PaymentService:
 
             payment.status = "refunded"
             await session.commit()
-
             logger.warning(f"Chargeback for payment {payment.id}")
 
             try:
@@ -222,6 +212,9 @@ class PaymentService:
             except Exception as e:
                 logger.error(f"Failed to log chargeback to audit: {e}")
 
+            # 🔥 ИСПРАВЛЕНО #22: Мгновенный алерт админам о chargeback
+            await _send_chargeback_alert(payment, transaction_id)
+
             return True, "success"
 
         logger.warning(f"Unknown Platega status: {status}")
@@ -232,7 +225,6 @@ class PaymentService:
         payment = await get_payment_by_id(session, payment_id)
         if not payment or not payment.external_id:
             return False
-
         if payment.status != "pending":
             return payment.status == "completed"
 
@@ -247,7 +239,6 @@ class PaymentService:
         elif status == "CANCELED":
             payment.status = "cancelled"
             await session.commit()
-
             # 🔥 ИСПРАВЛЕНО #11: Аудит-лог для cancelled при ручном чеке
             try:
                 await AuditService.log_action(
@@ -257,7 +248,86 @@ class PaymentService:
                 )
             except Exception as e:
                 logger.error(f"Failed to log payment cancellation to audit: {e}")
-
             return False
-
         return False
+
+
+async def _send_chargeback_alert(payment: Payment, transaction_id: str) -> None:
+    """
+    🔥 ИСПРАВЛЕНО #22: Отправляет алерт админам о chargeback.
+
+    Использует _bot_ref из services/workers/heartbeat.py (Вариант B),
+    чтобы не нарушать DI в PaymentService.
+
+    Сообщение содержит:
+    - ID платежа
+    - Telegram ID и username пользователя
+    - Сумму и валюту
+    - Название тарифа
+    - Transaction ID (Platega)
+    - Inline-кнопка "👤 Профиль пользователя" → admin_user_card:{telegram_id}
+
+    Если _bot_ref недоступен (бот не инициализирован) — логируем как ERROR.
+    """
+    from services.workers.heartbeat import get_bot_ref
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    bot = get_bot_ref()
+    if bot is None:
+        logger.error(
+            f"Chargeback alert SKIPPED: bot_ref is None. "
+            f"Payment {payment.id}, user {payment.user_id}, "
+            f"transaction={transaction_id}"
+        )
+        return
+
+    settings = get_settings()
+    admin_ids = settings.ADMIN_IDS
+
+    if not admin_ids:
+        logger.warning("Chargeback alert skipped: ADMIN_IDS is empty")
+        return
+
+    user = payment.user
+    tariff = payment.tariff
+    username = f"@{user.username}" if user and user.username else "—"
+    tariff_name = f"{tariff.duration_days} дн. / {tariff.device_limit} устр." if tariff else "—"
+
+    # Формируем inline-кнопку "👤 Профиль пользователя" (Вариант A)
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="👤 Профиль пользователя",
+        callback_data=f"admin_user_card:{user.telegram_id}" if user else "admin_menu"
+    )
+    builder.adjust(1)
+    keyboard = builder.as_markup()
+
+    alert_msg = (
+        f"🚨 <b>CHARGEBACK (Возврат средств)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💳 <b>Платёж ID:</b> <code>{payment.id}</code>\n"
+        f"👤 <b>Пользователь:</b> <code>{user.telegram_id if user else '—'}</code> ({username})\n"
+        f"💰 <b>Сумма:</b> <b>{payment.amount} {payment.currency}</b>\n"
+        f"📦 <b>Тариф:</b> {tariff_name}\n"
+        f"🔗 <b>Transaction ID:</b> <code>{transaction_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ Средства возвращены плательщику через банк.\n"
+        f"<i>Проверьте профиль пользователя и примите решение о блокировке.</i>"
+    )
+
+    # Отправляем каждому админу индивидуально (НЕ группируем)
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(
+                admin_id,
+                alert_msg,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            logger.info(f"Chargeback alert sent to admin {admin_id} for payment {payment.id}")
+        except Exception as e:
+            logger.error(
+                f"Failed to send chargeback alert to admin {admin_id} "
+                f"for payment {payment.id}: {e}"
+            )
