@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from aiogram import Router, F
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,9 +18,7 @@ from utils.telegram import render_hub, send_hub_photo
 
 router = Router()
 logger = logging.getLogger(__name__)
-
 _broadcast_stop_event = asyncio.Event()
-
 
 @router.callback_query(F.data == "admin_broadcast")
 async def start_broadcast(callback: CallbackQuery, state: FSMContext):
@@ -28,7 +26,6 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
-
     await state.clear()
     try:
         await callback.message.edit_text(
@@ -37,7 +34,6 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
     await state.set_state(AdminStates.entering_broadcast_message)
-
 
 @router.message(AdminStates.entering_broadcast_message)
 async def process_broadcast_message(message: Message, state: FSMContext):
@@ -58,7 +54,6 @@ async def process_broadcast_message(message: Message, state: FSMContext):
         media_id = message.document.file_id
 
     preview = texts.BROADCAST_PREVIEW.format(content_type=content_type, text=broadcast_text)
-
     try:
         if media_id and content_type == "photo":
             await send_hub_photo(
@@ -76,7 +71,6 @@ async def process_broadcast_message(message: Message, state: FSMContext):
                 message.bot, message.chat.id, preview,
                 get_broadcast_confirm_keyboard(), parse_mode="HTML",
             )
-
         await state.update_data(
             broadcast_text=broadcast_text, media_id=media_id, content_type=content_type,
         )
@@ -84,24 +78,48 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     except Exception as e:
         await render_hub(message.bot, message.chat.id, texts.ERROR_VALIDATION.format(error=e), get_back_button("admin_menu"))
 
+async def _send_with_html(bot, uid, text, media_id, content_type, kb):
+    if content_type == "photo" and media_id:
+        await bot.send_photo(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
+    elif content_type == "document" and media_id:
+        await bot.send_document(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+
+async def _send_plain(bot, uid, text, media_id, content_type, kb):
+    if content_type == "photo" and media_id:
+        await bot.send_photo(uid, media_id, caption=text, reply_markup=kb)
+    elif content_type == "document" and media_id:
+        await bot.send_document(uid, media_id, caption=text, reply_markup=kb)
+    else:
+        await bot.send_message(uid, text, reply_markup=kb)
+
+async def _dispatch_message(bot, uid, text, media_id, content_type):
+    """Отправляет одно сообщение рассылки с fallback на plain text."""
+    kb = get_broadcast_close_keyboard()
+    try:
+        await _send_with_html(bot, uid, text, media_id, content_type, kb)
+    except TelegramBadRequest as e:
+        # 🔥 ИСПРАВЛЕНО: Fallback если HTML невалиден
+        if "can't parse entities" in str(e).lower() or "parse" in str(e).lower():
+            logger.warning(f"HTML parse failed for user {uid}, falling back to plain text")
+            await _send_plain(bot, uid, text, media_id, content_type, kb)
+        else:
+            raise
 
 async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, content_type, label, admin_id):
     _broadcast_stop_event.clear()
     total_count = len(user_ids)
     success_count = 0
     fail_count = 0
-
-    # 🔥 ИСПРАВЛЕНО #14: Собираем ID пользователей, заблокировавших бота
     blocked_user_ids = []
 
     for uid in user_ids:
         if _broadcast_stop_event.is_set():
             break
-
         try:
             await _dispatch_message(bot, uid, broadcast_text, media_id, content_type)
             success_count += 1
-            # ИСПРАВЛЕНО: используем константу вместо магического числа
             await asyncio.sleep(BROADCAST_DELAY)
         except TelegramRetryAfter as e:
             fail_count += 1
@@ -114,12 +132,10 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
                 pass
         except TelegramForbiddenError:
             fail_count += 1
-            # 🔥 ИСПРАВЛЕНО #14: Собираем ID вместо немедленного обновления
             blocked_user_ids.append(uid)
         except Exception:
             fail_count += 1
 
-    # 🔥 ИСПРАВЛЕНО #14: Batch update для всех заблокировавших бота
     if blocked_user_ids:
         try:
             async with session_scope() as session:
@@ -149,18 +165,6 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
     except Exception:
         pass
 
-
-async def _dispatch_message(bot, uid, text, media_id, content_type):
-    """Отправляет одно сообщение рассылки."""
-    kb = get_broadcast_close_keyboard()
-    if content_type == "photo" and media_id:
-        await bot.send_photo(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
-    elif content_type == "document" and media_id:
-        await bot.send_document(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
-    else:
-        await bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
-
-
 @router.callback_query(F.data == "broadcast_send_all", AdminStates.confirming_broadcast)
 async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     await callback.answer("🚀 Рассылка запущена в фоне")
@@ -177,7 +181,6 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: 
 
     media_id = data.get("media_id")
     content_type = data.get("content_type")
-
     users = await get_all_users(session)
     user_ids = [u.telegram_id for u in users if not u.is_bot_blocked]
 
@@ -196,7 +199,6 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: 
         pass
     await state.clear()
 
-
 @router.callback_query(F.data == "broadcast_send_active", AdminStates.confirming_broadcast)
 async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     await callback.answer("🚀 Рассылка запущена в фоне")
@@ -213,7 +215,6 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, sessio
 
     media_id = data.get("media_id")
     content_type = data.get("content_type")
-
     users = await get_active_users(session)
     user_ids = [u.telegram_id for u in users]
 
@@ -232,26 +233,21 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, sessio
         pass
     await state.clear()
 
-
 @router.callback_query(F.data == "broadcast_stop")
 async def stop_broadcast(callback: CallbackQuery):
     await callback.answer("⏹ Рассылка остановлена", show_alert=True)
     _broadcast_stop_event.set()
 
-
 @router.callback_query(F.data == "broadcast_dismiss")
 async def dismiss_broadcast_result(callback: CallbackQuery):
-    """Убирает уведомление о результате рассылки у АДМИНА."""
     await callback.answer()
     try:
         await callback.message.delete()
     except Exception:
         pass
 
-
 @router.callback_query(F.data == "dismiss_broadcast")
 async def dismiss_broadcast_message(callback: CallbackQuery):
-    """Убирает сообщение рассылки у ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ."""
     await callback.answer()
     try:
         await callback.message.delete()

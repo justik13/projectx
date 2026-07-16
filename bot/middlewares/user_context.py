@@ -1,15 +1,11 @@
 """
 UserContextMiddleware — загрузка пользователя в контекст.
 Загружает User с eager loading нужных relationship для избежания DetachedInstanceError.
-
 🔥 ИСПРАВЛЕНО:
-- Уменьшен maxsize кэша с 5000 до 2000 (достаточно для 1000 активных пользователей)
-- Увеличен TTL с 3с до 5с для снижения нагрузки на БД
-- Добавлена периодическая очистка expired записей
-
-🔥 ИСПРАВЛЕНО #11: Кэшируем DTO вместо SQLAlchemy объектов (thread-safe)
+- Автоматический сброс is_bot_blocked при любом взаимодействии
+- Автоматическое обновление username и first_name из Telegram
+- Исправлена ошибка detached instance при использовании кэша
 """
-
 import logging
 import asyncio
 from dataclasses import dataclass
@@ -17,7 +13,7 @@ from datetime import datetime
 from cachetools import TTLCache
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from bot import texts
 from bot.constants import USER_CONTEXT_CACHE_MAX_SIZE, USER_CONTEXT_CACHE_TTL
@@ -26,13 +22,9 @@ from database.models import User
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class UserDTO:
-    """
-    DTO (Data Transfer Object) для кэширования пользователя.
-    Thread-safe, в отличие от SQLAlchemy объектов.
-    """
+    """DTO (Data Transfer Object) для кэширования пользователя. Thread-safe."""
     id: int
     telegram_id: int
     username: str | None
@@ -51,7 +43,6 @@ class UserDTO:
 
     @classmethod
     def from_orm(cls, user: User) -> "UserDTO":
-        """Создаёт DTO из SQLAlchemy User объекта."""
         return cls(
             id=user.id,
             telegram_id=user.telegram_id,
@@ -70,22 +61,17 @@ class UserDTO:
             created_at=user.created_at,
         )
 
-
-# 🔥 ИСПРАВЛЕНО: Оптимизированные параметры кэша
 _user_cache: TTLCache[int, UserDTO] = TTLCache(
     maxsize=USER_CONTEXT_CACHE_MAX_SIZE, ttl=USER_CONTEXT_CACHE_TTL
 )
 _last_cleanup_time: float = 0.0
-_CLEANUP_INTERVAL = 300.0  # Очищать раз в 5 минут
-
+_CLEANUP_INTERVAL = 300.0
 
 def _maybe_cleanup_cache() -> None:
-    """Периодическая очистка expired записей из кэша"""
     global _last_cleanup_time
     now = asyncio.get_event_loop().time()
     if now - _last_cleanup_time < _CLEANUP_INTERVAL:
         return
-
     _last_cleanup_time = now
     if len(_user_cache) >= USER_CONTEXT_CACHE_MAX_SIZE * 0.8:
         expired_keys = []
@@ -94,21 +80,17 @@ def _maybe_cleanup_cache() -> None:
                 _ = _user_cache[key]
             except KeyError:
                 expired_keys.append(key)
-
         for key in expired_keys:
             try:
                 del _user_cache[key]
             except KeyError:
                 pass
-
         if expired_keys:
             logger.debug(f"User cache cleanup: {len(expired_keys)} expired entries removed")
-
 
 class UserContextMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         _maybe_cleanup_cache()
-
         user_id = None
         if isinstance(event, Message):
             user_id = event.from_user.id
@@ -123,11 +105,41 @@ class UserContextMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         try:
-            # Проверяем кэш
+            user = None
             if user_id in _user_cache:
                 user_dto = _user_cache[user_id]
-                # 🔥 ИСПРАВЛЕНО #11: Создаём временный User объект из DTO для совместимости
-                # Это позволяет существующему коду работать без изменений
+                
+                # 🔥 ИСПРАВЛЕНО: Синхронизация данных с Telegram и сброс блокировки
+                needs_update = False
+                update_data = {}
+
+                if user_dto.is_bot_blocked:
+                    update_data['is_bot_blocked'] = False
+                    needs_update = True
+
+                current_username = event.from_user.username
+                if user_dto.username != current_username:
+                    update_data['username'] = current_username
+                    needs_update = True
+
+                current_first_name = event.from_user.first_name
+                if user_dto.first_name != current_first_name:
+                    update_data['first_name'] = current_first_name
+                    needs_update = True
+
+                if needs_update:
+                    try:
+                        await session.execute(
+                            update(User).where(User.telegram_id == user_id).values(**update_data)
+                        )
+                        await session.flush()
+                        # Обновляем кэш
+                        for k, v in update_data.items():
+                            setattr(user_dto, k, v)
+                    except Exception as e:
+                        logger.error(f"Failed to update user context in DB: {e}")
+
+                # Создаем временный User объект из DTO для совместимости с хендлерами
                 user = User(
                     id=user_dto.id,
                     telegram_id=user_dto.telegram_id,
@@ -146,8 +158,6 @@ class UserContextMiddleware(BaseMiddleware):
                     created_at=user_dto.created_at,
                 )
             else:
-                # ✅ ИСПРАВЛЕНО: User.current_tariff (не User.tariff)
-                # eager loading prevents DetachedInstanceError
                 stmt = (
                     select(User)
                     .where(User.telegram_id == user_id)
@@ -159,15 +169,13 @@ class UserContextMiddleware(BaseMiddleware):
                 )
                 result = await session.execute(stmt)
                 user = result.scalar_one_or_none()
-
                 if user:
-                    # 🔥 ИСПРАВЛЕНО #11: Кэшируем DTO вместо SQLAlchemy объекта
                     user_dto = UserDTO.from_orm(user)
                     _user_cache[user_id] = user_dto
 
             if user:
                 data["db_user"] = user
-
+                
                 # Проверка бана
                 if user.is_banned:
                     support_username = get_settings().SUPPORT_USERNAME.lstrip("@")
@@ -185,5 +193,5 @@ class UserContextMiddleware(BaseMiddleware):
 
         except Exception as e:
             logger.error(f"UserContextMiddleware error: {e}", exc_info=True)
-
+            
         return await handler(event, data)

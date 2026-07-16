@@ -6,11 +6,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from bot.keyboards import get_back_button, get_device_delete_confirm_keyboard, get_device_keyboard
 from bot.states import DeviceCreationStates, DeviceManagementStates
 from bot import texts
 from database.models import User
-from database.repositories.profiles_repo import get_profile_by_id, get_user_profiles, get_user_profiles_count, update_profile
+from database.repositories.profiles_repo import (
+    get_profile_by_id, get_user_profiles, get_user_profiles_count, update_profile
+)
 from database.repositories.servers_repo import get_available_servers, get_server_by_id
 from database.repositories.users_repo import get_user_by_telegram_id
 from database.repositories.tariffs_repo import get_tariff_by_id
@@ -18,13 +21,19 @@ from services.device_service import DeviceService
 from services.subscription import SubscriptionService
 from services.slots_cache import get_real_peer_count
 from utils.formatters import format_datetime, format_traffic, format_connection_device_card
-from utils.telegram import safe, render_hub, clear_and_delete_hub, append_hub_document, append_hub_message
+from utils.telegram import (
+    safe, render_hub, clear_and_delete_hub, append_hub_document, append_hub_message
+)
 from utils.vpn_parser import build_vpn_file, build_conf_file
 
 router = Router()
 logger = logging.getLogger(__name__)
-
 DEVICE_NAME_REGEX = re.compile(r"^[a-zA-Z0-9\s_-]+$")
+
+# 🔥 ИСПРАВЛЕНО: Защита от двойного нажатия (Race Condition / Double Click)
+_deleting_devices: set[int] = set()
+_creating_devices: set[int] = set()
+
 
 async def _get_effective_device_limit(user: User, session: AsyncSession) -> int:
     if user.current_tariff_id:
@@ -33,11 +42,8 @@ async def _get_effective_device_limit(user: User, session: AsyncSession) -> int:
             return tariff.device_limit
     return 0
 
+
 async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardBuilder]:
-    """
-    ИСПРАВЛЕНО: использует format_connection_device_card из formatters.
-    get_user_profiles уже делает eager loading сервера.
-    """
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
     device_limit = await _get_effective_device_limit(user, session)
@@ -63,7 +69,6 @@ async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[
                 if profile.last_connected else texts.DEVICE_NOT_CONNECTED
             )
             
-            # ИСПРАВЛЕНО: используем formatter
             rendered += format_connection_device_card(
                 profile, flag, server_name, last_connected_text
             )
@@ -73,6 +78,7 @@ async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[
         
     builder.adjust(1)
     return rendered, builder
+
 
 async def _render_connections(target, user: User, session: AsyncSession):
     if not user:
@@ -96,6 +102,7 @@ async def _render_connections(target, user: User, session: AsyncSession):
     builder.adjust(1)
     await render_hub(target.bot, target.chat.id, rendered, builder.as_markup())
 
+
 @router.callback_query(F.data == "menu_connections")
 async def hub_menu_connections(
     callback: CallbackQuery, state: FSMContext,
@@ -107,6 +114,7 @@ async def hub_menu_connections(
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
     await _render_connections(callback.message, db_user, session)
+
 
 @router.callback_query(F.data == "back_to_connections")
 async def back_to_connections(
@@ -120,6 +128,7 @@ async def back_to_connections(
         return
     await _render_connections(callback.message, db_user, session)
 
+
 @router.callback_query(F.data.startswith("manage_device:"))
 async def manage_device(
     callback: CallbackQuery, state: FSMContext,
@@ -127,8 +136,10 @@ async def manage_device(
 ):
     await callback.answer()
     await state.clear()
+    
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+    
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -145,6 +156,7 @@ async def manage_device(
     )
     await render_hub(callback.bot, callback.message.chat.id, rendered, get_device_keyboard(profile.id))
 
+
 @router.callback_query(F.data.startswith("show_config:"))
 async def show_config(
     callback: CallbackQuery, state: FSMContext,
@@ -152,8 +164,10 @@ async def show_config(
 ):
     await callback.answer()
     await state.clear()
+    
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+    
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -167,16 +181,18 @@ async def show_config(
         get_back_button(f"manage_device:{profile.id}")
     )
 
+
 @router.callback_query(F.data.startswith("download_conf:"))
 async def download_conf(
     callback: CallbackQuery, state: FSMContext,
     session: AsyncSession, db_user: User | None = None
 ):
-    """Отдача ДВУХ файлов (.vpn и .conf) + текстовый хаб с инструкцией."""
     await callback.answer("⏳ Генерирую файлы...")
     await state.clear()
+    
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+    
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -199,6 +215,7 @@ async def download_conf(
     vpn_file = BufferedInputFile(vpn_content.encode("utf-8"), filename=f"{safe_device_name}.vpn")
     conf_file = BufferedInputFile(conf_content.encode("utf-8"), filename=f"{safe_device_name}.conf")
     
+    # 🔥 SMH: Очищаем хаб и отправляем файлы + инструкцию
     await clear_and_delete_hub(callback.bot, callback.message.chat.id)
     
     await append_hub_document(
@@ -234,25 +251,30 @@ async def download_conf(
         parse_mode="HTML"
     )
 
+
 @router.callback_query(F.data.startswith("rename_device:"))
 async def rename_device_start(
     callback: CallbackQuery, state: FSMContext,
     session: AsyncSession, db_user: User | None = None
 ):
     await callback.answer()
+    
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+    
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
         
     await state.update_data(profile_id=profile_id)
     await state.set_state(DeviceManagementStates.rename_device)
+    
     await render_hub(
         callback.bot, callback.message.chat.id,
         texts.DEVICE_RENAME_PROMPT,
         get_back_button(f"manage_device:{profile_id}")
     )
+
 
 @router.message(DeviceManagementStates.rename_device)
 async def rename_device_process(message: Message, state: FSMContext, session: AsyncSession):
@@ -261,6 +283,7 @@ async def rename_device_process(message: Message, state: FSMContext, session: As
         return
         
     new_name = message.text.strip()
+    
     if not new_name or len(new_name) > 16 or not DEVICE_NAME_REGEX.match(new_name):
         await render_hub(
             message.bot, message.chat.id,
@@ -271,6 +294,7 @@ async def rename_device_process(message: Message, state: FSMContext, session: As
         
     data = await state.get_data()
     profile = await get_profile_by_id(session, data.get("profile_id"))
+    
     if profile:
         await update_profile(session, profile, device_name=new_name)
         await render_hub(
@@ -278,7 +302,9 @@ async def rename_device_process(message: Message, state: FSMContext, session: As
             f"✅ Устройство переименовано в <b>{safe(new_name)}</b>",
             get_device_keyboard(profile.id)
         )
-        await state.clear()
+        
+    await state.clear()
+
 
 @router.callback_query(F.data.startswith("request_delete_device:"))
 async def request_delete_device(
@@ -287,8 +313,10 @@ async def request_delete_device(
 ):
     await callback.answer()
     await state.clear()
+    
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+    
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -299,10 +327,12 @@ async def request_delete_device(
         get_device_delete_confirm_keyboard(profile_id)
     )
 
+
 @router.callback_query(F.data.startswith("cancel_delete_device:"))
 async def cancel_delete_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer("❌ Удаление отменено")
     await state.clear()
+    
     profile_id = int(callback.data.split(":")[1])
     await render_hub(
         callback.bot, callback.message.chat.id,
@@ -310,84 +340,112 @@ async def cancel_delete_device(callback: CallbackQuery, state: FSMContext, sessi
         get_device_keyboard(profile_id)
     )
 
+
 @router.callback_query(F.data.startswith("confirm_delete_device:"))
 async def confirm_delete_device(
     callback: CallbackQuery, state: FSMContext,
     session: AsyncSession, db_user: User | None = None
 ):
-    await callback.answer("⏳ Удаляю устройство...")
-    await state.clear()
     profile_id = int(callback.data.split(":")[1])
-    profile = await get_profile_by_id(session, profile_id)
-    if not profile or not db_user or profile.user_id != db_user.id:
-        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
+    
+    # 🔥 ИСПРАВЛЕНО: Защита от двойного нажатия при удалении
+    if profile_id in _deleting_devices:
+        await callback.answer("⏳ Уже удаляем устройство...", show_alert=True)
         return
+    _deleting_devices.add(profile_id)
+    
+    try:
+        await callback.answer("⏳ Удаляю устройство...")
+        await state.clear()
         
-    if not await DeviceService.delete_device(session, profile):
-        await callback.answer(texts.ERROR_SERVER_UNAVAILABLE_GENERIC, show_alert=True)
-        return
+        profile = await get_profile_by_id(session, profile_id)
         
-    user = db_user or await get_user_by_telegram_id(session, callback.from_user.id)
-    if user:
-        await _render_connections(callback.message, user, session)
+        if not profile or not db_user or profile.user_id != db_user.id:
+            await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
+            return
+            
+        if not await DeviceService.delete_device(session, profile):
+            await callback.answer(texts.ERROR_SERVER_UNAVAILABLE_GENERIC, show_alert=True)
+            return
+            
+        user = db_user or await get_user_by_telegram_id(session, callback.from_user.id)
+        if user:
+            await _render_connections(callback.message, user, session)
+    finally:
+        _deleting_devices.discard(profile_id)
+
 
 @router.callback_query(F.data == "add_device")
 async def start_add_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    await callback.answer("⏳ Проверяю доступные слоты...")
-    await state.clear()
+    user_id = callback.from_user.id
     
-    # 1. Получаем локально доступные серверы (БД)
-    servers = await get_available_servers(session)
-    if not servers:
-        await render_hub(
-            callback.bot, callback.message.chat.id,
-            texts.ERROR_NO_FREE_SLOTS,
-            get_back_button("back_to_connections")
-        )
+    # 🔥 ИСПРАВЛЕНО: Защита от двойного нажатия при создании
+    if user_id in _creating_devices:
+        await callback.answer("⏳ Уже обрабатываем запрос...", show_alert=True)
         return
-
-    # 2. Параллельная проверка реального количества слотов через API с кэшированием
-    results = await asyncio.gather(*[get_real_peer_count(server) for server in servers])
+    _creating_devices.add(user_id)
     
-    available_servers = []
-    for server, real_count in zip(servers, results):
-        if real_count == -1:
-            # API недоступен, используем локальную выборку (fallback)
-            available_servers.append(server)
-        elif real_count < server.max_clients:
-            available_servers.append(server)
+    try:
+        await callback.answer("⏳ Проверяю доступные слоты...")
+        await state.clear()
+        
+        # 1. Получаем локально доступные серверы (БД)
+        servers = await get_available_servers(session)
+        if not servers:
+            await render_hub(
+                callback.bot, callback.message.chat.id,
+                texts.ERROR_NO_FREE_SLOTS,
+                get_back_button("back_to_connections")
+            )
+            return
             
-    if not available_servers:
+        # 2. Параллельная проверка реального количества слотов через API с кэшированием
+        results = await asyncio.gather(*[get_real_peer_count(server) for server in servers])
+        available_servers = []
+        
+        for server, real_count in zip(servers, results):
+            if real_count == -1:
+                available_servers.append(server)
+            elif real_count < server.max_clients:
+                available_servers.append(server)
+                
+        if not available_servers:
+            await render_hub(
+                callback.bot, callback.message.chat.id,
+                texts.ERROR_NO_FREE_SLOTS,
+                get_back_button("back_to_connections")
+            )
+            return
+            
+        # 3. Рендерим только серверы, где реально есть места
+        builder = InlineKeyboardBuilder()
+        for server in available_servers:
+            flag = server.country_flag or "🌍"
+            builder.button(
+                text=f"{flag} {server.name}",
+                callback_data=f"select_server:{server.id}"
+            )
+            
+        builder.button(text="← Назад", callback_data="back_to_connections")
+        builder.adjust(1)
+        
         await render_hub(
             callback.bot, callback.message.chat.id,
-            texts.ERROR_NO_FREE_SLOTS,
-            get_back_button("back_to_connections")
+            texts.CONNECTION_SELECT_SERVER,
+            builder.as_markup()
         )
-        return
+        await state.set_state(DeviceCreationStates.choose_server)
+    finally:
+        _creating_devices.discard(user_id)
 
-    # 3. Рендерим только серверы, где реально есть места
-    builder = InlineKeyboardBuilder()
-    for server in available_servers:
-        flag = server.country_flag or "🌍"
-        builder.button(
-            text=f"{flag} {server.name}",
-            callback_data=f"select_server:{server.id}"
-        )
-    builder.button(text="← Назад", callback_data="back_to_connections")
-    builder.adjust(1)
-    
-    await render_hub(
-        callback.bot, callback.message.chat.id,
-        texts.CONNECTION_SELECT_SERVER,
-        builder.as_markup()
-    )
-    await state.set_state(DeviceCreationStates.choose_server)
 
 @router.callback_query(F.data.startswith("select_server:"), DeviceCreationStates.choose_server)
 async def select_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
+    
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
+    
     if not server:
         await callback.answer(texts.ERROR_LOCATION_NOT_FOUND, show_alert=True)
         await state.clear()
@@ -395,6 +453,7 @@ async def select_server(callback: CallbackQuery, state: FSMContext, session: Asy
         
     await state.update_data(server_id=server_id)
     await state.set_state(DeviceCreationStates.enter_device_name)
+    
     flag = server.country_flag or "🌍"
     await render_hub(
         callback.bot, callback.message.chat.id,
@@ -402,58 +461,74 @@ async def select_server(callback: CallbackQuery, state: FSMContext, session: Asy
         get_back_button("add_device")
     )
 
+
 @router.message(DeviceCreationStates.enter_device_name)
 async def enter_device_name(
     message: Message, state: FSMContext,
     session: AsyncSession, db_user: User | None = None
 ):
-    if not message.text or message.text.startswith("/"):
-        await state.clear()
+    user_id = message.from_user.id
+    
+    # 🔥 ИСПРАВЛЕНО: Защита от спама сообщениями при создании
+    if user_id in _creating_devices:
+        await message.answer("⏳ Пожалуйста, подождите, предыдущий запрос обрабатывается...")
         return
+    _creating_devices.add(user_id)
+    
+    try:
+        if not message.text or message.text.startswith("/"):
+            await state.clear()
+            return
+            
+        device_name = message.text.strip()
         
-    device_name = message.text.strip()
-    if not device_name or len(device_name) > 16 or not DEVICE_NAME_REGEX.match(device_name):
-        await render_hub(
-            message.bot, message.chat.id,
-            texts.ERROR_INVALID_DEVICE_NAME,
-            get_back_button("add_device")
+        if not device_name or len(device_name) > 16 or not DEVICE_NAME_REGEX.match(device_name):
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_INVALID_DEVICE_NAME,
+                get_back_button("add_device")
+            )
+            return
+            
+        user = db_user
+        if not user:
+            await state.clear()
+            return
+            
+        device_limit = await _get_effective_device_limit(user, session)
+        profiles_count = await get_user_profiles_count(session, user.id)
+        
+        if profiles_count >= device_limit:
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_DEVICE_LIMIT_REACHED.format(limit=device_limit),
+                get_back_button("back_to_connections")
+            )
+            await state.clear()
+            return
+            
+        data = await state.get_data()
+        profile = await DeviceService.create_device(
+            session, user, data.get("server_id"), device_name
         )
-        return
         
-    user = db_user
-    if not user:
-        await state.clear()
-        return
-        
-    device_limit = await _get_effective_device_limit(user, session)
-    profiles_count = await get_user_profiles_count(session, user.id)
-    if profiles_count >= device_limit:
-        await render_hub(
-            message.bot, message.chat.id,
-            texts.ERROR_DEVICE_LIMIT_REACHED.format(limit=device_limit),
-            get_back_button("back_to_connections")
+        if not profile:
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_SERVER_UNAVAILABLE,
+                get_back_button("back_to_connections")
+            )
+            await state.clear()
+            return
+            
+        server = await get_server_by_id(session, profile.server_id)
+        success_text = texts.DEVICE_ADDED_SUCCESS.format(
+            device_name=safe(device_name),
+            flag=server.country_flag,
+            server_name=safe(server.name)
         )
-        await state.clear()
-        return
         
-    data = await state.get_data()
-    profile = await DeviceService.create_device(
-        session, user, data.get("server_id"), device_name
-    )
-    if not profile:
-        await render_hub(
-            message.bot, message.chat.id,
-            texts.ERROR_SERVER_UNAVAILABLE,
-            get_back_button("back_to_connections")
-        )
+        await render_hub(message.bot, message.chat.id, success_text, get_device_keyboard(profile.id))
         await state.clear()
-        return
-        
-    server = await get_server_by_id(session, profile.server_id)
-    success_text = texts.DEVICE_ADDED_SUCCESS.format(
-        device_name=safe(device_name),
-        flag=server.country_flag,
-        server_name=safe(server.name)
-    )
-    await render_hub(message.bot, message.chat.id, success_text, get_device_keyboard(profile.id))
-    await state.clear()
+    finally:
+        _creating_devices.discard(user_id)
