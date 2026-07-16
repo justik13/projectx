@@ -38,6 +38,8 @@ class DeviceService:
         - Убран откат создания клиента при failed валидации параметров
         - Оставлена только проверка is_valid_vpn_uri() (protocol_version == "2")
         - Полное доверие API: "Боту нужно просто отдавать то, что пришло из API"
+        
+        🔥 ИСПРАВЛЕНО: Pre-flight check с force_refresh=True для точности.
         """
         server = await get_server_by_id(session, server_id)
         if not server or server.protocol != AMNEZIA_PROTOCOL:
@@ -47,8 +49,8 @@ class DeviceService:
             return None
 
         # 🔥 PRE-FLIGHT CHECK: Проверка реального количества слотов перед созданием
-        # Используем кэш, чтобы не дергать API лишний раз
-        real_count = await get_real_peer_count(server)
+        # 🔥 ИСПРАВЛЕНО: force_refresh=True для точности (игнорирует кэш)
+        real_count = await get_real_peer_count(server, force_refresh=True)
         if real_count != -1 and real_count >= server.max_clients:
             logger.warning(
                 f"create_device: server {server.name} is full "
