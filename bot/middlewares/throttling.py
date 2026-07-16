@@ -1,6 +1,5 @@
 """
 Троттлинг для предотвращения спама callback-запросами.
-
 Два уровня защиты:
 1. ГЛОБАЛЬНЫЙ per-user limit (0.3с) — блокирует ВСЕ callback_query подряд
    независимо от типа. Предотвращает «2 кнопки одновременно».
@@ -11,17 +10,11 @@
 друг друга на уровне action_type, но глобальный limit закрывает этот gap.
 
 🔥 ИСПРАВЛЕНО:
+- Убрана ручная очистка кэша (_cleanup_expired)
+- cachetools.TTLCache сам удаляет просроченные ключи при обращении
 - Добавлен глобальный per-user rate limit (TTLCache 0.3с)
 - Уменьшен maxsize с 10000 до 5000 (достаточно для 1000 пользователей)
-- Добавлен явный cleanup при достижении лимита
-- Ключ включает только action_type, а не полный callback_data для экономии памяти
-
-🔥 ИСПРАВЛЕНО #15: /start throttle
-- /start теперь троттится на уровне action-type (2.0с между повторными запусками)
-- Раньше: /start — это Message, global throttle (0.3с) работал, но action-type не применялся
-- Теперь: /start добавлен в список троттлимых команд, защита от спама
 """
-import asyncio
 import logging
 from aiogram.types import CallbackQuery, Message
 from cachetools import TTLCache
@@ -100,24 +93,7 @@ class ThrottlingMiddleware:
                 logger.debug(f"Throttled message from user {user_id}: {action_key}")
             return
 
-        # 🔥 ИСПРАВЛЕНО: Явная очистка при достижении 80% лимита
-        if len(self._last_call) >= _MAX_CACHE_SIZE * 0.8:
-            self._cleanup_expired()
-
-        self._last_call[key] = asyncio.get_running_loop().time()
+        # TTLCache сам удалит просроченные записи при следующем обращении
+        # Ручная очистка НЕ нужна — это синхронная операция, блокирующая event loop
+        self._last_call[key] = True
         return await handler(event, data)
-
-    def _cleanup_expired(self) -> None:
-        """Явно удаляет expired записи из кэша"""
-        now = asyncio.get_event_loop().time()
-        expired_keys = [
-            k for k, v in self._last_call.items()
-            if now - v > _DEFAULT_TTL
-        ]
-        for k in expired_keys:
-            try:
-                del self._last_call[k]
-            except KeyError:
-                pass
-        if expired_keys:
-            logger.debug("Throttling cleanup: removed %d expired entries", len(expired_keys))

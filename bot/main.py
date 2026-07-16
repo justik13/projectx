@@ -18,6 +18,7 @@ from bot.middlewares import (
     CorrelationMiddleware,
     CorrelationFilter,
 )
+from bot.middlewares.ban_check import BanCheckMiddleware
 from config.settings import get_settings
 from database.connection import close_db, init_db
 from services.amnezia_client import close_http_session
@@ -46,6 +47,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     from bot.middlewares.correlation import get_current_request_id
 
     request_id = get_current_request_id()
+
     logger.critical(
         "[%s] Unhandled exception: %s",
         request_id,
@@ -122,14 +124,18 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
 
-    # 4. Throttling — глобальный rate limit 0.3с + action_type 2.0с
+    # 🔥 НОВОЕ: 4. BanCheck — проверяет бан ПОСЛЕ загрузки юзера
+    dp.message.middleware(BanCheckMiddleware())
+    dp.callback_query.middleware(BanCheckMiddleware())
+
+    # 5. Throttling — глобальный rate limit 0.3с + action_type 2.0с
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
 
-    # 5. ActionLock — эксклюзивная блокировка тяжёлых действий
+    # 6. ActionLock — эксклюзивная блокировка тяжёлых действий
     dp.callback_query.middleware(ActionLockMiddleware())
 
-    # 6. ChatAction — показывает "typing..." / "uploading..."
+    # 7. ChatAction — показывает "typing..." / "uploading..."
     dp.message.middleware(ChatActionMiddleware())
 
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
@@ -155,6 +161,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp.errors.register(global_error_handler)
 
     await setup_bot_commands(bot)
+
     return bot, dp
 
 
@@ -163,9 +170,11 @@ async def start_webhook_server(port: int):
     setup_webhook_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
+
     # 🔥 ИСПРАВЛЕНО: Слушаем только localhost, Nginx проксирует сюда
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
+
     logger.info("Webhook server started on 127.0.0.1:%d", port)
     return runner
 
@@ -271,7 +280,6 @@ async def main():
 
     except Exception as e:
         logger.error("Критическая ошибка: %s", e, exc_info=True)
-
     finally:
         logger.info("Waiting for background workers to finish...")
         if 'worker_tasks' in locals():

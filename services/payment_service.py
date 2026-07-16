@@ -5,6 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from aiogram.types import LinkPreviewOptions
+from bot.middlewares.user_context import invalidate_user_cache
 from database.repositories.payments_repo import get_user_payments, get_payment_by_id
 from database.models import Payment
 from services.subscription import SubscriptionService
@@ -23,7 +24,6 @@ class PaymentService:
     ) -> bool:
         """
         Обрабатывает успешную оплату. Возвращает True при успехе.
-
         🔥 ИСПРАВЛЕНО #16: Referral bonus logic
         is_first_payment проверяется по paid_at IS NOT NULL.
         """
@@ -57,6 +57,7 @@ class PaymentService:
                     return False
 
                 new_device_limit = getattr(tariff, 'device_limit', user.device_limit)
+
                 try:
                     await SubscriptionService.extend_subscription(
                         session, user.telegram_id, tariff.duration_days,
@@ -89,6 +90,7 @@ class PaymentService:
                 user.last_payment_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 await savepoint.commit()
                 await session.commit()
+                invalidate_user_cache(user.telegram_id)
 
                 try:
                     await AuditService.log_action(
@@ -151,6 +153,7 @@ class PaymentService:
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get("paymentMethod", "SBPQR")
         await session.commit()
+
         return payment, None
 
     @staticmethod
@@ -180,7 +183,6 @@ class PaymentService:
             if payment.status == "cancelled":
                 logger.info(f"Platega callback: payment {payment.id} already cancelled")
                 return True, "already_processed"
-
             payment.status = "cancelled"
             await session.commit()
             # 🔥 ИСПРАВЛЕНО #11: Аудит-лог для cancelled платежа
@@ -200,9 +202,52 @@ class PaymentService:
                 return True, "already_processed"
 
             payment.status = "refunded"
-            await session.commit()
-            logger.warning(f"Chargeback for payment {payment.id}")
 
+            # ── 🔥 НОВОЕ: Отзыв доступа при chargeback ──
+            # Пользователь вернул деньги через банк → отключаем подписку и все устройства
+            user = payment.user
+            if user:
+                from database.repositories.profiles_repo import get_user_profiles
+                from database.repositories.servers_repo import get_server_by_id
+                from services.amnezia_client import AmneziaClient
+
+                now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+
+                # Обнуляем подписку
+                user.subscription_end = now_utc
+                user.current_tariff_id = None
+
+                # Отключаем все профили на серверах Amnezia
+                profiles = await get_user_profiles(session, user.id)
+                if profiles:
+                    for profile in profiles:
+                        profile.is_active = False
+                        try:
+                            server = await get_server_by_id(session, profile.server_id)
+                            if server and server.api_url:
+                                api = AmneziaClient(server.api_url, server.api_key)
+                                await api.update_client(
+                                    client_id=profile.peer_id,
+                                    status="disabled",
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "Chargeback: failed to disable profile %s on server %s: %s",
+                                profile.id,
+                                profile.server_id,
+                                e,
+                            )
+                            invalidate_user_cache(user.telegram_id) 
+
+                logger.warning(
+                    "CHARGEBACK processed: user %s, payment %s. Access revoked.",
+                    user.telegram_id,
+                    payment.id,
+                )
+
+            await session.commit()
+
+            logger.warning(f"Chargeback for payment {payment.id}")
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_CHARGEBACK",
@@ -214,7 +259,6 @@ class PaymentService:
 
             # 🔥 ИСПРАВЛЕНО #22: Мгновенный алерт админам о chargeback
             await _send_chargeback_alert(payment, transaction_id)
-
             return True, "success"
 
         logger.warning(f"Unknown Platega status: {status}")
@@ -249,13 +293,13 @@ class PaymentService:
             except Exception as e:
                 logger.error(f"Failed to log payment cancellation to audit: {e}")
             return False
+
         return False
 
 
 async def _send_chargeback_alert(payment: Payment, transaction_id: str) -> None:
     """
     🔥 ИСПРАВЛЕНО #22: Отправляет алерт админам о chargeback.
-
     Использует _bot_ref из services/workers/heartbeat.py (Вариант B),
     чтобы не нарушать DI в PaymentService.
 
@@ -283,7 +327,6 @@ async def _send_chargeback_alert(payment: Payment, transaction_id: str) -> None:
 
     settings = get_settings()
     admin_ids = settings.ADMIN_IDS
-
     if not admin_ids:
         logger.warning("Chargeback alert skipped: ADMIN_IDS is empty")
         return

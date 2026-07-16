@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from bot.middlewares.user_context import invalidate_user_cache
 from database.repositories.users_repo import get_user_by_telegram_id, update_user
 from database.repositories.profiles_repo import get_user_profiles
 from services.amnezia_client import AmneziaClient
@@ -77,6 +78,6 @@ class BanService:
             )
             # 🔥 ИСПРАВЛЕНО #8: flush() вместо commit() для работы внутри DBSessionMiddleware
             await session.flush()
-
+            invalidate_user_cache(telegram_id)
         action = "забанен" if new_status else "разбанен"
         return True, action
