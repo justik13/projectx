@@ -35,7 +35,9 @@ class AWG2ValidationResult:
 def validate_awg2_config(data: dict) -> AWG2ValidationResult:
     """
     Валидирует AmneziaWG 2.0 конфигурацию по правилам из AmneziaWG-Architect.
+
     Проверяет:
+    - protocol_version == "2" (ОБЯЗАТЕЛЬНО для AWG 2.0)
     - S4 <= 32, S3 <= 64
     - S1 + 56 != S2, S2 + 92 != S3
     - Jc >= 4, Jmax > 81
@@ -72,11 +74,16 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
         result.errors.append("Missing 'awg' section in containers")
         return result
 
+    # 🔥 ИСПРАВЛЕНО #13b: protocol_version == "2" теперь ОБЯЗАТЕЛЬНО (ERROR, не warning)
     protocol_version = awg.get("protocol_version", "1")
     if str(protocol_version) != "2":
-        result.warnings.append(
-            f"protocol_version is '{protocol_version}', expected '2' for AWG 2.0"
+        result.is_valid = False
+        result.errors.append(
+            f"protocol_version is '{protocol_version}', expected '2' for AWG 2.0. "
+            f"AWG 1.0 and 1.5 are NOT supported."
         )
+        # Ранний выход — нет смысла проверять остальные параметры для не-AWG 2.0
+        return result
 
     def _safe_int(key: str, default: int = 0) -> int:
         try:
@@ -91,6 +98,7 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
     Jc = _safe_int("Jc")
     Jmax = _safe_int("Jmax")
 
+    # Валидация ограничений параметров (из AmneziaWG-Architect)
     if S4 > 32:
         result.errors.append(f"S4 = {S4} (must be <= 32)")
     if S3 > 64:
@@ -104,6 +112,7 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
     if Jmax <= 81:
         result.errors.append(f"Jmax = {Jmax} (must be > 81)")
 
+    # Валидация H1-H4 диапазонов
     h_ranges = []
     for h_key in ("H1", "H2", "H3", "H4"):
         h_val = awg.get(h_key, "")
@@ -122,6 +131,7 @@ def validate_awg2_config(data: dict) -> AWG2ValidationResult:
                 f"{h_key}: must be a 'min-max' string, got '{h_val}'"
             )
 
+    # Проверка пересечений диапазонов
     for i in range(len(h_ranges)):
         for j in range(i + 1, len(h_ranges)):
             k1, min1, max1 = h_ranges[i]
@@ -164,6 +174,7 @@ def _decompress_amnezia_format(data: bytes) -> Optional[str]:
         return None
 
     compressed = data[4:]
+
     try:
         decompressed = zlib.decompress(compressed)
         if len(decompressed) != original_length:
@@ -238,6 +249,7 @@ def build_conf_file(uri: str) -> Optional[str]:
         if not containers:
             logger.error("build_conf_file: 'containers' array is empty or missing")
             return None
+
         if not isinstance(containers, list):
             logger.error(
                 f"build_conf_file: 'containers' is not a list, "
@@ -254,6 +266,7 @@ def build_conf_file(uri: str) -> Optional[str]:
         if not last_config_str:
             logger.error("build_conf_file: 'last_config' is missing in awg section")
             return None
+
         if not isinstance(last_config_str, str):
             logger.error(
                 f"build_conf_file: 'last_config' is not a string, "
@@ -283,6 +296,7 @@ def build_conf_file(uri: str) -> Optional[str]:
                 "build_conf_file: 'config' field is missing or empty in last_config"
             )
             return None
+
         if not isinstance(config_str, str):
             logger.error(
                 f"build_conf_file: 'config' is not a string, "
@@ -300,8 +314,12 @@ def build_conf_file(uri: str) -> Optional[str]:
 def is_valid_vpn_uri(uri: str) -> bool:
     """
     Проверяет валидность vpn:// URI.
-    Принимает ТОЛЬКО amneziawg2 (не amneziawg/AWG 1.0)
-    Согласно amnezia_docs.md, AWG 1.0 НЕ поддерживается.
+
+    🔥 ИСПРАВЛЕНО #13: Принимает ТОЛЬКО amneziawg2 (protocol_version == "2").
+    AWG 1.0 (amneziawg) и AWG 1.5 НЕ поддерживаются согласно amnezia_docs.md.
+
+    Returns:
+        True если URI валидный и содержит AWG 2.0 конфиг, False иначе.
     """
     data = decode_vpn_uri_to_json(uri)
     if not data or not isinstance(data, dict):
@@ -314,8 +332,15 @@ def is_valid_vpn_uri(uri: str) -> bool:
     for container in containers:
         if not isinstance(container, dict):
             continue
-        for key in ("awg", "amneziawg2"):
-            if key in container and isinstance(container[key], dict):
-                return True
+
+        # Ищем секцию awg
+        awg = container.get("awg")
+        if not awg or not isinstance(awg, dict):
+            continue
+
+        # 🔥 ИСПРАВЛЕНО #13: Требуем protocol_version == "2"
+        protocol_version = awg.get("protocol_version")
+        if str(protocol_version) == "2":
+            return True
 
     return False
