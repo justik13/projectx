@@ -276,6 +276,7 @@ AUDIT_ACTIONS = {
     "CHANGE_TARIFF": "💎 Сменил тариф",
     "REDUCE": "➖ Уменьшил дни",
     "GRANT": "🎫 Выдал доступ",
+    "DELETE_DEVICE": "🗑 Удалил устройство",
 }
 
 DASHBOARD_HEADER = "🛠 <b>Админ-панель</b>\n📊 <b>Статистика:</b>\n"
