@@ -30,7 +30,7 @@ router = Router()
 logger = logging.getLogger(__name__)
 DEVICE_NAME_REGEX = re.compile(r"^[a-zA-Z0-9\s_-]+$")
 
-# 🔥 ИСПРАВЛЕНО: Защита от двойного нажатия (Race Condition / Double Click)
+# 🔥 Защита от двойного нажатия (Race Condition / Double Click)
 _deleting_devices: set[int] = set()
 _creating_devices: set[int] = set()
 
@@ -187,6 +187,11 @@ async def download_conf(
     callback: CallbackQuery, state: FSMContext,
     session: AsyncSession, db_user: User | None = None
 ):
+    """
+    🔥 SMH: Отправка двух файлов (.vpn и .conf) + текстовая инструкция.
+    Telegram API не позволяет прикрепить текст к двум документам одновременно,
+    поэтому инструкция отправляется третьим сообщением (допустимое исключение).
+    """
     await callback.answer("⏳ Генерирую файлы...")
     await state.clear()
     
@@ -215,9 +220,10 @@ async def download_conf(
     vpn_file = BufferedInputFile(vpn_content.encode("utf-8"), filename=f"{safe_device_name}.vpn")
     conf_file = BufferedInputFile(conf_content.encode("utf-8"), filename=f"{safe_device_name}.conf")
     
-    # 🔥 SMH: Очищаем хаб и отправляем файлы + инструкцию
+    # 🔥 SMH: Очищаем хаб перед отправкой файлов
     await clear_and_delete_hub(callback.bot, callback.message.chat.id)
     
+    # Сообщение 1: .vpn файл
     await append_hub_document(
         callback.bot, callback.message.chat.id,
         document=vpn_file,
@@ -227,6 +233,7 @@ async def download_conf(
         parse_mode="HTML"
     )
     
+    # Сообщение 2: .conf файл
     await append_hub_document(
         callback.bot, callback.message.chat.id,
         document=conf_file,
@@ -236,6 +243,7 @@ async def download_conf(
         parse_mode="HTML"
     )
     
+    # 🔥 Сообщение 3: Текстовая инструкция (обязательно для UX)
     instruction_text = (
         "✅ <b>Файлы конфигурации отправлены!</b>\n"
         "📥 <b>Как подключить:</b>\n"
@@ -348,7 +356,7 @@ async def confirm_delete_device(
 ):
     profile_id = int(callback.data.split(":")[1])
     
-    # 🔥 ИСПРАВЛЕНО: Защита от двойного нажатия при удалении
+    # 🔥 Защита от двойного нажатия при удалении
     if profile_id in _deleting_devices:
         await callback.answer("⏳ Уже удаляем устройство...", show_alert=True)
         return
@@ -379,7 +387,7 @@ async def confirm_delete_device(
 async def start_add_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     user_id = callback.from_user.id
     
-    # 🔥 ИСПРАВЛЕНО: Защита от двойного нажатия при создании
+    # 🔥 Защита от двойного нажатия при создании
     if user_id in _creating_devices:
         await callback.answer("⏳ Уже обрабатываем запрос...", show_alert=True)
         return
@@ -469,7 +477,7 @@ async def enter_device_name(
 ):
     user_id = message.from_user.id
     
-    # 🔥 ИСПРАВЛЕНО: Защита от спама сообщениями при создании
+    # 🔥 Защита от спама сообщениями при создании
     if user_id in _creating_devices:
         await message.answer("⏳ Пожалуйста, подождите, предыдущий запрос обрабатывается...")
         return
