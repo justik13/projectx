@@ -1,20 +1,33 @@
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup
-from bot.utils.texts import get_tariff_group_name
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from utils.tariff_names import get_tariff_group_name
 
 
-def get_admin_user_card_keyboard(telegram_id: int, is_banned: bool) -> InlineKeyboardMarkup:
+def get_admin_user_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📅 Подписка", callback_data=f"admin_subscription:{telegram_id}")
-    builder.button(text="🔧 Устройства", callback_data=f"admin_user_devices:{telegram_id}")
-    if is_banned:
-        builder.button(text="✅ Разбанить", callback_data=f"admin_unban:{telegram_id}")
-    else:
-        builder.button(text="🚫 Забанить", callback_data=f"admin_ban:{telegram_id}")
-    builder.button(text="← К списку пользователей", callback_data="admin_users:1")
+    builder.button(text="📅 Подписка", callback_data=f"admin_subscription:{user_id}")
+    builder.button(text="🔧 Устройства", callback_data=f"admin_user_devices:{user_id}")
+    builder.button(text="🚫 Забанить / Разбанить", callback_data=f"admin_user_ban:{user_id}")
+    builder.button(text="← К списку пользователей", callback_data="admin_users")
     builder.adjust(1)
     return builder.as_markup()
 
+
+def get_admin_extend_days_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="7 дней", callback_data=f"admin_extend_days:{user_id}:7")
+    builder.button(text="30 дней", callback_data=f"admin_extend_days:{user_id}:30")
+    builder.button(text="90 дней", callback_data=f"admin_extend_days:{user_id}:90")
+    builder.button(text="∞ Навсегда", callback_data=f"admin_extend_days:{user_id}:36500")
+    builder.button(text="⌨️ Ввести вручную", callback_data=f"admin_extend_custom:{user_id}")
+    builder.button(text="← К карточке пользователя", callback_data=f"admin_user_card:{user_id}")
+    builder.adjust(2, 2, 1, 1)
+    return builder.as_markup()
+
+
+# ═══════════════════════════════════════════════════════════
+# 🔧 НОВОЕ: Управление подпиской
+# ═══════════════════════════════════════════════════════════
 
 def get_admin_subscription_keyboard(
     telegram_id: int,
@@ -97,7 +110,7 @@ def get_admin_grant_days_keyboard(
     return builder.as_markup()
 
 
-def get_admin_extend_days_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
+def get_admin_extend_days_new_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for days in (7, 30, 90):
         builder.button(

@@ -11,19 +11,16 @@ from sqlalchemy.orm import selectinload
 
 from bot.states import AdminStates
 from bot import texts
-from bot.utils.texts import (
-    get_tariff_display_name,
-    get_tariff_group_name,
-    format_datetime,
-    safe,
-)
+from utils.tariff_names import get_tariff_display_name, get_tariff_group_name
+from utils.formatters import format_datetime
+from utils.telegram import safe
 from bot.keyboards.admin.users import (
     get_admin_user_card_keyboard,
     get_admin_subscription_keyboard,
     get_admin_change_tariff_keyboard,
     get_admin_grant_tariff_keyboard,
     get_admin_grant_days_keyboard,
-    get_admin_extend_days_keyboard,
+    get_admin_extend_days_new_keyboard,
     get_admin_confirm_action_keyboard,
     get_admin_user_devices_keyboard,
     get_back_button,
@@ -31,7 +28,7 @@ from bot.keyboards.admin.users import (
 from database.models import User, Tariff, VPNProfile
 from database.repositories.users_repo import get_user_by_telegram_id
 from database.repositories.tariffs_repo import get_tariff_by_id
-from services.subscription_service import SubscriptionService
+from services.subscription import SubscriptionService
 from services.audit_service import AuditService
 from utils.admin import is_admin
 
@@ -174,25 +171,11 @@ async def _render_user_card(callback: CallbackQuery, user: User, session: AsyncS
     try:
         await callback.message.edit_text(
             text,
-            reply_markup=get_admin_user_card_keyboard(user.telegram_id, user.is_banned),
+            reply_markup=get_admin_user_card_keyboard(user.telegram_id),
             parse_mode="HTML",
         )
     except Exception:
         pass
-
-
-async def _show_user_card_edit(message, user: User, session: AsyncSession):
-    """Обновляет карточку после действия."""
-    class _FakeCallback:
-        def __init__(self, msg):
-            self.message = msg
-            self.from_user = msg.from_user
-
-        async def answer(self, *a, **kw):
-            pass
-
-    fake = _FakeCallback(message)
-    await _render_user_card(fake, user, session)
 
 
 # ──────────────────────────────────────────────────────────
@@ -481,7 +464,7 @@ async def admin_sub_extend(callback: CallbackQuery, session: AsyncSession):
     try:
         await callback.message.edit_text(
             text,
-            reply_markup=get_admin_extend_days_keyboard(telegram_id),
+            reply_markup=get_admin_extend_days_new_keyboard(telegram_id),
             parse_mode="HTML",
         )
     except Exception:
@@ -1094,7 +1077,7 @@ async def admin_sub_grant_apply(callback: CallbackQuery, session: AsyncSession):
 
 
 # ──────────────────────────────────────────────────────────
-# 🔧 УПРАВЛЕНИЕ УСТРОЙСТВАМИ (без изменений)
+# 🔧 УПРАВЛЕНИЕ УСТРОЙСТВАМИ
 # ──────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("admin_user_devices:"))
@@ -1130,7 +1113,7 @@ async def admin_user_devices(callback: CallbackQuery, session: AsyncSession):
 
 
 # ──────────────────────────────────────────────────────────
-# 🚫 БАН / РАЗБАН (без изменений)
+# 🚫 БАН / РАЗБАН
 # ──────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("admin_ban:"))
