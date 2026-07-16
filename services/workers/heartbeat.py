@@ -190,7 +190,3 @@ def _write_heartbeat(final: bool = False):
             logger.debug("Heartbeat: timestamp updated")
     except Exception as e:
         logger.warning(f"Failed to write heartbeat file: {e}")
-
-def get_bot_ref():
-    """Возвращает ссылку на bot для использования в других сервисах."""
-    return _bot_ref

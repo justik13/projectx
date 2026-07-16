@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from aiogram.types import LinkPreviewOptions
 from database.repositories.payments_repo import get_user_payments, get_payment_by_id
 from database.models import Payment
 from services.subscription import SubscriptionService
@@ -323,7 +323,7 @@ async def _send_chargeback_alert(payment: Payment, transaction_id: str) -> None:
                 alert_msg,
                 reply_markup=keyboard,
                 parse_mode="HTML",
-                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             logger.info(f"Chargeback alert sent to admin {admin_id} for payment {payment.id}")
         except Exception as e:
