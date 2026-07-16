@@ -1,3 +1,22 @@
+"""
+Хендлеры оплаты (Stars, SBP через Platega).
+
+🔥 KNOWN LIMITATION: In-memory lock
+═══════════════════════════════════
+_processing_payments хранит user_id в памяти процесса.
+При рестарте бота lock очищается.
+
+Почему это acceptable:
+1. ThrottlingMiddleware (0.1s) защищает от double-click
+2. DB unique constraints на payment.id
+3. PaymentService проверяет status="pending" перед обработкой
+4. Platega callback идемпотентен (статусы CONFIRMED/CANCELED не дублируются)
+
+Когда потребуется Redis:
+- При multi-worker deployment
+- При появлении реальных платящих пользователей
+"""
+
 import logging
 from datetime import datetime, timezone
 from aiogram import Router, F
@@ -37,6 +56,16 @@ logger.debug(
 
 
 async def _is_subscription_active(user: User) -> bool:
+    """
+    Проверяет, активна ли подписка у пользователя.
+    
+    Args:
+        user: User объект из БД
+        
+    Returns:
+        True если subscription_end > now (UTC naive)
+        False если подписка истекла или отсутствует
+    """
     if not user or not user.subscription_end:
         return False
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -47,7 +76,14 @@ async def _is_subscription_active(user: User) -> bool:
 async def hub_menu_payment(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
-):
+) -> None:
+    """
+    Главная точка входа для раздела оплаты.
+    
+    Логика:
+    - Если подписка активна → показываем хаб подписки (продление/смена тарифа)
+    - Если подписка неактивна → показываем витрину тарифов
+    """
     await callback.answer()
     await state.clear()
     if not db_user:
@@ -59,22 +95,57 @@ async def hub_menu_payment(
         await _show_showcase(callback, session)
 
 
-async def _show_showcase(callback: CallbackQuery, session: AsyncSession):
+async def _show_showcase(callback: CallbackQuery, session: AsyncSession) -> None:
+    """
+    Показывает витрину тарифов для новых пользователей.
+    
+    Flow:
+    1. Получаем активные тарифы из БД
+    2. Группируем по device_limit (2, 5, 10 устр.)
+    3. Рендерим клавиатуру с группами
+    4. Отправляем через render_hub()
+    
+    Args:
+        callback: Telegram CallbackQuery
+        session: SQLAlchemy async session
+        
+    Returns:
+        None (рендерит сообщение через SMH)
+    """
     tariffs = await get_active_tariffs(session)
     if not tariffs:
         await render_hub(callback.bot, callback.message.chat.id, texts.PAYMENT_NO_TARIFFS, get_back_button("back_to_main_menu"))
         return
+
     grouped: dict[int, list] = {}
     for t in tariffs:
         limit = getattr(t, 'device_limit', 2)
         if limit not in grouped:
             grouped[limit] = []
         grouped[limit].append(t)
+
     kb = get_tariff_showcase_keyboard(grouped)
     await render_hub(callback.bot, callback.message.chat.id, texts.PAYMENT_SHOWCASE_HEADER, kb)
 
 
-async def _show_hub(callback: CallbackQuery, user: User, session: AsyncSession):
+async def _show_hub(callback: CallbackQuery, user: User, session: AsyncSession) -> None:
+    """
+    Показывает хаб активной подписки (продление/смена тарифа).
+    
+    Flow:
+    1. Получаем профили пользователя
+    2. Форматируем текст с датой окончания и тарифом
+    3. Рендерим клавиатуру с действиями
+    4. Отправляем через render_hub()
+    
+    Args:
+        callback: Telegram CallbackQuery
+        user: User объект из БД
+        session: SQLAlchemy async session
+        
+    Returns:
+        None (рендерит сообщение через SMH)
+    """
     profiles = await get_user_profiles(session, user.id)
     tariff_name = get_tariff_display_name(user.device_limit)
     text = texts.PAYMENT_HUB_HEADER.format(
@@ -94,13 +165,14 @@ async def _show_hub(callback: CallbackQuery, user: User, session: AsyncSession):
 
 
 @router.callback_query(F.data == "payment_showcase")
-async def show_tariff_showcase_callback(callback: CallbackQuery, session: AsyncSession):
+async def show_tariff_showcase_callback(callback: CallbackQuery, session: AsyncSession) -> None:
     await callback.answer()
     await _show_showcase(callback, session)
 
 
 @router.callback_query(F.data.startswith("select_tariff_type:"))
-async def select_tariff_type(callback: CallbackQuery, session: AsyncSession):
+async def select_tariff_type(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Выбор группы тарифов (2, 5, 10 устр.)"""
     await callback.answer()
     device_limit = int(callback.data.split(":")[1])
     tariffs = await get_active_tariffs(session)
@@ -115,7 +187,8 @@ async def select_tariff_type(callback: CallbackQuery, session: AsyncSession):
 
 
 @router.callback_query(F.data.in_(["payment_quick_renew", "payment_renew"]))
-async def show_quick_renew(callback: CallbackQuery, db_user: User, session: AsyncSession):
+async def show_quick_renew(callback: CallbackQuery, db_user: User, session: AsyncSession) -> None:
+    """Быстрое продление текущей подписки"""
     await callback.answer()
     tariffs = await get_active_tariffs(session)
     current_limit = db_user.device_limit
@@ -133,7 +206,8 @@ async def show_quick_renew(callback: CallbackQuery, db_user: User, session: Asyn
 
 
 @router.callback_query(F.data == "payment_change_tariff")
-async def show_change_tariff(callback: CallbackQuery, db_user: User, session: AsyncSession):
+async def show_change_tariff(callback: CallbackQuery, db_user: User, session: AsyncSession) -> None:
+    """Смена тарифа (апгрейд/даунгрейд)"""
     await callback.answer()
     tariffs = await get_active_tariffs(session)
     if not tariffs:
@@ -154,7 +228,8 @@ async def show_change_tariff(callback: CallbackQuery, db_user: User, session: As
 async def select_tariff(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
-):
+) -> None:
+    """Выбор конкретного тарифа для оплаты"""
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff or not tariff.is_active:
@@ -195,7 +270,8 @@ async def select_tariff(
 async def pay_stars(
     callback: CallbackQuery, state: FSMContext,
     db_user: User | None = None, session: AsyncSession = None,
-):
+) -> None:
+    """Оплата через Telegram Stars"""
     user_id = callback.from_user.id
     if user_id in _processing_payments:
         await callback.answer("⏳ Уже обрабатываем предыдущий запрос...", show_alert=True)
@@ -248,12 +324,14 @@ async def pay_stars(
 
 
 @router.pre_checkout_query()
-async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery) -> None:
+    """Подтверждение pre-checkout для Stars"""
     await pre_checkout_query.answer(ok=True)
 
 
 @router.message(F.successful_payment)
-async def process_successful_payment(message: Message, state: FSMContext, session: AsyncSession = None):
+async def process_successful_payment(message: Message, state: FSMContext, session: AsyncSession = None) -> None:
+    """Обработка успешной оплаты Stars"""
     data = await state.get_data()
     invoice_message_id = data.get("invoice_message_id")
     await state.clear()
@@ -280,7 +358,8 @@ async def process_successful_payment(message: Message, state: FSMContext, sessio
 
 
 @router.callback_query(F.data.startswith("cancel_invoice:"))
-async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None) -> None:
+    """Отмена инвойса Stars"""
     await callback.answer("❌ Инвойс отменен")
     parts = callback.data.split(":")
     payment_id = int(parts[1])
@@ -316,7 +395,8 @@ async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: As
 
 
 @router.callback_query(F.data.startswith("pay_sbp:"))
-async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None) -> None:
+    """Оплата через SBP (Platega.io)"""
     user_id = callback.from_user.id
     if user_id in _processing_payments:
         await callback.answer("⏳ Уже обрабатываем предыдущий запрос...", show_alert=True)
@@ -365,7 +445,8 @@ async def pay_sbp(callback: CallbackQuery, state: FSMContext, session: AsyncSess
 
 
 @router.callback_query(F.data.startswith("check_payment:"))
-async def check_payment_status(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+async def check_payment_status(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None) -> None:
+    """Проверка статуса платежа Platega"""
     await callback.answer("⏳ Проверяю статус...")
     payment_id = int(callback.data.split(":")[1])
     success = await PaymentService.check_platega_payment(session, payment_id)
@@ -389,7 +470,8 @@ async def check_payment_status(callback: CallbackQuery, state: FSMContext, sessi
 
 
 @router.callback_query(F.data.startswith("cancel_payment:"))
-async def cancel_payment(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+async def cancel_payment(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None) -> None:
+    """Отмена платежа Platega"""
     await callback.answer("❌ Платеж отменен")
     payment_id = int(callback.data.split(":")[1])
     try:
@@ -405,7 +487,8 @@ async def cancel_payment(callback: CallbackQuery, state: FSMContext, session: As
 
 
 @router.callback_query(F.data == "back_to_payment")
-async def back_to_payment(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+async def back_to_payment(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None) -> None:
+    """Возврат к экрану подписки"""
     await callback.answer()
     await state.clear()
     user = await get_user_by_telegram_id(session, callback.from_user.id)

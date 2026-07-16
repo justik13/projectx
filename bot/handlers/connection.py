@@ -207,33 +207,41 @@ async def download_conf(
         return
     vpn_file = BufferedInputFile(vpn_content.encode("utf-8"), filename=f"{safe_device_name}.vpn")
     conf_file = BufferedInputFile(conf_content.encode("utf-8"), filename=f"{safe_device_name}.conf")
+    
     # 🔥 ИСКЛЮЧЕНИЕ ИЗ SMH: Очищаем хаб перед отправкой файлов
     await clear_and_delete_hub(callback.bot, callback.message.chat.id)
+    
     # Сообщение 1: .vpn файл
     await append_hub_document(
         callback.bot, callback.message.chat.id,
         document=vpn_file,
-        caption=f"📁 <b>Основной клиент Amnezia</b>\n"
-                f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
-                f"<i>Для универсального приложения</i>",
+        caption=(
+            f"📁 <b>Основной клиент Amnezia</b>\n"
+            f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
+            f"<i>Для универсального приложения</i>"
+        ),
         parse_mode="HTML"
     )
+    
     # Сообщение 2: .conf файл
     await append_hub_document(
         callback.bot, callback.message.chat.id,
         document=conf_file,
-        caption=f"📁 <b>AmneziaWG</b>\n"
-                f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
-                f"<i>Для отдельного легковесного приложения</i>",
+        caption=(
+            f"📁 <b>AmneziaWG</b>\n"
+            f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
+            f"<i>Для отдельного легковесного приложения</i>"
+        ),
         parse_mode="HTML"
     )
+    
     # 🔥 Сообщение 3: Текстовая инструкция (обязательно для UX)
     instruction_text = (
-        "✅ <b>Файлы конфигурации отправлены!</b>\n"
+        "✅ <b>Файлы конфигурации отправлены!</b>\n\n"
         "📥 <b>Как подключить:</b>\n"
         "1️⃣ <b>.vpn</b> — импортируйте в <b>основной клиент Amnezia</b>.\n"
-        "2️⃣ <b>.conf</b> — импортируйте в <b>AmneziaWG</b>.\n"
-        "\n<i>💡 Нажмите на файл выше, чтобы открыть его в нужном приложении.</i>"
+        "2️⃣ <b>.conf</b> — импортируйте в <b>AmneziaWG</b>.\n\n"
+        "<i>💡 Нажмите на файл выше, чтобы открыть его в нужном приложении.</i>"
     )
     await append_hub_message(
         callback.bot, callback.message.chat.id,
@@ -325,6 +333,7 @@ async def confirm_delete_device(
     session: AsyncSession, db_user: User | None = None
 ):
     profile_id = int(callback.data.split(":")[1])
+    
     # 🔥 Защита от двойного нажатия при удалении
     if profile_id in _deleting_devices:
         await callback.answer("⏳ Уже удаляем устройство...", show_alert=True)
@@ -350,6 +359,7 @@ async def confirm_delete_device(
 @router.callback_query(F.data == "add_device")
 async def start_add_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     user_id = callback.from_user.id
+    
     # 🔥 Защита от двойного нажатия при создании
     if user_id in _creating_devices:
         await callback.answer("⏳ Уже обрабатываем запрос...", show_alert=True)
@@ -358,6 +368,7 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext, session: 
     try:
         await callback.answer("⏳ Проверяю доступные слоты...")
         await state.clear()
+        
         # 1. Получаем локально доступные серверы (БД)
         servers = await get_available_servers(session)
         if not servers:
@@ -367,6 +378,7 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext, session: 
                 get_back_button("back_to_connections")
             )
             return
+        
         # 2. Параллельная проверка реального количества слотов через API с кэшированием
         results = await asyncio.gather(*[get_real_peer_count(server) for server in servers])
         available_servers = []
@@ -375,6 +387,7 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext, session: 
                 available_servers.append(server)
             elif real_count < server.max_clients:
                 available_servers.append(server)
+        
         if not available_servers:
             await render_hub(
                 callback.bot, callback.message.chat.id,
@@ -382,6 +395,7 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext, session: 
                 get_back_button("back_to_connections")
             )
             return
+        
         # 3. Рендерим только серверы, где реально есть места
         builder = InlineKeyboardBuilder()
         for server in available_servers:
@@ -427,10 +441,18 @@ async def enter_device_name(
     session: AsyncSession, db_user: User | None = None
 ):
     user_id = message.from_user.id
+    
     # 🔥 Защита от спама сообщениями при создании
     if user_id in _creating_devices:
-        await message.answer("⏳ Пожалуйста, подождите, предыдущий запрос обрабатывается...")
+        # 🔥 ИСПРАВЛЕНО: Используем render_hub вместо message.answer
+        await render_hub(
+            message.bot, 
+            message.chat.id,
+            "⏳ Пожалуйста, подождите, предыдущий запрос обрабатывается...",
+            get_back_button("add_device")
+        )
         return
+    
     _creating_devices.add(user_id)
     try:
         if not message.text or message.text.startswith("/"):

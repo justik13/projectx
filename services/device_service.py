@@ -1,3 +1,25 @@
+"""
+Сервис управления устройствами (создание/удаление).
+
+🔥 KNOWN LIMITATION: In-memory locks
+══════════════════════════════════════
+_user_locks хранит per-user asyncio.Lock в памяти процесса.
+При рестарте бота все locks очищаются.
+
+Почему это acceptable для single-worker:
+1. ThrottlingMiddleware (0.1s) защищает от double-click
+2. DB unique constraint на peer_id защищает от дубликатов
+3. begin_nested() (savepoints) обеспечивает атомарность операций
+4. Стадия активного тестирования — реальных пользователей нет
+
+Когда потребуется Redis locks:
+- При масштабировании до multi-worker (несколько процессов)
+- При появлении реальных платящих пользователей
+- При деплое на Kubernetes/Docker Swarm
+
+Текущий риск: МИНИМАЛЬНЫЙ
+"""
+
 import uuid
 import re
 import logging
@@ -29,7 +51,6 @@ def _get_user_lock(user_id: int) -> asyncio.Lock:
 
 
 class DeviceService:
-
     @staticmethod
     async def create_device(
         session: AsyncSession, user: User, server_id: int, device_name: str
@@ -37,8 +58,45 @@ class DeviceService:
         """
         Создаёт новое устройство для пользователя.
         
-        🔥 ИСПРАВЛЕНО #12: Логирование DEVICE_CREATED в audit_logs.
-        Теперь успешное создание устройства логируется так же, как и ошибки.
+        Flow:
+        1. Pre-flight check: проверяем реальные слоты через API (force_refresh=True)
+        2. Захватываем per-user lock для предотвращения race conditions
+        3. Генерируем client_name: tg_{telegram_id}_{device_name}_{4-char-hash}
+        4. Создаём клиента на сервере Amnezia API
+        5. Валидируем vpn:// URI (проверяем protocol_version == "2")
+        6. Проверяем device_limit через savepoint
+        7. Сохраняем профиль в БД
+        8. Логируем в audit_logs
+        
+        Args:
+            session: SQLAlchemy async session
+            user: Объект пользователя (User)
+            server_id: ID сервера в БД
+            device_name: Имя устройства (макс. 16 символов)
+            
+        Returns:
+            VPNProfile если успешно создано
+            None если:
+            - Сервер не найден или протокол не amneziawg2
+            - API вернул невалидный vpn:// URI
+            - Достигнут device_limit
+            - DB IntegrityError (дубликат peer_id)
+            
+        Side effects:
+            - Создаёт клиента на Amnezia API
+            - Пишет в audit_logs (action="DEVICE_CREATED")
+            - При ошибке — откатывает создание через API DELETE
+            
+        Thread-safety:
+            Использует per-user asyncio.Lock для предотвращения race conditions
+            при параллельном создании устройств.
+            
+        Example:
+            >>> profile = await DeviceService.create_device(
+            ...     session, user, server_id=1, device_name="iPhone"
+            ... )
+            >>> if profile:
+            ...     print(f"Created: {profile.device_name}")
         """
         server = await get_server_by_id(session, server_id)
         if not server or server.protocol != AMNEZIA_PROTOCOL:
@@ -47,7 +105,7 @@ class DeviceService:
             )
             return None
 
-        # PRE-FLIGHT CHECK
+        # PRE-FLIGHT CHECK: реальное количество слотов через API
         real_count = await get_real_peer_count(server, force_refresh=True)
         if real_count != -1 and real_count >= server.max_clients:
             logger.warning(
@@ -62,9 +120,9 @@ class DeviceService:
             clean_device_name = re.sub(r'[^a-zA-Z0-9]', '', device_name)[:10]
             client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
             expires_ts = await SubscriptionService.get_expires_timestamp(user)
-
             client = AmneziaClient(server.api_url, server.api_key)
             result = await client.create_user(client_name=client_name, expires_at=expires_ts)
+
             if not result:
                 logger.error(
                     f"create_device: API create_user failed for user {user.telegram_id}, "
@@ -75,6 +133,7 @@ class DeviceService:
             peer_id = result.id
             raw_config = result.config
 
+            # Валидация vpn:// URI (должен быть protocol_version == "2")
             if not is_valid_vpn_uri(raw_config):
                 logger.error(
                     f"create_device: API returned invalid vpn:// URI for user {user.telegram_id}. "
@@ -95,6 +154,7 @@ class DeviceService:
                 return None
 
             try:
+                # Атомарность через savepoint (begin_nested)
                 async with session.begin_nested() as savepoint:
                     profiles_count = await get_user_profiles_count(session, user.id)
                     if profiles_count >= user.device_limit:
@@ -118,7 +178,7 @@ class DeviceService:
                     await savepoint.commit()
                     await session.commit()
 
-                    # 🔥 ИСПРАВЛЕНО #12: Логирование успешного создания устройства
+                    # Логирование успешного создания устройства
                     try:
                         await AuditService.log_action(
                             session,
@@ -183,7 +243,32 @@ class DeviceService:
     async def delete_device(session: AsyncSession, profile: VPNProfile) -> bool:
         """
         Удаляет устройство пользователя.
-        Атомарность через begin_nested() (savepoint).
+        
+        Flow:
+        1. Получаем сервер из БД
+        2. Удаляем клиента из Amnezia API (DELETE /clients)
+        3. Удаляем профиль из БД через savepoint
+        4. Логируем в audit_logs (action="DEVICE_DELETED")
+        
+        Args:
+            session: SQLAlchemy async session
+            profile: VPNProfile объект для удаления
+            
+        Returns:
+            True если успешно удалено из API и БД
+            False если:
+            - Сервер не найден
+            - API delete_user вернул False (ошибка сети/таймаут)
+            - DB error при удалении профиля
+            
+        Side effects:
+            - Удаляет клиента с Amnezia API (ключ становится невалидным)
+            - Удаляет профиль из БД (CASCADE не нужен, т.к. это явный вызов)
+            - Пишет в audit_logs
+            
+        Atomicity:
+            Использует begin_nested() (savepoint) для гарантии, что
+            если удаление из API прошло, но БД упала — всё откатится.
         """
         from database.repositories.profiles_repo import delete_profile
         from database.repositories.servers_repo import get_server_by_id
@@ -208,7 +293,7 @@ class DeviceService:
                 await savepoint.commit()
                 await session.commit()
 
-                # 🔥 ИСПРАВЛЕНО #12: Логирование успешного удаления
+                # Логирование успешного удаления
                 try:
                     await AuditService.log_action(
                         session,

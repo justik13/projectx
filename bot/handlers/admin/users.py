@@ -66,6 +66,31 @@ logger.debug(
 # ──────────────────────────────────────────────────────────
 # 🔧 ВСПОМОГАТЕЛЬНЫЕ
 # ──────────────────────────────────────────────────────────
+
+def _validate_positive_int(text: str | None) -> int | None:
+    """
+    Валидирует положительное целое число из текстового ввода.
+    
+    Args:
+        text: Текст от пользователя
+        
+    Returns:
+        int если валидно, None если ошибка
+        
+    Example:
+        >>> _validate_positive_int("42")
+        42
+        >>> _validate_positive_int("-5")
+        None
+        >>> _validate_positive_int("abc")
+        None
+    """
+    if not text or not text.strip().isdigit():
+        return None
+    value = int(text.strip())
+    return value if value >= 1 else None
+
+
 def _is_subscription_active(user: User) -> bool:
     if not user.subscription_end:
         return False
@@ -138,6 +163,7 @@ async def _get_user_with_profiles(session: AsyncSession, telegram_id: int):
 # ──────────────────────────────────────────────────────────
 # 📋 СПИСОК ПОЛЬЗОВАТЕЛЕЙ
 # ──────────────────────────────────────────────────────────
+
 async def _build_users_list_text_and_kb(
     users, page: int, total_pages: int, total: int,
 ) -> tuple[str, InlineKeyboardBuilder]:
@@ -252,6 +278,7 @@ async def process_search_user(message: Message, state: FSMContext, session: Asyn
 # ──────────────────────────────────────────────────────────
 # 👤 КАРТОЧКА ПОЛЬЗОВАТЕЛЯ
 # ──────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("admin_user_card:"))
 async def show_user_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -303,6 +330,7 @@ async def _show_user_card_edit(message, user, session: AsyncSession):
 # ──────────────────────────────────────────────────────────
 # 📅 ПОДМЕНЮ ПОДПИСКИ
 # ──────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("admin_subscription:"))
 async def admin_subscription_menu(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -357,6 +385,7 @@ async def admin_subscription_menu(callback: CallbackQuery, session: AsyncSession
 # ──────────────────────────────────────────────────────────
 # 💎 СМЕНА ТАРИФА
 # ──────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("admin_sub_change_tariff:"))
 async def admin_sub_change_tariff(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -524,6 +553,7 @@ async def admin_sub_apply_tariff(callback: CallbackQuery, session: AsyncSession)
 # ──────────────────────────────────────────────────────────
 # ➕ ПРОДЛЕНИЕ ПОДПИСКИ
 # ──────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("admin_sub_extend:"))
 async def admin_sub_extend(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -669,16 +699,28 @@ async def admin_sub_extend_custom_process(
     if not telegram_id:
         await state.clear()
         return
-    text_input = message.text.strip() if message.text else ""
-    if not text_input.isdigit() or int(text_input) < 1:
-        await message.answer("⚠️ Введите число ≥ 1")
+    
+    days = _validate_positive_int(message.text)
+    if days is None:
+        await render_hub(
+            message.bot, 
+            message.chat.id,
+            "⚠️ Введите число ≥ 1",
+            get_back_button(f"admin_sub_extend:{telegram_id}")
+        )
         return
-    days = int(text_input)
+    
     await state.clear()
     user = await get_user_by_telegram_id(session, telegram_id)
     if not user:
-        await message.answer("❌ Пользователь не найден.")
+        await render_hub(
+            message.bot, 
+            message.chat.id,
+            "❌ Пользователь не найден.",
+            get_back_button(f"admin_sub_extend:{telegram_id}")
+        )
         return
+    
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     current_end = user.subscription_end if (user.subscription_end and user.subscription_end > now) else now
     new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else current_end + timedelta(days=days)
@@ -689,23 +731,22 @@ async def admin_sub_extend_custom_process(
         days_text=days_text,
         new_end=format_datetime(new_end),
     )
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await message.answer(
+    
+    await render_hub(
+        message.bot, 
+        message.chat.id,
         confirm_text,
-        reply_markup=get_admin_confirm_action_keyboard(
+        get_admin_confirm_action_keyboard(
             confirm_callback=f"admin_sub_apply_extend:{telegram_id}:{days}",
             cancel_callback=f"admin_sub_extend:{telegram_id}",
-        ),
-        parse_mode="HTML",
+        )
     )
 
 
 # ──────────────────────────────────────────────────────────
 # ➖ УМЕНЬШЕНИЕ ДНЕЙ
 # ──────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("admin_sub_reduce:"))
 async def admin_sub_reduce_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -745,16 +786,28 @@ async def admin_sub_reduce_process(
     if not telegram_id:
         await state.clear()
         return
-    text_input = message.text.strip() if message.text else ""
-    if not text_input.isdigit() or int(text_input) < 1:
-        await message.answer("⚠️ Введите число ≥ 1")
+    
+    days = _validate_positive_int(message.text)
+    if days is None:
+        await render_hub(
+            message.bot, 
+            message.chat.id,
+            "⚠️ Введите число ≥ 1",
+            get_back_button(f"admin_subscription:{telegram_id}")
+        )
         return
-    days = int(text_input)
+    
     await state.clear()
     user = await get_user_by_telegram_id(session, telegram_id)
     if not user or not user.subscription_end:
-        await message.answer("❌ У пользователя нет активной подписки.")
+        await render_hub(
+            message.bot, 
+            message.chat.id,
+            "❌ У пользователя нет активной подписки.",
+            get_back_button(f"admin_subscription:{telegram_id}")
+        )
         return
+    
     current_end = user.subscription_end
     new_end = current_end - timedelta(days=days)
     confirm_text = texts.ADMIN_SUB_CONFIRM_REDUCE.format(
@@ -763,17 +816,15 @@ async def admin_sub_reduce_process(
         days=days,
         new_end=format_datetime(new_end),
     )
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await message.answer(
+    
+    await render_hub(
+        message.bot, 
+        message.chat.id,
         confirm_text,
-        reply_markup=get_admin_confirm_action_keyboard(
+        get_admin_confirm_action_keyboard(
             confirm_callback=f"admin_sub_apply_reduce:{telegram_id}:{days}",
             cancel_callback=f"admin_subscription:{telegram_id}",
-        ),
-        parse_mode="HTML",
+        )
     )
 
 
@@ -830,6 +881,7 @@ async def admin_sub_apply_reduce(callback: CallbackQuery, session: AsyncSession)
 # ──────────────────────────────────────────────────────────
 # 🎫 ВЫДАЧА ДОСТУПА
 # ──────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("admin_sub_grant:"))
 async def admin_sub_grant(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -960,16 +1012,28 @@ async def admin_sub_grant_custom_process(
     if not telegram_id or not tariff_id:
         await state.clear()
         return
-    text_input = message.text.strip() if message.text else ""
-    if not text_input.isdigit() or int(text_input) < 1:
-        await message.answer("⚠️ Введите число ≥ 1")
+    
+    days = _validate_positive_int(message.text)
+    if days is None:
+        await render_hub(
+            message.bot, 
+            message.chat.id,
+            "⚠️ Введите число ≥ 1",
+            get_back_button(f"admin_sub_grant_group:{telegram_id}:{tariff_id}")
+        )
         return
-    days = int(text_input)
+    
     await state.clear()
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
-        await message.answer("❌ Тариф не найден.")
+        await render_hub(
+            message.bot, 
+            message.chat.id,
+            "❌ Тариф не найден.",
+            get_back_button(f"admin_subscription:{telegram_id}")
+        )
         return
+    
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else now + timedelta(days=days)
     days_text = "∞ навсегда" if days >= PERMANENT_SUBSCRIPTION_DAYS else f"{days} дн."
@@ -980,17 +1044,15 @@ async def admin_sub_grant_custom_process(
         days_text=days_text,
         new_end=format_datetime(new_end),
     )
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await message.answer(
+    
+    await render_hub(
+        message.bot, 
+        message.chat.id,
         confirm_text,
-        reply_markup=get_admin_confirm_action_keyboard(
+        get_admin_confirm_action_keyboard(
             confirm_callback=f"admin_sub_grant_apply:{telegram_id}:{tariff_id}:{days}",
             cancel_callback=f"admin_sub_grant_group:{telegram_id}:{tariff.device_limit}",
-        ),
-        parse_mode="HTML",
+        )
     )
 
 
@@ -1053,6 +1115,7 @@ async def admin_sub_grant_apply(callback: CallbackQuery, session: AsyncSession):
 # ──────────────────────────────────────────────────────────
 # 🔧 УПРАВЛЕНИЕ УСТРОЙСТВАМИ + УДАЛЕНИЕ
 # ──────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("admin_user_devices:"))
 async def admin_user_devices(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -1173,6 +1236,7 @@ async def admin_delete_device_apply(callback: CallbackQuery, session: AsyncSessi
 # ──────────────────────────────────────────────────────────
 # 🚫 БАН / РАЗБАН (с подтверждением)
 # ──────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("admin_ban:"))
 async def admin_ban_confirm(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
