@@ -9,8 +9,6 @@ from utils.vpn_parser import (
     build_vpn_file,
     build_conf_file,
     is_valid_vpn_uri,
-    validate_awg2_config,
-    AWG2ValidationResult,
 )
 
 __all__ = [
@@ -28,6 +26,4 @@ __all__ = [
     "build_vpn_file",
     "build_conf_file",
     "is_valid_vpn_uri",
-    "validate_awg2_config",
-    "AWG2ValidationResult",
 ]
