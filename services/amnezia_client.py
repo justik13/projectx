@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 _http_session: Optional[aiohttp.ClientSession] = None
 
-
 # ============================================================
 # DTO MODELS (Pydantic)
 # ============================================================
@@ -20,23 +19,53 @@ class AmneziaClientCreateResponse(BaseModel):
     config: str
     protocol: str = AMNEZIA_PROTOCOL
 
-
 class AmneziaClientTraffic(BaseModel):
     """Трафик клиента."""
     totalDownload: int = 0
     totalUpload: int = 0
-
+    # 🔥 ИСПРАВЛЕНО: Amnezia API возвращает received/sent, а не totalDownload/totalUpload
+    received: int = 0
+    sent: int = 0
 
 class AmneziaClientListItem(BaseModel):
-    """Элемент списка клиентов из GET /clients."""
-    id: str
-    clientName: str = ""
-    name: str = ""
+    """
+    Элемент списка клиентов из GET /clients.
+    
+    🔥 ИСПРАВЛЕНО: Реальная структура API:
+    {
+      "username": "tg_872658825_IPhone_7fb6",
+      "peers": [{
+        "id": "base64...",
+        "name": "Windows 11",
+        "status": "active",
+        "allowedIps": ["10.8.1.30/32"],
+        "lastHandshake": 0,
+        "traffic": {"received": 0, "sent": 0},
+        "endpoint": null,
+        "online": false,
+        "expiresAt": null,
+        "protocol": "amneziawg2"
+      }]
+    }
+    """
+    # 🔥 ИСПРАВЛЕНО: Реальные поля из API
+    id: str  # peer_id из peers[0].id
+    username: str = ""
+    peer_name: str = ""  # name из peers[0].name
     status: str = "active"
     traffics: AmneziaClientTraffic = Field(default_factory=AmneziaClientTraffic)
     lastHandshake: Optional[float] = None
     lastSeen: Optional[float] = None
     updatedAt: Optional[float] = None
+    
+    # Алиасы для обратной совместимости
+    @property
+    def clientName(self) -> str:
+        return self.username
+    
+    @property
+    def name(self) -> str:
+        return self.peer_name
 
 
 class AmneziaServerInfo(BaseModel):
@@ -64,13 +93,11 @@ async def get_http_session() -> aiohttp.ClientSession:
         _http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
     return _http_session
 
-
 async def close_http_session():
     global _http_session
     if _http_session:
         await _http_session.close()
         _http_session = None
-
 
 # ============================================================
 # CLIENT
@@ -162,34 +189,87 @@ class AmneziaClient:
     async def get_all_clients(
         self, skip: int = 0, limit: int = 100
     ) -> Optional[List[AmneziaClientListItem]]:
-        """Возвращает список клиентов как список DTO."""
+        """
+        Возвращает список клиентов как список DTO.
+        
+        🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
+        - API возвращает поле "items" (НЕ "clients")
+        - Каждый item содержит массив "peers" — один username может иметь несколько пиров
+        - Нужно Flatten: каждый peer становится отдельным AmneziaClientListItem
+        - Общее количество = сумма всех peers во всех items
+        """
         all_clients: List[AmneziaClientListItem] = []
-        current_skip = skip
-
-        while True:
-            result = await self._request(
-                "GET", "/clients",
-                params={"skip": current_skip, "limit": min(limit, 100)}
-            )
-            if result is None:
-                return None
-
-            clients_raw = result.get("clients", [])
-            if not clients_raw:
-                break
-
-            for raw in clients_raw:
-                try:
-                    all_clients.append(AmneziaClientListItem(**raw))
-                except Exception as e:
-                    logger.warning(f"Failed to parse client item: {e}")
+        
+        # Используем total из API для определения окончания пагинации
+        result = await self._request(
+            "GET", "/clients",
+            params={"skip": skip, "limit": min(limit, 100)}
+        )
+        
+        if result is None:
+            return None
+        
+        # 🔥 ИСПРАВЛЕНО: Поле называется "items", а не "clients"
+        items_raw = result.get("items", [])
+        
+        if not items_raw:
+            return all_clients
+        
+        # 🔥 ИСПРАВЛЕНО: Flatten структуры
+        # API: {"items": [{"username": "...", "peers": [{...}, {...}]}]}
+        # Нам нужно: плоский список AmneziaClientListItem, где каждый peer = отдельный элемент
+        for item in items_raw:
+            if not isinstance(item, dict):
+                continue
+            
+            username = item.get("username", "")
+            peers = item.get("peers", [])
+            
+            if not isinstance(peers, list):
+                continue
+            
+            # Каждый peer - отдельный клиент
+            for peer in peers:
+                if not isinstance(peer, dict):
                     continue
-
-            if len(clients_raw) < min(limit, 100):
-                break
-
-            current_skip += len(clients_raw)
-
+                
+                peer_id = peer.get("id", "")
+                if not peer_id:
+                    continue
+                
+                # Маппинг полей API в наш DTO
+                traffic_raw = peer.get("traffic", {})
+                if isinstance(traffic_raw, dict):
+                    traffic = AmneziaClientTraffic(
+                        totalDownload=traffic_raw.get("received", 0) or 0,
+                        totalUpload=traffic_raw.get("sent", 0) or 0,
+                        received=traffic_raw.get("received", 0) or 0,
+                        sent=traffic_raw.get("sent", 0) or 0,
+                    )
+                else:
+                    traffic = AmneziaClientTraffic()
+                
+                try:
+                    client_item = AmneziaClientListItem(
+                        id=peer_id,
+                        username=username,
+                        peer_name=peer.get("name") or "",
+                        status=peer.get("status", "active"),
+                        traffics=traffic,
+                        lastHandshake=peer.get("lastHandshake"),
+                        lastSeen=peer.get("lastSeen"),
+                        updatedAt=peer.get("updatedAt"),
+                    )
+                    all_clients.append(client_item)
+                except Exception as e:
+                    logger.warning(f"Failed to parse peer item: {e}, peer={peer}")
+                    continue
+        
+        logger.info(
+            f"get_all_clients: parsed {len(all_clients)} peers "
+            f"from {len(items_raw)} usernames"
+        )
+        
         return all_clients
 
     async def delete_client(self, client_id: str) -> bool:
