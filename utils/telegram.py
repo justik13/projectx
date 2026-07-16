@@ -3,7 +3,7 @@ import html
 import logging
 from typing import Optional, List
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
-from aiogram.types import InlineKeyboardMarkup, InputFile
+from aiogram.types import InlineKeyboardMarkup, InputFile, InputMediaDocument
 from cachetools import TTLCache
 from bot.constants import HUB_CACHE_MAX_SIZE, HUB_CACHE_TTL
 
@@ -42,8 +42,9 @@ def _maybe_cleanup_cache() -> None:
     now = asyncio.get_event_loop().time()
     if now - _last_cleanup_time < _CLEANUP_INTERVAL:
         return
-
+    
     _last_cleanup_time = now
+    
     if len(_hub_cache) >= HUB_CACHE_MAX_SIZE * 0.8:
         # TTLCache автоматически удаляет expired записи при доступе
         # Но мы можем форсировать очистку, обратившись к каждому ключу
@@ -53,13 +54,13 @@ def _maybe_cleanup_cache() -> None:
                 _ = _hub_cache[key]  # Это триггерит cleanup expired
             except KeyError:
                 expired_keys.append(key)
-
+        
         for key in expired_keys:
             try:
                 del _hub_cache[key]
             except KeyError:
                 pass
-
+        
         logger.info(f"Hub cache cleanup: {len(expired_keys)} expired entries removed")
 
 
@@ -75,7 +76,6 @@ async def clear_and_delete_hub(bot, chat_id: int):
 async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup, parse_mode: str = "HTML") -> int:
     """
     Очищает весь текущий хаб (все сообщения в кэше) и отправляет новое текстовое сообщение.
-    
     🔥 ИСПРАВЛЕНО #12: Ждём удаления старых сообщений перед отправкой новых (UX improvement)
     """
     _maybe_cleanup_cache()
@@ -83,7 +83,7 @@ async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardM
     if cached and "ids" in cached:
         # 🔥 ИСПРАВЛЕНО #12: Ждём удаления вместо fire-and-forget
         await _safe_delete_batch(bot, chat_id, cached["ids"])
-
+    
     msg = await bot.send_message(
         chat_id=chat_id, text=text,
         reply_markup=reply_markup, parse_mode=parse_mode
@@ -94,7 +94,6 @@ async def render_hub(bot, chat_id: int, text: str, reply_markup: InlineKeyboardM
 
 async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
     """Отправляет фото, удаляя предыдущий хаб
-    
     🔥 ИСПРАВЛЕНО #12: Ждём удаления старых сообщений перед отправкой новых
     """
     _maybe_cleanup_cache()
@@ -102,7 +101,7 @@ async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, repl
     if cached and "ids" in cached:
         # 🔥 ИСПРАВЛЕНО #12: Ждём удаления вместо fire-and-forget
         await _safe_delete_batch(bot, chat_id, cached["ids"])
-
+    
     msg = await bot.send_photo(
         chat_id=chat_id, photo=photo, caption=caption,
         reply_markup=reply_markup, parse_mode=parse_mode
@@ -113,7 +112,6 @@ async def send_hub_photo(bot, chat_id: int, photo: InputFile, caption: str, repl
 
 async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
     """Отправляет документ, удаляя предыдущий хаб
-    
     🔥 ИСПРАВЛЕНО #12: Ждём удаления старых сообщений перед отправкой новых
     """
     _maybe_cleanup_cache()
@@ -121,7 +119,7 @@ async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str
     if cached and "ids" in cached:
         # 🔥 ИСПРАВЛЕНО #12: Ждём удаления вместо fire-and-forget
         await _safe_delete_batch(bot, chat_id, cached["ids"])
-
+    
     msg = await bot.send_document(
         chat_id=chat_id, document=document, caption=caption,
         reply_markup=reply_markup, parse_mode=parse_mode
@@ -132,7 +130,6 @@ async def send_hub_document(bot, chat_id: int, document: InputFile, caption: str
 
 async def send_hub_invoice(bot, chat_id: int, reply_markup: Optional[InlineKeyboardMarkup] = None, **kwargs) -> int:
     """Отправляет инвойс, удаляя предыдущий хаб
-    
     🔥 ИСПРАВЛЕНО #12: Ждём удаления старых сообщений перед отправкой новых
     """
     _maybe_cleanup_cache()
@@ -140,51 +137,61 @@ async def send_hub_invoice(bot, chat_id: int, reply_markup: Optional[InlineKeybo
     if cached and "ids" in cached:
         # 🔥 ИСПРАВЛЕНО #12: Ждём удаления вместо fire-and-forget
         await _safe_delete_batch(bot, chat_id, cached["ids"])
-
+    
     if reply_markup:
         kwargs["reply_markup"] = reply_markup
+    
     msg = await bot.send_invoice(chat_id=chat_id, **kwargs)
     _hub_cache[chat_id] = {"ids": [msg.message_id]}
     return msg.message_id
 
 
-async def append_hub_document(bot, chat_id: int, document: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
+async def send_hub_media_group(
+    bot, 
+    chat_id: int, 
+    media: List[InputMediaDocument], 
+    reply_markup: InlineKeyboardMarkup = None,
+) -> List[int]:
     """
-    🔥 НОВАЯ ФУНКЦИЯ: Отправляет документ и ДОБАВЛЯЕТ его в текущий хаб.
-    Используется для отправки нескольких файлов подряд.
+    🔥 SMH-СОВМЕСТИМАЯ ФУНКЦИЯ: Отправляет альбом (MediaGroup) с файлами.
+    
+    MediaGroup отправляется как ОДНО сообщение в чате, что соответствует SMH.
+    Caption можно добавить к первому файлу в списке media.
+    
+    Args:
+        bot: Экземпляр бота
+        chat_id: ID чата
+        media: Список InputMediaDocument (2-10 файлов)
+        reply_markup: Inline клавиатура (добавляется к сообщению)
+    
+    Returns:
+        List[int]: Список message_id отправленных файлов (все в одном сообщении)
+    
+    Пример использования:
+        media = [
+            InputMediaDocument(type="document", media=vpn_file, caption="Основной клиент"),
+            InputMediaDocument(type="document", media=conf_file),
+        ]
+        msg_ids = await send_hub_media_group(bot, chat_id, media, reply_markup=kb)
     """
     _maybe_cleanup_cache()
-    msg = await bot.send_document(
-        chat_id=chat_id, document=document, caption=caption,
-        reply_markup=reply_markup, parse_mode=parse_mode
-    )
-
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
-        cached["ids"].append(msg.message_id)
-    else:
-        _hub_cache[chat_id] = {"ids": [msg.message_id]}
-
-    return msg.message_id
-
-
-async def append_hub_message(bot, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
-    """
-    🔥 НОВАЯ ФУНКЦИЯ: Отправляет текстовое сообщение и ДОБАВЛЯЕТ его в текущий хаб.
-    """
-    _maybe_cleanup_cache()
-    msg = await bot.send_message(
-        chat_id=chat_id, text=text,
-        reply_markup=reply_markup, parse_mode=parse_mode
+        # Удаляем предыдущий хаб
+        await _safe_delete_batch(bot, chat_id, cached["ids"])
+    
+    # Отправляем MediaGroup
+    messages = await bot.send_media_group(
+        chat_id=chat_id,
+        media=media,
+        reply_markup=reply_markup,
     )
-
-    cached = _hub_cache.get(chat_id)
-    if cached and "ids" in cached:
-        cached["ids"].append(msg.message_id)
-    else:
-        _hub_cache[chat_id] = {"ids": [msg.message_id]}
-
-    return msg.message_id
+    
+    # Все message_id из альбома добавляем в кэш
+    msg_ids = [msg.message_id for msg in messages]
+    _hub_cache[chat_id] = {"ids": msg_ids}
+    
+    return msg_ids
 
 
 def clear_hub_cache(chat_id: int) -> None:
