@@ -258,8 +258,21 @@ ADMIN_USER_DEVICES_EMPTY = "<i>Устройств нет</i>\n"
 AUDIT_LOG_HEADER = "🛠 Админка › 📜 <b>Аудит-лог</b>\n<i>Последние 10 действий администраторов:</i>\n"
 AUDIT_LOG_EMPTY = "<i>Лог действий пуст.</i>"
 AUDIT_ENTRY = "[{date}]\nAdmin <code>{admin_id}</code>\n➡️ {action}{target}{details}\n"
-AUDIT_ACTIONS = {"EXTEND": "⏰ Продлил", "BAN": "🚫 Забанил", "UNBAN": "✅ Разбанил", "DELETE_SERVER": "🗑 Удалил сервер", "ADD_SERVER": "➕ Добавил сервер", "TOGGLE_SERVER": "🔄 Переключил сервер", "DELETE_TARIFF": "🗑 Удалил тариф", "ADD_TARIFF": "➕ Добавил тариф", "EDIT_TARIFF": "✏️ Изменил тариф", "BROADCAST": "📢 Сделал рассылку"}
-DASHBOARD_HEADER = "🛠 <b>Админ-панель</b>\n📊 <b>Статистика:</b>\n"
+AUDIT_ACTIONS = {
+    "EXTEND": "⏰ Продлил",
+    "BAN": "🚫 Забанил",
+    "UNBAN": "✅ Разбанил",
+    "DELETE_SERVER": "🗑 Удалил сервер",
+    "ADD_SERVER": "➕ Добавил сервер",
+    "TOGGLE_SERVER": "🔄 Переключил сервер",
+    "DELETE_TARIFF": "🗑 Удалил тариф",
+    "ADD_TARIFF": "➕ Добавил тариф",
+    "EDIT_TARIFF": "✏️ Изменил тариф",
+    "BROADCAST": "📢 Сделал рассылку",
+    "CHANGE_TARIFF": "💎 Сменил тариф",
+    "REDUCE": "➖ Уменьшил дни",
+    "GRANT": "🎫 Выдал доступ",
+}DASHBOARD_HEADER = "🛠 <b>Админ-панель</b>\n📊 <b>Статистика:</b>\n"
 DASHBOARD_STATS = "👥 Всего пользователей: {total_users}\n✅ Активных подписок: {active_subs}\n🆕 Новых за 24ч: {new_users_24h}\n🌍 Свободных IP: {free_ips}\n"
 BROADCAST_PROMPT = "🛠 Админка › 📢 <b>Рассылка</b>\n📢 Введите текст сообщения для рассылки:\nПоддерживается HTML-разметка (<b>жирный</b>, <i>курсив</i>, <code>код</code>)"
 BROADCAST_PREVIEW = "📢 <b>Предпросмотр рассылки ({content_type}):</b>\n{text}"
@@ -294,4 +307,150 @@ PAYMENT_CHECK_INSTRUCTIONS = (
     "✅ <b>Проверка оплаты</b>\n\n"
     "Нажмите кнопку ниже, чтобы проверить статус вашего платежа.\n\n"
     "<i>Обычно оплата зачисляется в течение 1-2 минут после подтверждения банком.</i>"
+)
+
+# ═══════════════════════════════════════════════════════════
+# 🔧 НОВОЕ: Управление подпиской в админке
+# ═══════════════════════════════════════════════════════════
+
+ADMIN_SUBSCRIPTION_HEADER = (
+    "🛠 Админка › 👥 Пользователи › 📅 <b>Подписка</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "{status_block}"
+)
+
+ADMIN_SUB_STATUS_ACTIVE = (
+    "🟢 <b>Статус:</b> Активна\n"
+    "💎 <b>Тариф:</b> {tariff_name}\n"
+    "📅 <b>Действует до:</b> {valid_until}\n"
+    "⏱ <b>Осталось:</b> {time_left}\n"
+    "🔌 <b>Устройств:</b> {devices_count} / {device_limit}"
+)
+
+ADMIN_SUB_STATUS_INACTIVE = (
+    "🔴 <b>Статус:</b> Неактивна\n"
+    "💎 <b>Тариф:</b> {tariff_name}\n"
+    "📅 <b>Истекла:</b> {valid_until}"
+)
+
+ADMIN_SUB_STATUS_NONE = (
+    "⚪ <b>Статус:</b> Подписка отсутствует\n"
+    "💎 <b>Тариф:</b> —\n"
+    "🔌 <b>Устройств:</b> {devices_count}"
+)
+
+ADMIN_SUB_CHANGE_TARIFF_HEADER = (
+    "🛠 Админка › 📅 Подписка › 💎 <b>Смена тарифа</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "Текущий тариф: <b>{current_tariff}</b>\n"
+    "Устройств: <b>{devices_count}</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "Выберите новый тариф:"
+)
+
+ADMIN_SUB_CONFIRM_TARIFF = (
+    "⚠️ <b>Подтверждение смены тарифа</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n\n"
+    "Текущий: <b>{old_tariff}</b>\n"
+    "Новый: <b>{new_tariff}</b>\n"
+    "Устройств: <b>{devices_count}</b>\n\n"
+    "Что произойдёт:\n"
+    "• Тариф будет изменён мгновенно\n"
+    "• Лимит устройств обновится\n"
+    "• Срок подписки НЕ изменится\n"
+    "<i>Это действие необратимо.</i>"
+)
+
+ADMIN_SUB_TARIFF_CHANGED = (
+    "✅ <b>Тариф успешно изменён</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "Новый тариф: <b>{tariff_name}</b>\n"
+    "Лимит устройств: <b>{device_limit}</b>"
+)
+
+ADMIN_SUB_DOWNGRADE_BLOCKED = (
+    "⚠️ <b>Смена тарифа невозможна</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n\n"
+    "У пользователя <b>{devices_count}</b> активных устройств,\n"
+    "а выбранный тариф поддерживает только <b>{new_limit}</b>.\n\n"
+    "Сначала удалите лишние устройства через\n"
+    "«🔧 Управление устройствами»."
+)
+
+ADMIN_SUB_EXTEND_HEADER = (
+    "🛠 Админка › 📅 Подписка › ➕ <b>Продление</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "Действует до: <b>{valid_until}</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "Выберите срок продления:"
+)
+
+ADMIN_SUB_CONFIRM_EXTEND = (
+    "⚠️ <b>Подтверждение продления</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n\n"
+    "Текущая дата: <b>{current_end}</b>\n"
+    "Продление на: <b>{days_text}</b>\n"
+    "Новая дата: <b>{new_end}</b>\n\n"
+    "<i>Это действие необратимо.</i>"
+)
+
+ADMIN_SUB_EXTEND_PROMPT = (
+    "🛠 Админка › 📅 Подписка › ⌨️ <b>Ручное продление</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n\n"
+    "⏱ Введите количество дней (число ≥ 1):"
+)
+
+ADMIN_SUB_REDUCE_PROMPT = (
+    "🛠 Админка › 📅 Подписка › ➖ <b>Уменьшение дней</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "Действует до: <b>{valid_until}</b>\n\n"
+    "⏱ Введите количество дней для уменьшения (число ≥ 1):"
+)
+
+ADMIN_SUB_CONFIRM_REDUCE = (
+    "⚠️ <b>Подтверждение уменьшения</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n\n"
+    "Текущая дата: <b>{current_end}</b>\n"
+    "Уменьшение на: <b>{days} дн.</b>\n"
+    "Новая дата: <b>{new_end}</b>\n\n"
+    "⚠️ Если новая дата в прошлом — подписка истечёт мгновенно.\n"
+    "<i>Это действие необратимо.</i>"
+)
+
+ADMIN_SUB_REDUCED = (
+    "✅ <b>Подписка уменьшена</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "Новая дата: <b>{new_end}</b>"
+)
+
+ADMIN_SUB_GRANT_HEADER = (
+    "🛠 Админка › 📅 Подписка › 🎫 <b>Выдать доступ</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "Выберите тариф:"
+)
+
+ADMIN_SUB_GRANT_DAYS_HEADER = (
+    "🛠 Админка › 🎫 Выдать доступ\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "Тариф: <b>{tariff_name}</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "Выберите срок:"
+)
+
+ADMIN_SUB_GRANT_CUSTOM_PROMPT = (
+    "🛠 Админка › 🎫 Выдать доступ › ⌨️ <b>Ручной срок</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n"
+    "Тариф: <b>{tariff_name}</b>\n\n"
+    "⏱ Введите количество дней (число ≥ 1):"
+)
+
+ADMIN_SUB_CONFIRM_GRANT = (
+    "⚠️ <b>Подтверждение выдачи доступа</b>\n"
+    "Пользователь: <code>{telegram_id}</code>\n\n"
+    "Тариф: <b>{tariff_name}</b>\n"
+    "Срок: <b>{days_text}</b>\n"
+    "Действует до: <b>{new_end}</b>\n\n"
+    "<i>Это действие необратимо.</i>"
 )

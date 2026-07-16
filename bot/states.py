@@ -1,9 +1,4 @@
-from aiogram.fsm.state import State, StatesGroup
-
-
-class DeviceCreationStates(StatesGroup):
-    choose_server = State()
-    enter_device_name = State()
+from aiogram.fsm.state import StatesGroup, State
 
 
 class DeviceManagementStates(StatesGroup):
@@ -17,11 +12,12 @@ class AdminStates(StatesGroup):
     confirming_broadcast = State()
     adding_server = State()
     editing_server = State()
-    # 🔧 НОВОЕ: Состояния для редактирования и удаления сервера
     confirming_server_delete = State()
     editing_server_flag = State()
-    # tariff creation REMOVED — tariffs are hardcoded
     editing_tariff_days = State()
     editing_tariff_device_limit = State()
     editing_tariff_rub = State()
     editing_tariff_stars = State()
+    admin_reducing_days = State()
+    admin_extending_custom = State()
+    admin_grant_custom_days = State()
