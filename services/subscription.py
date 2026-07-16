@@ -1,13 +1,16 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.repositories.users_repo import get_user_by_telegram_id, create_user, update_user
+from database.repositories.profiles_repo import get_user_profiles
+from database.repositories.servers_repo import get_server_by_id
 from database.models import User
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from bot.constants import PERMANENT_SUBSCRIPTION_DAYS, PERMANENT_END_DATE
+from services.amnezia_client import AmneziaClient
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
-
 
 class SubscriptionService:
     @staticmethod
@@ -27,14 +30,12 @@ class SubscriptionService:
         user = await get_user_by_telegram_id(session, telegram_id)
         if user:
             return user
-
         referred_by = None
         if ref_id is not None and ref_id != telegram_id:
             ref_user = await get_user_by_telegram_id(session, ref_id)
             if ref_user:
                 referred_by = ref_id
                 logger.info(f"New user {telegram_id} referred by {ref_id}")
-
         return await create_user(session, telegram_id, username, first_name, referred_by)
 
     @staticmethod
@@ -45,21 +46,7 @@ class SubscriptionService:
     ) -> Optional[User]:
         """
         Продлевает подписку пользователя.
-
-        🔥 ИСПРАВЛЕНО: Сброс daily device creation счётчика при апгрейде тарифа.
-        Если new_device_limit > текущего user.device_limit — сбрасываем
-        device_creations_today в 0 и last_creation_date в None.
-        Это даёт пользователю "чистый лист" после апгрейда.
-
-        Args:
-            session: SQLAlchemy async session
-            telegram_id: Telegram ID пользователя
-            days: Количество дней продления
-            new_device_limit: Новый лимит устройств (None = не менять)
-            new_tariff_id: ID нового тарифа (None = не менять)
-
-        Returns:
-            User если успешно, None если пользователь не найден
+        🔥 ИСПРАВЛЕНО (Этап 1): Фоновое обновление expiresAt на серверах Amnezia API.
         """
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user:
@@ -69,7 +56,6 @@ class SubscriptionService:
         current_end = user.subscription_end if (
             user.subscription_end and user.subscription_end > now
         ) else now
-
         new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else current_end + timedelta(days=days)
 
         user.subscription_end = new_end
@@ -77,14 +63,9 @@ class SubscriptionService:
         user.notified_1d = False
         user.notified_2h = False
 
-        # 🔥 ИСПРАВЛЕНО: Сброс daily счётчика при АПГРЕЙДЕ тарифа
-        # (Вариант A из согласования)
         if new_device_limit is not None:
             old_device_limit = user.device_limit
             user.device_limit = new_device_limit
-
-            # Сбрасываем daily счётчик ТОЛЬКО при апгрейде (новое > старое)
-            # При даунгрейде или продлении того же тарифа — не сбрасываем
             if new_device_limit > old_device_limit:
                 user.device_creations_today = 0
                 user.last_creation_date = None
@@ -98,18 +79,51 @@ class SubscriptionService:
             user.current_tariff_id = new_tariff_id
 
         await session.flush()
+
+        # 🔥 ИСПРАВЛЕНО (Этап 1): Фоновая синхронизация expiresAt с Amnezia API
+        expires_ts = await SubscriptionService.get_expires_timestamp(user)
+        asyncio.create_task(
+            SubscriptionService._sync_expires_to_servers(session, user.id, expires_ts)
+        )
+
         return user
 
     @staticmethod
-    async def get_expires_timestamp(user: User) -> Optional[int]:
+    async def _sync_expires_to_servers(session: AsyncSession, user_id: int, expires_ts: Optional[int]):
         """
-        Возвращает Unix timestamp для expiresAt или None для бессрочного доступа.
+        🔥 ИСПРАВЛЕНО (Этап 1): Отправляет новый expiresAt на все серверы пользователя.
+        Запускается в фоне через asyncio.create_task, чтобы не блокировать UX.
+        """
+        try:
+            profiles = await get_user_profiles(session, user_id)
+            if not profiles:
+                return
 
-        🔥 ИСПРАВЛЕНО #19: Логирование когда expiresAt=null отправляется в API.
-        Это нормально для «навсегда» подписок, но полезно для отладки.
-        """
+            server_ids = {p.server_id for p in profiles}
+            servers_map = {}
+            for sid in server_ids:
+                s = await get_server_by_id(session, sid)
+                if s:
+                    servers_map[sid] = s
+
+            tasks = []
+            for profile in profiles:
+                server = servers_map.get(profile.server_id)
+                if server and server.is_active:
+                    client = AmneziaClient(server.api_url, server.api_key)
+                    tasks.append(client.update_client(client_id=profile.peer_id, expires_at=expires_ts))
+
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                success = sum(1 for r in results if r is True)
+                logger.info(f"expiresAt sync: {success}/{len(tasks)} servers updated for user_id={user_id}")
+        except Exception as e:
+            logger.error(f"expiresAt sync failed for user_id={user_id}: {e}", exc_info=True)
+
+    @staticmethod
+    async def get_expires_timestamp(user: User) -> Optional[int]:
+        """Возвращает Unix timestamp для expiresAt или None для бессрочного доступа."""
         if not user.subscription_end or user.subscription_end.year >= 2100:
-            # 🔥 ИСПРАВЛЕНО #19: Явное логирование null expiresAt
             logger.info(
                 f"get_expires_timestamp: user {user.telegram_id} has permanent subscription, "
                 f"sending expiresAt=null to API"

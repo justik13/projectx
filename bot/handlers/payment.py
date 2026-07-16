@@ -371,8 +371,8 @@ async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: As
     payment_id = int(parts[1])
     tariff_id = int(parts[2])
 
-    # 🔥 ИСПРАВЛЕНО SMH: используем clear_and_delete_hub
-    await clear_and_delete_hub(callback.bot, callback.from_user.id)
+    # 🔥 ИСПРАВЛЕНО (Этап 2): Используем callback.message.chat.id вместо callback.from_user.id
+    await clear_and_delete_hub(callback.bot, callback.message.chat.id)
 
     if payment_id:
         try:
@@ -392,8 +392,9 @@ async def cancel_invoice(callback: CallbackQuery, state: FSMContext, session: As
             price_rub=tariff.price_rub,
             price_stars=tariff.price_stars,
         )
+        # 🔥 ИСПРАВЛЕНО (Этап 2): callback.message.chat.id
         await render_hub(
-            callback.bot, callback.from_user.id,
+            callback.bot, callback.message.chat.id,
             text, get_payment_method_keyboard(tariff.id, device_limit)
         )
         return

@@ -149,19 +149,20 @@ install_dependencies() {
 # ═══════════════════════════════════════════════════════════════
 setup_firewall() {
     log "Настройка UFW firewall..."
-
     if ! command -v ufw &>/dev/null; then
-        warn "UFW не установлен, пропуск настройки firewall"
+        warn "UFW не установлен, пропуск"
         return
     fi
 
     local SSH_PORT=""
-    if command -v ss &>/dev/null; then
-        SSH_PORT=$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | grep -oE ':[0-9]+$' | grep -oE '[0-9]+' | sort -u | head -n1)
+    # 🔥 ИСПРАВЛЕНО: Читаем порт из конфига SSH, а не из ss
+    if [ -f /etc/ssh/sshd_config ]; then
+        SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
     fi
+    
     if [[ -z "$SSH_PORT" || ! "$SSH_PORT" =~ ^[0-9]+$ ]]; then
         SSH_PORT=22
-        warn "Не удалось определить порт SSH, используется стандартный: $SSH_PORT"
+        warn "Не удалось определить порт SSH из sshd_config, используется стандартный: $SSH_PORT"
     fi
 
     mkdir -p "$SNAPSHOT_DIR"
@@ -178,8 +179,7 @@ setup_firewall() {
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
     ufw --force enable >/dev/null 2>&1 || error "Ошибка включения UFW"
-
-    success "UFW настроен безопасно"
+    success "UFW настроен безопасно (SSH на порту $SSH_PORT)"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -350,31 +350,31 @@ setup_nginx_ssl() {
     local DOMAIN=$(echo "$URL" | sed -E 's|https?://([^/:]+).*|\1|')
     [ -z "$DOMAIN" ] && return
 
-    log "Настройка Nginx для $DOMAIN"
+    # 🔥 ИСПРАВЛЕНО: Читаем порт вебхука из .env
+    local WEBHOOK_PORT=$(grep "^PLATEGA_WEBHOOK_PORT=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
+    WEBHOOK_PORT=${WEBHOOK_PORT:-8080}
 
+    log "Настройка Nginx для $DOMAIN (proxy на порт $WEBHOOK_PORT)"
     rm -f /etc/nginx/sites-enabled/default
+
     cat > "/etc/nginx/sites-available/projectx" << NGINXEOF
 limit_req_zone \$binary_remote_addr zone=mylimit:10m rate=10r/s;
-
 server {
     listen 80;
     server_name $DOMAIN;
-
     location /webhook/platega {
         limit_req zone=mylimit burst=20 nodelay;
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:${WEBHOOK_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_connect_timeout 10s;
         proxy_read_timeout 30s;
     }
-
     location / { return 404; }
 }
 NGINXEOF
 
     ln -sf /etc/nginx/sites-available/projectx /etc/nginx/sites-enabled/
-
     if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx
         success "Nginx настроен и перезапущен"

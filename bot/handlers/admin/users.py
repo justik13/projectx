@@ -490,23 +490,28 @@ async def admin_sub_apply_tariff(callback: CallbackQuery, session: AsyncSession)
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     parts = callback.data.split(":")
     telegram_id = int(parts[1])
     tariff_id = int(parts[2])
     lock_key = telegram_id
+
     if lock_key in _applying_tariffs:
         await callback.answer("⏳ Уже выполняется...", show_alert=True)
         return
     _applying_tariffs.add(lock_key)
+
     try:
         user = await _get_user_with_profiles(session, telegram_id)
         if not user:
             await callback.message.edit_text("❌ Пользователь не найден.")
             return
+
         new_tariff = await get_tariff_by_id(session, tariff_id)
         if not new_tariff:
             await callback.answer("❌ Тариф не найден", show_alert=True)
             return
+
         profiles_count = len(user.profiles) if user.profiles else 0
         if profiles_count > new_tariff.device_limit:
             text = texts.ADMIN_SUB_DOWNGRADE_BLOCKED.format(
@@ -520,15 +525,21 @@ async def admin_sub_apply_tariff(callback: CallbackQuery, session: AsyncSession)
                 parse_mode="HTML",
             )
             return
-        user.current_tariff_id = tariff_id
-        user.device_limit = new_tariff.device_limit
-        await session.flush()
-        await session.commit()
+
+        # 🔥 ИСПРАВЛЕНО (Этап 2): Используем SubscriptionService для корректного сброса daily limit
+        # days=0 означает "не продлевать срок", только сменить тариф и device_limit
+        await SubscriptionService.extend_subscription(
+            session, telegram_id, days=0,
+            new_device_limit=new_tariff.device_limit,
+            new_tariff_id=new_tariff.id,
+        )
+
         tariff_name = get_tariff_group_name(new_tariff.device_limit)
         await AuditService.log_action(
             session, callback.from_user.id, "CHANGE_TARIFF", "User", telegram_id,
             f"tariff -> {tariff_name}",
         )
+
         text = texts.ADMIN_SUB_TARIFF_CHANGED.format(
             telegram_id=telegram_id,
             tariff_name=tariff_name,
@@ -542,6 +553,7 @@ async def admin_sub_apply_tariff(callback: CallbackQuery, session: AsyncSession)
             )
         except Exception:
             pass
+
     except Exception as e:
         logger.error(f"admin_sub_apply_tariff error: {e}", exc_info=True)
         await session.rollback()
@@ -1236,7 +1248,6 @@ async def admin_delete_device_apply(callback: CallbackQuery, session: AsyncSessi
 # ──────────────────────────────────────────────────────────
 # 🚫 БАН / РАЗБАН (с подтверждением)
 # ──────────────────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("admin_ban:"))
 async def admin_ban_confirm(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
@@ -1273,21 +1284,23 @@ async def admin_ban_apply(callback: CallbackQuery, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+    
     telegram_id = int(callback.data.split(":")[1])
     settings = get_settings()
     if telegram_id in settings.ADMIN_IDS:
         await callback.answer(texts.ERROR_ADMIN_BAN_FORBIDDEN, show_alert=True)
         return
-    user = await get_user_by_telegram_id(session, telegram_id)
-    if not user:
-        await callback.message.edit_text("❌ Пользователь не найден.")
+
+    # 🔥 ИСПРАВЛЕНО (Этап 1): Используем BanService для мгновенного отключения на серверах
+    from services.ban_service import BanService
+    success, message = await BanService.toggle_ban(session, callback.from_user.id, telegram_id)
+    
+    if not success:
+        await callback.answer(f"❌ Ошибка: {message}", show_alert=True)
         return
-    user.is_banned = True
-    await session.flush()
-    await session.commit()
-    await AuditService.log_action(
-        session, callback.from_user.id, "BAN", "User", telegram_id, "",
-    )
+
+    await callback.answer(f"✅ Пользователь {message}", show_alert=True)
+
     user = await _get_user_with_profiles(session, telegram_id)
     if user:
         await _render_user_card(callback, user, session)
@@ -1325,17 +1338,19 @@ async def admin_unban_apply(callback: CallbackQuery, session: AsyncSession):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     telegram_id = int(callback.data.split(":")[1])
-    user = await get_user_by_telegram_id(session, telegram_id)
-    if not user:
-        await callback.message.edit_text("❌ Пользователь не найден.")
+
+    # 🔥 ИСПРАВЛЕНО (Этап 1): Используем BanService для мгновенного включения на серверах
+    from services.ban_service import BanService
+    success, message = await BanService.toggle_ban(session, callback.from_user.id, telegram_id)
+    
+    if not success:
+        await callback.answer(f"❌ Ошибка: {message}", show_alert=True)
         return
-    user.is_banned = False
-    await session.flush()
-    await session.commit()
-    await AuditService.log_action(
-        session, callback.from_user.id, "UNBAN", "User", telegram_id, "",
-    )
+
+    await callback.answer(f"✅ Пользователь {message}", show_alert=True)
+
     user = await _get_user_with_profiles(session, telegram_id)
     if user:
         await _render_user_card(callback, user, session)
