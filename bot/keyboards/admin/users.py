@@ -42,19 +42,28 @@ def get_admin_subscription_keyboard(
 
 def get_admin_change_tariff_keyboard(
     telegram_id: int,
-    tariffs: list,
+    groups: dict[int, list],
     current_tariff_id: int | None,
 ) -> InlineKeyboardMarkup:
+    """
+    Показывает 3 группы тарифов вместо всех 7.
+    groups: {device_limit: [tariff1, tariff2, ...]}
+    """
     builder = InlineKeyboardBuilder()
-    for tariff in tariffs:
-        if not getattr(tariff, "is_active", True):
-            continue
-        label = get_tariff_group_name(tariff.device_limit)
-        if tariff.id == current_tariff_id:
+    current_device_limit = None
+    if current_tariff_id:
+        for device_limit, tariffs in groups.items():
+            for t in tariffs:
+                if t.id == current_tariff_id:
+                    current_device_limit = device_limit
+                    break
+    for device_limit in sorted(groups.keys()):
+        label = get_tariff_group_name(device_limit)
+        if device_limit == current_device_limit:
             label += " ✅"
         builder.button(
             text=label,
-            callback_data=f"admin_sub_select_tariff:{telegram_id}:{tariff.id}",
+            callback_data=f"admin_sub_select_group:{telegram_id}:{device_limit}",
         )
     builder.button(text="← Назад", callback_data=f"admin_subscription:{telegram_id}")
     builder.adjust(1)
@@ -63,16 +72,18 @@ def get_admin_change_tariff_keyboard(
 
 def get_admin_grant_tariff_keyboard(
     telegram_id: int,
-    tariffs: list,
+    groups: dict[int, list],
 ) -> InlineKeyboardMarkup:
+    """
+    Показывает 3 группы тарифов для выдачи доступа.
+    groups: {device_limit: [tariff1, tariff2, ...]}
+    """
     builder = InlineKeyboardBuilder()
-    for tariff in tariffs:
-        if not getattr(tariff, "is_active", True):
-            continue
-        label = get_tariff_group_name(tariff.device_limit)
+    for device_limit in sorted(groups.keys()):
+        label = get_tariff_group_name(device_limit)
         builder.button(
             text=label,
-            callback_data=f"admin_sub_grant_tariff:{telegram_id}:{tariff.id}",
+            callback_data=f"admin_sub_grant_group:{telegram_id}:{device_limit}",
         )
     builder.button(text="← Назад", callback_data=f"admin_subscription:{telegram_id}")
     builder.adjust(1)
@@ -99,7 +110,7 @@ def get_admin_grant_days_keyboard(
     )
     builder.button(
         text="← Назад",
-        callback_data=f"admin_sub_grant_tariff:{telegram_id}:{tariff_id}",
+        callback_data=f"admin_subscription:{telegram_id}",
     )
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
