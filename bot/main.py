@@ -6,8 +6,15 @@ from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuBu
 from aiogram.utils.chat_action import ChatActionMiddleware
 from cryptography.fernet import Fernet
 from aiohttp import web
+
 from bot import texts
-from bot.middlewares import DBSessionMiddleware, ThrottlingMiddleware, UserContextMiddleware, CleanChatMiddleware
+from bot.middlewares import (
+    DBSessionMiddleware,
+    ThrottlingMiddleware,
+    UserContextMiddleware,
+    CleanChatMiddleware,
+    ActionLockMiddleware,
+)
 from config.settings import get_settings
 from database.connection import close_db, init_db
 from services.amnezia_client import close_http_session
@@ -24,13 +31,15 @@ logger = logging.getLogger(__name__)
 async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     """Глобальный обработчик ошибок с алертом админам"""
     import traceback
-    logger.critical(f"Unhandled exception: {event.exception}", exc_info=event.exception)
+    logger.critical("Unhandled exception: %s", event.exception, exc_info=event.exception)
+
     state = kwargs.get("state")
     if state:
         try:
             await state.clear()
         except Exception:
             pass
+
     # 🔥 НОВОЕ: Отправка traceback админам
     try:
         settings = get_settings()
@@ -45,7 +54,8 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             except Exception:
                 pass
     except Exception as e:
-        logger.error(f"Failed to send error alert: {e}")
+        logger.error("Failed to send error alert: %s", e)
+
     try:
         if event.update.callback_query:
             await event.update.callback_query.answer(
@@ -57,6 +67,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             )
     except Exception:
         pass
+
     return True
 
 
@@ -74,14 +85,31 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     """Создаёт и настраивает bot + dispatcher"""
     bot = Bot(token=get_settings().BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
+
+    # ── Порядок middleware КРИТИЧЕН ──
+    # 1. DBSession — нужен всем (создаёт сессию БД)
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
+
+    # 2. CleanChat — удаляет сообщения пользователя (SMH)
     dp.message.middleware(CleanChatMiddleware())
+
+    # 3. UserContext — загружает User из БД в data["db_user"]
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
+
+    # 4. Throttling — глобальный rate limit 0.3с + action_type 2.0с
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
+
+    # 5. ActionLock — эксклюзивная блокировка тяжёлых действий (НОВОЕ)
+    # Ставится ПОСЛЕ Throttling: если throttling отсёк запрос,
+    # action lock не тратит ресурсы на проверку
+    dp.callback_query.middleware(ActionLockMiddleware())
+
+    # 6. ChatAction — показывает "typing..." / "uploading..."
     dp.message.middleware(ChatActionMiddleware())
+
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
     from bot.handlers.admin.dashboard import router as admin_dashboard_router
     from bot.handlers.admin.servers import router as admin_servers_router
@@ -93,6 +121,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     from bot.handlers.profile import router as profile_router
     from bot.handlers.start import router as start_router
     from bot.handlers.support import router as support_router
+
     for r in [
         start_router, profile_router, connection_router, support_router,
         payment_router, admin_dashboard_router, admin_users_router,
@@ -100,6 +129,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
         fallback_router,
     ]:
         dp.include_router(r)
+
     dp.errors.register(global_error_handler)
     await setup_bot_commands(bot)
     return bot, dp
@@ -113,22 +143,25 @@ async def start_webhook_server(port: int):
     # 🔥 ИСПРАВЛЕНО: Слушаем только localhost, Nginx проксирует сюда
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
-    logger.info(f"Webhook server started on 127.0.0.1:{port}")
+    logger.info("Webhook server started on 127.0.0.1:%d", port)
     return runner
 
 
 async def main():
     """Главная функция запуска"""
     settings = get_settings()
+
     try:
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
+
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
-            logger.critical(f"❌ DB_ENCRYPTION_KEY невалиден: {e}")
+            logger.critical("❌ DB_ENCRYPTION_KEY невалиден: %s", e)
             return
+
         logger.info("Инициализация БД...")
         await init_db()
 
@@ -138,21 +171,25 @@ async def main():
         # Для single-worker это acceptable risk:
         # - DB unique constraint на peer_id защищает от дубликатов устройств
         # - ThrottlingMiddleware защищает от double-click
-        # - Пользователь может случайно создать дубликат только в первые 100мс после рестарта
+        # - ActionLockMiddleware защищает от параллельных тяжёлых действий
         logger.info(
             "🔄 Bot started — all in-memory operation locks cleared (restart). "
-            "DB unique constraints protect against duplicates."
+            "DB unique constraints + ActionLockMiddleware protect against duplicates."
         )
 
         bot, dp = await setup_bot()
+
         webhook_runner = None
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
             webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
+
         await start_background_worker(bot)
+
         logger.info("Запуск polling...")
         await dp.start_polling(bot)
+
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        logger.error("Критическая ошибка: %s", e, exc_info=True)
     finally:
         if 'webhook_runner' in locals() and webhook_runner:
             await webhook_runner.cleanup()
