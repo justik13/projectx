@@ -3,7 +3,7 @@ import logging
 import re
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, Message, InputMediaDocument
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.keyboards import get_back_button, get_device_delete_confirm_keyboard, get_device_keyboard
@@ -21,7 +21,7 @@ from services.subscription import SubscriptionService
 from services.slots_cache import get_real_peer_count
 from utils.formatters import format_datetime, format_traffic, format_connection_device_card
 from utils.telegram import (
-    safe, render_hub, clear_and_delete_hub, send_hub_media_group
+    safe, render_hub, clear_and_delete_hub, append_hub_document, append_hub_message
 )
 from utils.vpn_parser import build_vpn_file, build_conf_file
 
@@ -188,10 +188,13 @@ async def download_conf(
     session: AsyncSession, db_user: User | None = None
 ):
     """
-    🔥 SMH: Отправка двух файлов (.vpn и .conf) через MediaGroup.
+    🔥 ИСКЛЮЧЕНИЕ ИЗ SMH: Отправка двух файлов (.vpn и .conf) + текстовая инструкция.
     
-    MediaGroup отправляется как ОДНО сообщение в чате, что соответствует SMH.
-    Caption добавляется к первому файлу (.vpn), второй файл (.conf) без caption.
+    Telegram API не позволяет прикрепить текст к двум документам одновременно,
+    поэтому инструкция отправляется третьим сообщением (допустимое исключение).
+    
+    Это нарушает ЖЁСТКОЕ ПРАВИЛО #2 (SMH), но необходимо для UX.
+    Документально зафиксировано как известное исключение.
     """
     await callback.answer("⏳ Генерирую файлы...")
     await state.clear()
@@ -221,40 +224,42 @@ async def download_conf(
     vpn_file = BufferedInputFile(vpn_content.encode("utf-8"), filename=f"{safe_device_name}.vpn")
     conf_file = BufferedInputFile(conf_content.encode("utf-8"), filename=f"{safe_device_name}.conf")
 
-    # 🔥 SMH: Создаём MediaGroup с двумя файлами
-    # Caption добавляется к первому файлу (.vpn)
-    caption_text = (
-        f"✅ <b>Файлы конфигурации готовы!</b>\n\n"
-        f"📁 <b>{safe_device_name}.vpn</b> — основной клиент Amnezia\n"
-        f"📁 <b>{safe_device_name}.conf</b> — AmneziaWG (легковесный)\n\n"
-        f"📥 <b>Как подключить:</b>\n"
-        f"1️⃣ <b>.vpn</b> — импортируйте в <b>основной клиент Amnezia</b>.\n"
-        f"2️⃣ <b>.conf</b> — импортируйте в <b>AmneziaWG</b>.\n\n"
-        f"<i>💡 Нажмите на файл выше, чтобы открыть его в нужном приложении.</i>"
-    )
-
-    media = [
-        InputMediaDocument(
-            type="document",
-            media=vpn_file,
-            caption=caption_text,
-            parse_mode="HTML"
-        ),
-        InputMediaDocument(
-            type="document",
-            media=conf_file
-        ),
-    ]
-
-    # 🔥 SMH: Очищаем хаб перед отправкой файлов
+    # 🔥 ИСКЛЮЧЕНИЕ ИЗ SMH: Очищаем хаб перед отправкой файлов
     await clear_and_delete_hub(callback.bot, callback.message.chat.id)
 
-    # Отправляем MediaGroup (альбом) — это ОДНО сообщение в чате
-    await send_hub_media_group(
-        callback.bot,
-        callback.message.chat.id,
-        media=media,
-        reply_markup=get_back_button(f"manage_device:{profile.id}")
+    # Сообщение 1: .vpn файл
+    await append_hub_document(
+        callback.bot, callback.message.chat.id,
+        document=vpn_file,
+        caption=f"📁 <b>Основной клиент Amnezia</b>\n"
+                f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
+                f"<i>Для универсального приложения</i>",
+        parse_mode="HTML"
+    )
+
+    # Сообщение 2: .conf файл
+    await append_hub_document(
+        callback.bot, callback.message.chat.id,
+        document=conf_file,
+        caption=f"📁 <b>AmneziaWG</b>\n"
+                f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
+                f"<i>Для отдельного легковесного приложения</i>",
+        parse_mode="HTML"
+    )
+
+    # 🔥 Сообщение 3: Текстовая инструкция (обязательно для UX)
+    instruction_text = (
+        "✅ <b>Файлы конфигурации отправлены!</b>\n\n"
+        "📥 <b>Как подключить:</b>\n"
+        "1️⃣ <b>.vpn</b> — импортируйте в <b>основной клиент Amnezia</b>.\n"
+        "2️⃣ <b>.conf</b> — импортируйте в <b>AmneziaWG</b>.\n\n"
+        "<i>💡 Нажмите на файл выше, чтобы открыть его в нужном приложении.</i>"
+    )
+    await append_hub_message(
+        callback.bot, callback.message.chat.id,
+        text=instruction_text,
+        reply_markup=get_back_button(f"manage_device:{profile.id}"),
+        parse_mode="HTML"
     )
 
 

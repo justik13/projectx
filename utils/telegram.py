@@ -3,7 +3,7 @@ import html
 import logging
 from typing import Optional, List
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
-from aiogram.types import InlineKeyboardMarkup, InputFile, InputMediaDocument
+from aiogram.types import InlineKeyboardMarkup, InputFile
 from cachetools import TTLCache
 from bot.constants import HUB_CACHE_MAX_SIZE, HUB_CACHE_TTL
 
@@ -146,52 +146,69 @@ async def send_hub_invoice(bot, chat_id: int, reply_markup: Optional[InlineKeybo
     return msg.message_id
 
 
-async def send_hub_media_group(
-    bot, 
-    chat_id: int, 
-    media: List[InputMediaDocument], 
-    reply_markup: InlineKeyboardMarkup = None,
-) -> List[int]:
+async def append_hub_document(bot, chat_id: int, document: InputFile, caption: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
     """
-    🔥 SMH-СОВМЕСТИМАЯ ФУНКЦИЯ: Отправляет альбом (MediaGroup) с файлами.
+    🔥 ИСКЛЮЧЕНИЕ ИЗ SMH: Отправляет документ и ДОБАВЛЯЕТ его в текущий хаб.
     
-    MediaGroup отправляется как ОДНО сообщение в чате, что соответствует SMH.
-    Caption можно добавить к первому файлу в списке media.
+    Используется для отправки нескольких файлов подряд (например, .vpn и .conf).
+    Это нарушение SMH, но Telegram API не позволяет прикрепить текст к нескольким документам.
     
     Args:
         bot: Экземпляр бота
         chat_id: ID чата
-        media: Список InputMediaDocument (2-10 файлов)
-        reply_markup: Inline клавиатура (добавляется к сообщению)
+        document: Файл для отправки
+        caption: Подпись к файлу
+        reply_markup: Inline клавиатура
+        parse_mode: Режим парсинга (HTML)
     
     Returns:
-        List[int]: Список message_id отправленных файлов (все в одном сообщении)
-    
-    Пример использования:
-        media = [
-            InputMediaDocument(type="document", media=vpn_file, caption="Основной клиент"),
-            InputMediaDocument(type="document", media=conf_file),
-        ]
-        msg_ids = await send_hub_media_group(bot, chat_id, media, reply_markup=kb)
+        int: message_id отправленного документа
     """
     _maybe_cleanup_cache()
-    cached = _hub_cache.get(chat_id)
-    if cached and "ids" in cached:
-        # Удаляем предыдущий хаб
-        await _safe_delete_batch(bot, chat_id, cached["ids"])
-    
-    # Отправляем MediaGroup
-    messages = await bot.send_media_group(
-        chat_id=chat_id,
-        media=media,
-        reply_markup=reply_markup,
+    msg = await bot.send_document(
+        chat_id=chat_id, document=document, caption=caption,
+        reply_markup=reply_markup, parse_mode=parse_mode
     )
     
-    # Все message_id из альбома добавляем в кэш
-    msg_ids = [msg.message_id for msg in messages]
-    _hub_cache[chat_id] = {"ids": msg_ids}
+    cached = _hub_cache.get(chat_id)
+    if cached and "ids" in cached:
+        cached["ids"].append(msg.message_id)
+    else:
+        _hub_cache[chat_id] = {"ids": [msg.message_id]}
     
-    return msg_ids
+    return msg.message_id
+
+
+async def append_hub_message(bot, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML") -> int:
+    """
+    🔥 ИСКЛЮЧЕНИЕ ИЗ SMH: Отправляет текстовое сообщение и ДОБАВЛЯЕТ его в текущий хаб.
+    
+    Используется после отправки нескольких файлов для добавления инструкции.
+    Это нарушение SMH, но необходимо для UX.
+    
+    Args:
+        bot: Экземпляр бота
+        chat_id: ID чата
+        text: Текст сообщения
+        reply_markup: Inline клавиатура
+        parse_mode: Режим парсинга (HTML)
+    
+    Returns:
+        int: message_id отправленного сообщения
+    """
+    _maybe_cleanup_cache()
+    msg = await bot.send_message(
+        chat_id=chat_id, text=text,
+        reply_markup=reply_markup, parse_mode=parse_mode
+    )
+    
+    cached = _hub_cache.get(chat_id)
+    if cached and "ids" in cached:
+        cached["ids"].append(msg.message_id)
+    else:
+        _hub_cache[chat_id] = {"ids": [msg.message_id]}
+    
+    return msg.message_id
 
 
 def clear_hub_cache(chat_id: int) -> None:
