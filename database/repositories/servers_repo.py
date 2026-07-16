@@ -4,6 +4,7 @@ from database.models import Server, VPNProfile
 from services.slots_cache import get_real_peer_count
 from typing import Optional, List, TypedDict
 
+
 # 🔥 ИСПРАВЛЕНО: TypedDict для типизации update kwargs
 class ServerUpdateFields(TypedDict, total=False):
     name: str
@@ -13,6 +14,7 @@ class ServerUpdateFields(TypedDict, total=False):
     protocol: str
     max_clients: int
     is_active: bool
+
 
 # 🔥 ИСПРАВЛЕНО: Поля, которые нельзя обновлять через update_server
 PROTECTED_SERVER_FIELDS = {"id", "api_key", "created_at"}
@@ -31,8 +33,17 @@ async def get_active_servers(session: AsyncSession) -> List[Server]:
 
 
 async def get_available_servers(session: AsyncSession) -> List[Server]:
+    """
+    Возвращает список активных серверов, на которых есть свободные слоты.
+    🔥 ИСПРАВЛЕНО #12: Фильтр is_active == True в первом запросе (до COUNT).
+    Раньше: считали профили для ВСЕХ серверов, включая неактивные.
+    Теперь: считаем только для активных → меньше нагрузка на БД.
+    """
+    # 🔥 ИСПРАВЛЕНО #12: Подсчёт профилей ТОЛЬКО для активных серверов
     stmt_counts = (
         select(VPNProfile.server_id, func.count(VPNProfile.id).label('profile_count'))
+        .join(Server, VPNProfile.server_id == Server.id)
+        .where(Server.is_active == True)
         .group_by(VPNProfile.server_id)
     )
     counts_result = await session.execute(stmt_counts)
@@ -91,7 +102,6 @@ async def update_server(
             continue
         if hasattr(server, key):
             setattr(server, key, value)
-
     await session.flush()
     await session.refresh(server)
     return server
@@ -107,37 +117,27 @@ async def get_total_free_ips(session: AsyncSession) -> int:
     """
     🔥 ИСПРАВЛЕНО: Использует кэш из slots_cache.py для точности.
     Учитывает клиентов, созданных вне бота (через API напрямую).
-    
-    Логика:
-    1. Получаем все активные серверы
-    2. Для каждого сервера получаем реальное количество пиров через кэш
-    3. Считаем: сумма(max_clients) - сумма(real_peer_count)
-    
-    Кэш обновляется каждые 5 минут, поэтому данные могут быть устаревшими на 5 минут.
-    Для dashboard это допустимо (не критично).
     """
     active_servers = await get_active_servers(session)
     if not active_servers:
         return 0
-    
+
     total_free = 0
     for server in active_servers:
         # Используем кэш (без force_refresh для производительности)
         real_count = await get_real_peer_count(server, force_refresh=False)
-        
         if real_count == -1:
             # API недоступен — используем данные из БД как fallback
-            # Это неточно, но лучше чем ничего
             stmt = select(func.count(VPNProfile.id)).where(
                 VPNProfile.server_id == server.id
             )
             result = await session.execute(stmt)
             db_count = result.scalar_one() or 0
             real_count = db_count
-        
+
         free_slots = server.max_clients - real_count
         total_free += max(0, free_slots)
-    
+
     return total_free
 
 

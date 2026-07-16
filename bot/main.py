@@ -25,7 +25,6 @@ from services.workers import start_background_workers, shutdown_event
 from bot.handlers.webhook import setup_webhook_routes
 
 # 🔥 ИСПРАВЛЕНО #10: Формат логов с request_id
-# [2026-07-16 14:30:00] [INFO] [abc12345] bot.main: message
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - [%(request_id)s] %(name)s: %(message)s",
@@ -33,13 +32,8 @@ logging.basicConfig(
 )
 
 # 🔥 ИСПРАВЛЕНО #10: Добавляем CorrelationFilter в корневой logger
-# Это гарантирует, что ВСЕ логи (включая aiohttp, sqlalchemy, aiogram)
-# будут иметь request_id в формате.
 root_logger = logging.getLogger()
 root_logger.addFilter(CorrelationFilter())
-
-# Также добавляем filter в каждый уже созданный logger
-# (на случай если они были созданы до addFilter)
 for handler in root_logger.handlers:
     handler.addFilter(CorrelationFilter())
 
@@ -50,7 +44,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     """Глобальный обработчик ошибок с алертом админам"""
     import traceback
     from bot.middlewares.correlation import get_current_request_id
-    
+
     request_id = get_current_request_id()
     logger.critical(
         "[%s] Unhandled exception: %s",
@@ -58,7 +52,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         event.exception,
         exc_info=event.exception,
     )
-    
+
     state = kwargs.get("state")
     if state:
         try:
@@ -66,7 +60,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         except Exception:
             pass
 
-    # 🔥 ИСПРАВЛЕНО #10: request_id включён в traceback для админов
     try:
         settings = get_settings()
         error_traceback = traceback.format_exc(limit=15)
@@ -94,6 +87,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             )
     except Exception:
         pass
+
     return True
 
 
@@ -114,7 +108,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
     # ── Порядок middleware КРИТИЧЕН ──
     # 🔥 ИСПРАВЛЕНО #10: CorrelationMiddleware ПЕРВЫМ
-    # Генерирует request_id для всех последующих middleware и handler'ов
     dp.message.middleware(CorrelationMiddleware())
     dp.callback_query.middleware(CorrelationMiddleware())
 
@@ -134,8 +127,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
 
     # 5. ActionLock — эксклюзивная блокировка тяжёлых действий
-    # Ставится ПОСЛЕ Throttling: если throttling отсёк запрос,
-    # action lock не тратит ресурсы на проверку
     dp.callback_query.middleware(ActionLockMiddleware())
 
     # 6. ChatAction — показывает "typing..." / "uploading..."
@@ -164,7 +155,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp.errors.register(global_error_handler)
 
     await setup_bot_commands(bot)
-
     return bot, dp
 
 
@@ -180,6 +170,35 @@ async def start_webhook_server(port: int):
     return runner
 
 
+def _validate_platega_config() -> bool:
+    """
+    🔥 ИСПРАВЛЕНО #14: Проверка конфигурации Platega при старте.
+    Если Platega включена (есть merchant_id), но secret пустой —
+    webhook будет принимать ЛЮБЫЕ запросы (пустая строка == пустая строка).
+    Это критическая уязвимость — бот не должен запускаться.
+    """
+    settings = get_settings()
+    has_merchant = bool(settings.PLATEGA_MERCHANT_ID.strip())
+    has_secret = bool(settings.PLATEGA_SECRET.strip())
+
+    if has_merchant and not has_secret:
+        logger.critical(
+            "❌ PLATEGA_MERCHANT_ID задан, но PLATEGA_SECRET пуст! "
+            "Webhook будет принимать поддельные запросы. "
+            "Укажите PLATEGA_SECRET в .env или удалите PLATEGA_MERCHANT_ID."
+        )
+        return False
+
+    if has_secret and not has_merchant:
+        logger.critical(
+            "❌ PLATEGA_SECRET задан, но PLATEGA_MERCHANT_ID пуст! "
+            "Укажите оба параметра или удалите оба."
+        )
+        return False
+
+    return True
+
+
 async def main():
     """Главная функция запуска"""
     settings = get_settings()
@@ -188,10 +207,15 @@ async def main():
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
+
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
             logger.critical("❌ DB_ENCRYPTION_KEY невалиден: %s", e)
+            return
+
+        # 🔥 ИСПРАВЛЕНО #14: Проверка конфигурации Platega ДО запуска
+        if not _validate_platega_config():
             return
 
         logger.info("Инициализация БД...")
@@ -209,18 +233,16 @@ async def main():
             webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
 
         # 🔥 ИСПРАВЛЕНО #5: Graceful shutdown
-        # Регистрируем signal handlers ДО запуска polling
         loop = asyncio.get_running_loop()
-        
+
         def _signal_handler():
             logger.info("Received shutdown signal (SIGTERM/SIGINT)")
             shutdown_event.set()
-        
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(sig, _signal_handler)
             except NotImplementedError:
-                # Windows не поддерживает add_signal_handler
                 pass
 
         # Запускаем background workers
@@ -230,9 +252,8 @@ async def main():
         polling_task = asyncio.create_task(dp.start_polling(bot))
 
         # 🔥 ИСПРАВЛЕНО #5: Ждём либо shutdown signal, либо завершение polling
-        # (polling может завершиться при ошибке)
         shutdown_task = asyncio.create_task(shutdown_event.wait())
-        
+
         done, pending = await asyncio.wait(
             [polling_task, shutdown_task],
             return_when=asyncio.FIRST_COMPLETED,
@@ -250,11 +271,9 @@ async def main():
 
     except Exception as e:
         logger.error("Критическая ошибка: %s", e, exc_info=True)
+
     finally:
-        # 🔥 ИСПРАВЛЕНО #5: Graceful shutdown — ждём завершения workers
         logger.info("Waiting for background workers to finish...")
-        
-        # Даём workers максимум 10 секунд на завершение
         if 'worker_tasks' in locals():
             done, pending = await asyncio.wait(
                 worker_tasks,
@@ -267,12 +286,13 @@ async def main():
                     await task
                 except asyncio.CancelledError:
                     pass
-        
+
         logger.info("Cleaning up resources...")
         if 'webhook_runner' in locals() and webhook_runner:
             await webhook_runner.cleanup()
         await close_http_session()
         await close_db()
+
         logger.info("Работа бота завершена")
 
 

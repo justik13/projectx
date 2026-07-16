@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from database.repositories.payments_repo import get_user_payments, get_payment_by_id
 from database.models import Payment
 from services.subscription import SubscriptionService
@@ -22,14 +23,9 @@ class PaymentService:
     ) -> bool:
         """
         Обрабатывает успешную оплату. Возвращает True при успехе.
-        
+
         🔥 ИСПРАВЛЕНО #16: Referral bonus logic
-        Раньше: is_first_payment = len(completed_payments) == 1
-        Проблема: если первая оплата была Stars (failed), а вторая SBP (completed),
-        бонус начислялся только за SBP. Если первая failed, вторая completed — бонус начислялся.
-        
-        Теперь: is_first_payment проверяется по paid_at IS NOT NULL.
-        Это корректно определяет "первая УСПЕШНАЯ оплата".
+        is_first_payment проверяется по paid_at IS NOT NULL.
         """
         try:
             async with session.begin_nested() as savepoint:
@@ -42,6 +38,7 @@ class PaymentService:
                     )
                 )
                 result = await session.execute(stmt)
+
                 if result.rowcount == 0:
                     await savepoint.commit()
                     return True
@@ -61,6 +58,7 @@ class PaymentService:
                     return False
 
                 new_device_limit = getattr(tariff, 'device_limit', user.device_limit)
+
                 try:
                     await SubscriptionService.extend_subscription(
                         session, user.telegram_id, tariff.duration_days,
@@ -77,7 +75,6 @@ class PaymentService:
 
                 # 🔥 ИСПРАВЛЕНО #16: Проверка по paid_at IS NOT NULL
                 payments = await get_user_payments(session, user.id)
-                # Считаем только платежи с paid_at != None (успешные оплаты)
                 successful_payments = [p for p in payments if p.paid_at is not None]
                 is_first_payment = len(successful_payments) == 1
 
@@ -120,8 +117,8 @@ class PaymentService:
         amount: float, telegram_id: int, bot_username: str
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
-        settings = get_settings()
 
+        settings = get_settings()
         payment = await create_payment(
             session=session, user_id=user_id, tariff_id=tariff_id,
             amount=int(amount), currency="RUB"
@@ -142,12 +139,24 @@ class PaymentService:
         if not transaction:
             payment.status = "failed"
             await session.commit()
+
+            # 🔥 ИСПРАВЛЕНО #11: Аудит-лог для failed платежа
+            try:
+                await AuditService.log_action(
+                    session, admin_id=0, action="PAYMENT_FAILED",
+                    target_type="Payment", target_id=payment.id,
+                    details=f"user={user_id}, amount={amount} RUB, Platega create_transaction failed"
+                )
+            except Exception as e:
+                logger.error(f"Failed to log payment failure to audit: {e}")
+
             return payment, None
 
         payment.external_id = transaction.get("transactionId")
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get("paymentMethod", "SBPQR")
         await session.commit()
+
         return payment, None
 
     @staticmethod
@@ -155,6 +164,7 @@ class PaymentService:
         session: AsyncSession, transaction_id: str,
         status: str, payload: str
     ) -> tuple[bool, str]:
+
         stmt = (
             select(Payment)
             .options(selectinload(Payment.user), selectinload(Payment.tariff))
@@ -177,33 +187,41 @@ class PaymentService:
             if payment.status == "cancelled":
                 logger.info(f"Platega callback: payment {payment.id} already cancelled")
                 return True, "already_processed"
+
             payment.status = "cancelled"
             await session.commit()
+
+            # 🔥 ИСПРАВЛЕНО #11: Аудит-лог для cancelled платежа
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_CANCELLED",
                     target_type="Payment", target_id=payment.id,
-                    details=f"Platega callback: transaction={transaction_id}"
+                    details=f"Platega callback: transaction={transaction_id}, user={payment.user_id}"
                 )
             except Exception as e:
                 logger.error(f"Failed to log payment cancellation to audit: {e}")
+
             return True, "success"
 
         elif status == "CHARGEBACKED":
             if payment.status == "refunded":
                 logger.info(f"Platega callback: payment {payment.id} already refunded")
                 return True, "already_processed"
+
             payment.status = "refunded"
             await session.commit()
+
             logger.warning(f"Chargeback for payment {payment.id}")
+
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_CHARGEBACK",
                     target_type="Payment", target_id=payment.id,
-                    details=f"Platega chargeback: transaction={transaction_id}"
+                    details=f"Platega chargeback: transaction={transaction_id}, user={payment.user_id}"
                 )
             except Exception as e:
                 logger.error(f"Failed to log chargeback to audit: {e}")
+
             return True, "success"
 
         logger.warning(f"Unknown Platega status: {status}")
@@ -214,6 +232,7 @@ class PaymentService:
         payment = await get_payment_by_id(session, payment_id)
         if not payment or not payment.external_id:
             return False
+
         if payment.status != "pending":
             return payment.status == "completed"
 
@@ -228,5 +247,17 @@ class PaymentService:
         elif status == "CANCELED":
             payment.status = "cancelled"
             await session.commit()
+
+            # 🔥 ИСПРАВЛЕНО #11: Аудит-лог для cancelled при ручном чеке
+            try:
+                await AuditService.log_action(
+                    session, admin_id=0, action="PAYMENT_CANCELLED",
+                    target_type="Payment", target_id=payment.id,
+                    details=f"check_platega_payment: status=CANCELED, user={payment.user_id}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to log payment cancellation to audit: {e}")
+
             return False
+
         return False
