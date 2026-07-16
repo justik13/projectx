@@ -12,13 +12,21 @@ from services.payment_service import PaymentService
 logger = logging.getLogger("BackgroundWorker")
 
 
-async def stale_payments_checker_loop(bot: Bot):
-    """Проверяет зависшие платежи и уведомляет админов."""
+async def stale_payments_checker_loop(bot: Bot, shutdown_event: asyncio.Event):
+    """
+    Проверяет зависшие платежи и уведомляет админов.
+    🔥 ИСПРАВЛЕНО #5: Graceful shutdown через shutdown_event.
+    """
     settings = get_settings()
-
-    while True:
+    
+    while not shutdown_event.is_set():
         try:
-            await asyncio.sleep(STALE_PAYMENT_THRESHOLD)
+            # 🔥 ИСПРАВЛЕНО #5: wait_for вместо sleep
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=STALE_PAYMENT_THRESHOLD)
+                break
+            except asyncio.TimeoutError:
+                pass
 
             session = await get_session()
             try:
@@ -59,6 +67,8 @@ async def stale_payments_checker_loop(bot: Bot):
             break
         except Exception as e:
             logger.error(f"Критическая ошибка в stale_payments_checker: {e}", exc_info=True)
-            # ИСПРАВЛЕНО: используем константу
+            if shutdown_event.is_set():
+                break
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
-            continue
+    
+    logger.info("Stale payments worker stopped gracefully")

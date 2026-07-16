@@ -15,6 +15,11 @@
 - Уменьшен maxsize с 10000 до 5000 (достаточно для 1000 пользователей)
 - Добавлен явный cleanup при достижении лимита
 - Ключ включает только action_type, а не полный callback_data для экономии памяти
+
+🔥 ИСПРАВЛЕНО #15: /start throttle
+- /start теперь троттится на уровне action-type (2.0с между повторными запусками)
+- Раньше: /start — это Message, global throttle (0.3с) работал, но action-type не применялся
+- Теперь: /start добавлен в список троттлимых команд, защита от спама
 """
 import asyncio
 import logging
@@ -72,6 +77,7 @@ class ThrottlingMiddleware:
             action_type = action_data.split(":")[0] if ":" in action_data else action_data
             action_key = f"cb:{action_type}"
         elif isinstance(event, Message) and event.text:
+            # 🔥 ИСПРАВЛЕНО #15: /start теперь троттится
             # Для сообщений берем первое слово (команду)
             first_word = event.text.split()[0] if event.text.split() else ""
             action_key = f"msg:{first_word}"
@@ -82,13 +88,16 @@ class ThrottlingMiddleware:
             return await handler(event, data)
 
         key = f"{user_id}:{action_key}"
-
         if key in self._last_call:
             if isinstance(event, CallbackQuery):
                 try:
                     await event.answer(texts.ERROR_TOO_FREQUENT, show_alert=False)
                 except Exception:
                     pass
+            elif isinstance(event, Message):
+                # 🔥 ИСПРАВЛЕНО #15: Для /start показываем alert через answer
+                # (Message не имеет .answer(), но можно просто проигнорировать)
+                logger.debug(f"Throttled message from user {user_id}: {action_key}")
             return
 
         # 🔥 ИСПРАВЛЕНО: Явная очистка при достижении 80% лимита

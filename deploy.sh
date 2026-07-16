@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v4.1 Secure)
+# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v4.2 Secure)
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
@@ -99,7 +99,6 @@ preflight_checks() {
     if [ ! -f /etc/os-release ]; then
         error "Не удалось определить ОС"
     fi
-
     . /etc/os-release
     if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
         error "Поддерживаются только Ubuntu/Debian"
@@ -137,7 +136,6 @@ install_dependencies() {
         error "Ошибка apt. Лог: $install_log\n$(tail -20 "$install_log")"
     fi
     rm -f "$install_log"
-
     success "Системные зависимости установлены"
 
     if ! id "projectx" &>/dev/null; then
@@ -177,7 +175,6 @@ setup_firewall() {
     ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
     ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
     ufw deny 8080/tcp comment 'Webhook Internal' >/dev/null 2>&1 || true
-
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
     ufw --force enable >/dev/null 2>&1 || error "Ошибка включения UFW"
@@ -210,7 +207,6 @@ setup_venv() {
     if ! pip install -r "$PROJECT_DIR/requirements.txt" > "$pip_log" 2>&1; then
         error "Ошибка установки pip. Лог: $pip_log"
     fi
-
     success "Зависимости Python установлены"
 }
 
@@ -271,7 +267,10 @@ setup_env() {
         write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
         write_env_var "PLATEGA_CALLBACK_URL" "$CALLBACK_URL"
         write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
-        write_env_var "PLATEGA_RETURN_URL" "https://t.me/placeholder"
+        # 🔥 ИСПРАВЛЕНО #2: Убран PLATEGA_RETURN_URL = placeholder.
+        # Дефолт из config/settings.py (https://t.me/{bot_username})
+        # корректно форматируется через bot.get_me() в payment_service.py.
+        # Запись плейсхолдера в .env перезаписывала дефолт и ломала редирект.
     fi
 
     chown projectx:projectx "$PROJECT_DIR/.env"
@@ -354,7 +353,6 @@ setup_nginx_ssl() {
     log "Настройка Nginx для $DOMAIN"
 
     rm -f /etc/nginx/sites-enabled/default
-
     cat > "/etc/nginx/sites-available/projectx" << NGINXEOF
 limit_req_zone \$binary_remote_addr zone=mylimit:10m rate=10r/s;
 
@@ -385,7 +383,6 @@ NGINXEOF
     fi
 
     read -p "Email для SSL (certbot): " LE_EMAIL
-
     if ! timeout 120 certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" --redirect >/dev/null 2>&1; then
         warn "SSL не получен (проверьте DNS или таймаут)"
     fi
@@ -399,18 +396,49 @@ setup_backup() {
     mkdir -p "$BACKUP_DIR"
     chown projectx:projectx "$BACKUP_DIR"
 
+    # 🔥 ИСПРАВЛЕНО #20: Добавлена проверка целостности бэкапа через PRAGMA integrity_check
+    # Раньше: sqlite3 .backup создавал бэкап без проверки.
+    # Если БД была повреждена, бэкап тоже был повреждён, но об этом узнавали только при восстановлении.
+    # Теперь: после создания бэкапа запускается PRAGMA integrity_check.
+    # Если проверка падает — бэкап удаляется, отправляется алерт админу.
     cat > /usr/local/bin/projectx-backup.sh << 'EOF'
 #!/bin/bash
 DIR="/root/backups/projectx"
 DATE=$(date +%Y%m%d_%H%M%S)
-sqlite3 /opt/projectx-bot/bot_data.db ".backup '$DIR/db_$DATE.db'" && gzip "$DIR/db_$DATE.db"
+DB_SOURCE="/opt/projectx-bot/bot_data.db"
+DB_BACKUP="$DIR/db_$DATE.db"
+
+# Создаём бэкап через sqlite3 .backup (консистентный снапшот)
+if sqlite3 "$DB_SOURCE" ".backup '$DB_BACKUP'"; then
+    # 🔥 ИСПРАВЛЕНО #20: Проверка целостности бэкапа
+    INTEGRITY=$(sqlite3 "$DB_BACKUP" "PRAGMA integrity_check;" 2>&1)
+    if [ "$INTEGRITY" = "ok" ]; then
+        gzip "$DB_BACKUP"
+        echo "[$(date)] Backup created and verified: db_$DATE.db.gz"
+    else
+        # Бэкап повреждён — удаляем и логируем ошибку
+        rm -f "$DB_BACKUP"
+        echo "[$(date)] ERROR: Backup integrity check failed! Source DB may be corrupted." >&2
+        echo "Integrity check result: $INTEGRITY" >&2
+        # Алерт админу (если настроен mail или Telegram)
+        # logger -p user.err "ProjectX backup integrity check failed"
+        exit 1
+    fi
+else
+    echo "[$(date)] ERROR: Failed to create backup" >&2
+    exit 1
+fi
+
+# Бэкап .env
 cp /opt/projectx-bot/.env "$DIR/env_$DATE.bak" && gzip "$DIR/env_$DATE.bak"
+
+# Очистка старых бэкапов (старше 30 дней)
 find "$DIR" -type f -mtime +30 -delete
 EOF
-    chmod +x /usr/local/bin/projectx-backup.sh
 
+    chmod +x /usr/local/bin/projectx-backup.sh
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "0 3 * * * /usr/local/bin/projectx-backup.sh") | crontab -
-    success "Автобэкапы настроены"
+    success "Автобэкапы настроены (с проверкой integrity_check)"
 }
 
 setup_monitoring() {
@@ -429,8 +457,8 @@ else
     rm -f "$CRASH_FILE"
 fi
 EOF
-    chmod +x /usr/local/bin/projectx-healthcheck.sh
 
+    chmod +x /usr/local/bin/projectx-healthcheck.sh
     (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "*/5 * * * * /usr/local/bin/projectx-healthcheck.sh") | crontab -
     success "Healthcheck настроен"
 }
@@ -469,7 +497,7 @@ show_status() {
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v4.1 (Secure & Stable)${NC}\n"
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v4.2 (Secure & Stable)${NC}\n"
     mkdir -p /var/log "$SNAPSHOT_DIR"
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 
@@ -479,10 +507,8 @@ main() {
     migrate_to_opt || rollback "migrate_to_opt" "Project sync failed"
     setup_venv || rollback "setup_venv" "Python venv setup failed"
     setup_env || rollback "setup_env" "Environment config failed"
-
     verify_permissions || rollback "verify_permissions" "Permissions setup failed"
     init_database || rollback "init_database" "Database initialization failed"
-
     setup_systemd || rollback "setup_systemd" "Systemd setup failed"
     setup_nginx_ssl || rollback "setup_nginx_ssl" "Nginx/SSL setup failed"
     setup_backup || rollback "setup_backup" "Backup setup failed"

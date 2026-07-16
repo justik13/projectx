@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class SubscriptionService:
+
     @staticmethod
     async def check_access(session: AsyncSession, telegram_id: int) -> bool:
         user = await get_user_by_telegram_id(session, telegram_id)
@@ -24,11 +25,6 @@ class SubscriptionService:
         username: str | None, first_name: str | None,
         ref_id: int | None = None
     ) -> User:
-        """
-        🔥 ИСПРАВЛЕНО: Защита от реферального абьюза.
-        referred_by устанавливается ТОЛЬКО при первом входе (создании пользователя).
-        Если пользователь уже существует — referred_by НЕ перезаписывается.
-        """
         user = await get_user_by_telegram_id(session, telegram_id)
         if user:
             return user
@@ -44,9 +40,7 @@ class SubscriptionService:
 
     @staticmethod
     async def extend_subscription(
-        session: AsyncSession,
-        telegram_id: int,
-        days: int,
+        session: AsyncSession, telegram_id: int, days: int,
         new_device_limit: Optional[int] = None,
         new_tariff_id: Optional[int] = None,
     ) -> Optional[User]:
@@ -70,14 +64,24 @@ class SubscriptionService:
         if new_tariff_id is not None:
             user.current_tariff_id = new_tariff_id
 
-        # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
-        # - Внутри begin_nested() (savepoint): не release savepoint преждевременно
-        # - Вне savepoint: update_user/create_audit_log всё равно делают commit()
         await session.flush()
         return user
 
     @staticmethod
     async def get_expires_timestamp(user: User) -> Optional[int]:
+        """
+        Возвращает Unix timestamp для expiresAt или None для бессрочного доступа.
+        
+        🔥 ИСПРАВЛЕНО #19: Логирование когда expiresAt=null отправляется в API.
+        Это нормально для «навсегда» подписок, но полезно для отладки.
+        """
         if not user.subscription_end or user.subscription_end.year >= 2100:
+            # 🔥 ИСПРАВЛЕНО #19: Явное логирование null expiresAt
+            logger.info(
+                f"get_expires_timestamp: user {user.telegram_id} has permanent subscription, "
+                f"sending expiresAt=null to API"
+            )
             return None
-        return int(user.subscription_end.replace(tzinfo=timezone.utc).timestamp())
+
+        expires_ts = int(user.subscription_end.replace(tzinfo=timezone.utc).timestamp())
+        return expires_ts

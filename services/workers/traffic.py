@@ -11,10 +11,23 @@ from bot.constants import TRAFFIC_SYNC_INTERVAL, WORKER_ERROR_SLEEP_INTERVAL
 logger = logging.getLogger("BackgroundWorker")
 
 
-async def traffic_sync_loop():
-    """Фоновый воркер синхронизации трафика."""
-    while True:
+async def traffic_sync_loop(shutdown_event: asyncio.Event):
+    """
+    Фоновый воркер синхронизации трафика.
+    🔥 ИСПРАВЛЕНО #5: Graceful shutdown через shutdown_event.
+    """
+    while not shutdown_event.is_set():
         try:
+            # 🔥 ИСПРАВЛЕНО #5: Используем wait_for с timeout вместо sleep
+            # Это позволяет быстро реагировать на shutdown (максимум 1с задержка)
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=TRAFFIC_SYNC_INTERVAL)
+                # Если дождались — shutdown запрошен, выходим
+                break
+            except asyncio.TimeoutError:
+                # Timeout — продолжаем работу
+                pass
+
             session = await get_session()
             try:
                 stmt = (
@@ -43,17 +56,14 @@ async def traffic_sync_loop():
                 await session.close()
 
             if not servers_map:
-                await asyncio.sleep(TRAFFIC_SYNC_INTERVAL)
                 continue
 
             async def _fetch_server_traffic(server_id, server_info):
                 client = AmneziaClient(server_info['api_url'], server_info['api_key'])
                 try:
-                    # ИСПРАВЛЕНО: теперь возвращает List[AmneziaClientListItem]
                     api_clients_list = await client.get_all_clients()
                     if api_clients_list is None:
                         return server_id, None
-                    # ИСПРАВЛЕНО: доступ через DTO атрибуты
                     return server_id, {c.id: c for c in api_clients_list}
                 except Exception as e:
                     logger.error(f"Ошибка трафика с {server_info['name']}: {e}")
@@ -71,9 +81,7 @@ async def traffic_sync_loop():
             for server_id, api_clients in api_data_by_server.items():
                 for p_dict in by_server[server_id]:
                     if p_dict['peer_id'] in api_clients:
-                        # ИСПРАВЛЕНО: api_data теперь DTO AmneziaClientListItem
                         api_data = api_clients[p_dict['peer_id']]
-
                         t_down = api_data.traffics.totalDownload or p_dict['traffic_down']
                         t_up = api_data.traffics.totalUpload or p_dict['traffic_up']
 
@@ -82,7 +90,6 @@ async def traffic_sync_loop():
                             or api_data.lastSeen
                             or api_data.updatedAt
                         )
-
                         last_connected = p_dict['last_connected']
                         if last_conn_raw:
                             try:
@@ -99,9 +106,9 @@ async def traffic_sync_loop():
                         db_is_active = p_dict['is_active']
 
                         if (p_dict['traffic_down'] != t_down or
-                            p_dict['traffic_up'] != t_up or
-                            p_dict['last_connected'] != last_connected or
-                            db_is_active != api_is_active):
+                                p_dict['traffic_up'] != t_up or
+                                p_dict['last_connected'] != last_connected or
+                                db_is_active != api_is_active):
                             updates_data[p_dict['id']] = {
                                 'traffic_down': t_down, 'traffic_up': t_up,
                                 'last_connected': last_connected, 'is_active': api_is_active
@@ -124,7 +131,9 @@ async def traffic_sync_loop():
             break
         except Exception as e:
             logger.error(f"Критическая ошибка в цикле трафика: {e}", exc_info=True)
+            # 🔥 ИСПРАВЛЕНО #5: Проверяем shutdown перед sleep
+            if shutdown_event.is_set():
+                break
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
-            continue
-
-        await asyncio.sleep(TRAFFIC_SYNC_INTERVAL)
+    
+    logger.info("Traffic sync worker stopped gracefully")

@@ -23,9 +23,16 @@ async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
     db_url = f"sqlite+aiosqlite:///{settings.DB_PATH}"
+
+    # 🔥 ИСПРАВЛЕНО #14 (из Части 5): Connection pool для SQLite
     _engine = create_async_engine(
-        db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30},
-        pool_pre_ping=True
+        db_url,
+        echo=False,
+        connect_args={"check_same_thread": False, "timeout": 30},
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_pre_ping=True,
     )
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
 
@@ -49,34 +56,22 @@ async def init_db():
 
 
 async def _run_migrations(conn):
-    """
-    Автоматические миграции схемы БД.
-    🔥 ИСПРАВЛЕНО: Все имена полей и типы жестко заданы в коде (не из пользовательского ввода),
-    поэтому SQL-инъекция невозможна. Добавлен комментарий для безопасности.
-    """
+    """Автоматические миграции схемы БД."""
     try:
         def check_and_migrate(sync_conn):
             inspector = inspect(sync_conn)
-            
-            # Миграция таблицы tariffs
+
             tariff_columns = {col['name'] for col in inspector.get_columns('tariffs')}
             if 'device_limit' not in tariff_columns:
-                # БЕЗОПАСНО: имя поля и тип жестко заданы
                 sync_conn.execute(text("ALTER TABLE tariffs ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 2"))
-            
-            # Миграция таблицы users
+
             user_columns = {col['name'] for col in inspector.get_columns('users')}
             if 'device_limit' not in user_columns:
-                # БЕЗОПАСНО: имя поля и тип жестко заданы
                 sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0"))
             if 'current_tariff_id' not in user_columns:
-                # БЕЗОПАСНО: имя поля и тип жестко заданы
                 sync_conn.execute(text("ALTER TABLE users ADD COLUMN current_tariff_id INTEGER DEFAULT NULL"))
-            
-            # Миграция таблицы payments
+
             payment_columns = {col['name'] for col in inspector.get_columns('payments')}
-            # 🔥 ИСПРАВЛЕНО: Жестко заданный список миграций для безопасности
-            # Все имена полей и типы определены в коде, не в пользовательском вводе
             PAYMENT_MIGRATIONS = [
                 ("external_id", "VARCHAR(255)"),
                 ("payment_url", "VARCHAR(1000)"),
@@ -85,11 +80,8 @@ async def _run_migrations(conn):
             ]
             for field_name, field_type in PAYMENT_MIGRATIONS:
                 if field_name not in payment_columns:
-                    # БЕЗОПАСНО: field_name и field_type из жестко заданного списка выше
                     sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {field_name} {field_type}"))
-            
-            # 🔥 НОВОЕ: Unique constraint на peer_id для защиты от race condition
-            # Проверяем, существует ли уже индекс
+
             indexes = inspector.get_indexes('vpn_profiles')
             index_names = {idx['name'] for idx in indexes}
             if 'uq_vpn_profiles_peer_id' not in index_names:
@@ -99,9 +91,38 @@ async def _run_migrations(conn):
                     )
                     logging.info("Migration: created unique index on vpn_profiles.peer_id")
                 except Exception as e:
-                    # Если индекс уже существует или есть дубликаты — логируем и продолжаем
                     logging.warning(f"Migration: failed to create unique index on peer_id: {e}")
-        
+
+            # 🔥 ИСПРАВЛЕНО #13 (из Части 6): Миграция для soft delete полей
+            if 'is_deleted' not in user_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE users ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0")
+                )
+                logging.info("Migration: added is_deleted column to users")
+            if 'deleted_at' not in user_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE users ADD COLUMN deleted_at DATETIME DEFAULT NULL")
+                )
+                logging.info("Migration: added deleted_at column to users")
+
+            indexes = inspector.get_indexes('users')
+            index_names = {idx['name'] for idx in indexes}
+            if 'ix_users_is_deleted' not in index_names:
+                try:
+                    sync_conn.execute(
+                        text("CREATE INDEX ix_users_is_deleted ON users(is_deleted)")
+                    )
+                    logging.info("Migration: created index on users.is_deleted")
+                except Exception as e:
+                    logging.warning(f"Migration: failed to create index on is_deleted: {e}")
+
+            # 🔥 ИСПРАВЛЕНО #18: Миграция для notification_retry_count
+            if 'notification_retry_count' not in user_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE users ADD COLUMN notification_retry_count INTEGER NOT NULL DEFAULT 0")
+                )
+                logging.info("Migration: added notification_retry_count column to users")
+
         await conn.run_sync(check_and_migrate)
     except Exception as e:
         logging.warning(f"Migration check failed: {e}")

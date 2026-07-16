@@ -10,7 +10,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -27,13 +27,24 @@ class User(Base):
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    
+    # 🔥 ИСПРАВЛЕНО #13 (из Части 6): Soft delete поля
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    
+    # 🔥 ИСПРАВЛЕНО #18: Счётчик неудачных попыток отправки уведомлений.
+    # Используется для exponential backoff: 1ч → 2ч → 4ч → 8ч.
+    # После 4 неудач (16ч суммарно) — сбрасывается в 0 при следующем цикле.
+    notification_retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
+
     notified_3d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_1d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_2h: Mapped[bool] = mapped_column(Boolean, default=False)
-    
+
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
@@ -41,12 +52,10 @@ class User(Base):
 
 class VPNProfile(Base):
     __tablename__ = "vpn_profiles"
-    # 🔥 НОВОЕ: Unique constraint на peer_id для защиты от race condition
-    # Создаётся через миграцию в connection.py (CREATE UNIQUE INDEX uq_vpn_profiles_peer_id)
     __table_args__ = (
         Index('uq_vpn_profiles_peer_id', 'peer_id', unique=True),
     )
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -66,14 +75,14 @@ class VPNProfile(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-    
+
     user = relationship("User", back_populates="profiles")
     server = relationship("Server")
 
 
 class Server(Base):
     __tablename__ = "servers"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     country_flag: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -90,7 +99,7 @@ class Server(Base):
 
 class Tariff(Base):
     __tablename__ = "tariffs"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
     device_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
@@ -105,7 +114,7 @@ class Tariff(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -124,14 +133,14 @@ class Payment(Base):
     payment_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     qr_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     payment_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    
+
     user = relationship("User", back_populates="payments")
     tariff = relationship("Tariff")
 
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     admin_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     action: Mapped[str] = mapped_column(String(100), nullable=False)

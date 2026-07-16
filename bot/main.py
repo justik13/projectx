@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import signal
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuButtonCommands
@@ -14,25 +15,50 @@ from bot.middlewares import (
     UserContextMiddleware,
     CleanChatMiddleware,
     ActionLockMiddleware,
+    CorrelationMiddleware,
+    CorrelationFilter,
 )
 from config.settings import get_settings
 from database.connection import close_db, init_db
 from services.amnezia_client import close_http_session
-from services.workers import start_background_worker
+from services.workers import start_background_workers, shutdown_event
 from bot.handlers.webhook import setup_webhook_routes
 
+# 🔥 ИСПРАВЛЕНО #10: Формат логов с request_id
+# [2026-07-16 14:30:00] [INFO] [abc12345] bot.main: message
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(levelname)s - [%(request_id)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+# 🔥 ИСПРАВЛЕНО #10: Добавляем CorrelationFilter в корневой logger
+# Это гарантирует, что ВСЕ логи (включая aiohttp, sqlalchemy, aiogram)
+# будут иметь request_id в формате.
+root_logger = logging.getLogger()
+root_logger.addFilter(CorrelationFilter())
+
+# Также добавляем filter в каждый уже созданный logger
+# (на случай если они были созданы до addFilter)
+for handler in root_logger.handlers:
+    handler.addFilter(CorrelationFilter())
+
 logger = logging.getLogger(__name__)
 
 
 async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     """Глобальный обработчик ошибок с алертом админам"""
     import traceback
-    logger.critical("Unhandled exception: %s", event.exception, exc_info=event.exception)
-
+    from bot.middlewares.correlation import get_current_request_id
+    
+    request_id = get_current_request_id()
+    logger.critical(
+        "[%s] Unhandled exception: %s",
+        request_id,
+        event.exception,
+        exc_info=event.exception,
+    )
+    
     state = kwargs.get("state")
     if state:
         try:
@@ -40,13 +66,14 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         except Exception:
             pass
 
-    # 🔥 НОВОЕ: Отправка traceback админам
+    # 🔥 ИСПРАВЛЕНО #10: request_id включён в traceback для админов
     try:
         settings = get_settings()
         error_traceback = traceback.format_exc(limit=15)
         error_msg = (
             f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА БОТА</b>\n"
-            f"<pre><code>{error_traceback[:3500]}</code></pre>"
+            f"🔍 <b>Request ID:</b> <code>{request_id}</code>\n"
+            f"<pre><code>{error_traceback[:3200]}</code></pre>"
         )
         for admin_id in settings.ADMIN_IDS:
             try:
@@ -54,7 +81,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             except Exception:
                 pass
     except Exception as e:
-        logger.error("Failed to send error alert: %s", e)
+        logger.error("[%s] Failed to send error alert: %s", request_id, e)
 
     try:
         if event.update.callback_query:
@@ -67,7 +94,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             )
     except Exception:
         pass
-
     return True
 
 
@@ -87,6 +113,11 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp = Dispatcher(storage=MemoryStorage())
 
     # ── Порядок middleware КРИТИЧЕН ──
+    # 🔥 ИСПРАВЛЕНО #10: CorrelationMiddleware ПЕРВЫМ
+    # Генерирует request_id для всех последующих middleware и handler'ов
+    dp.message.middleware(CorrelationMiddleware())
+    dp.callback_query.middleware(CorrelationMiddleware())
+
     # 1. DBSession — нужен всем (создаёт сессию БД)
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
@@ -102,7 +133,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
 
-    # 5. ActionLock — эксклюзивная блокировка тяжёлых действий (НОВОЕ)
+    # 5. ActionLock — эксклюзивная блокировка тяжёлых действий
     # Ставится ПОСЛЕ Throttling: если throttling отсёк запрос,
     # action lock не тратит ресурсы на проверку
     dp.callback_query.middleware(ActionLockMiddleware())
@@ -131,7 +162,9 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
         dp.include_router(r)
 
     dp.errors.register(global_error_handler)
+
     await setup_bot_commands(bot)
+
     return bot, dp
 
 
@@ -155,7 +188,6 @@ async def main():
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
-
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
@@ -165,13 +197,6 @@ async def main():
         logger.info("Инициализация БД...")
         await init_db()
 
-        # 🔥 НОВОЕ: Логирование при старте бота (Проблема 6 — In-Memory State)
-        # Все in-memory блокировки (_creating_devices, _deleting_devices,
-        # _processing_payments и т.д.) инициализируются пустыми при каждом старте.
-        # Для single-worker это acceptable risk:
-        # - DB unique constraint на peer_id защищает от дубликатов устройств
-        # - ThrottlingMiddleware защищает от double-click
-        # - ActionLockMiddleware защищает от параллельных тяжёлых действий
         logger.info(
             "🔄 Bot started — all in-memory operation locks cleared (restart). "
             "DB unique constraints + ActionLockMiddleware protect against duplicates."
@@ -183,18 +208,71 @@ async def main():
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
             webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
 
-        await start_background_worker(bot)
+        # 🔥 ИСПРАВЛЕНО #5: Graceful shutdown
+        # Регистрируем signal handlers ДО запуска polling
+        loop = asyncio.get_running_loop()
+        
+        def _signal_handler():
+            logger.info("Received shutdown signal (SIGTERM/SIGINT)")
+            shutdown_event.set()
+        
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, _signal_handler)
+            except NotImplementedError:
+                # Windows не поддерживает add_signal_handler
+                pass
+
+        # Запускаем background workers
+        worker_tasks = await start_background_workers(bot)
 
         logger.info("Запуск polling...")
-        await dp.start_polling(bot)
+        polling_task = asyncio.create_task(dp.start_polling(bot))
+
+        # 🔥 ИСПРАВЛЕНО #5: Ждём либо shutdown signal, либо завершение polling
+        # (polling может завершиться при ошибке)
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        
+        done, pending = await asyncio.wait(
+            [polling_task, shutdown_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Если shutdown был запрошен — останавливаем polling
+        if shutdown_event.is_set():
+            logger.info("Shutdown requested, stopping polling...")
+            await dp.stop_polling()
+            polling_task.cancel()
+            try:
+                await polling_task
+            except asyncio.CancelledError:
+                pass
 
     except Exception as e:
         logger.error("Критическая ошибка: %s", e, exc_info=True)
     finally:
+        # 🔥 ИСПРАВЛЕНО #5: Graceful shutdown — ждём завершения workers
+        logger.info("Waiting for background workers to finish...")
+        
+        # Даём workers максимум 10 секунд на завершение
+        if 'worker_tasks' in locals():
+            done, pending = await asyncio.wait(
+                worker_tasks,
+                timeout=10.0,
+                return_when=asyncio.ALL_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        
+        logger.info("Cleaning up resources...")
         if 'webhook_runner' in locals() and webhook_runner:
             await webhook_runner.cleanup()
-        await close_db()
         await close_http_session()
+        await close_db()
         logger.info("Работа бота завершена")
 
 

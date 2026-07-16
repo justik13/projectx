@@ -10,10 +10,98 @@ logger = logging.getLogger(__name__)
 
 _http_session: Optional[aiohttp.ClientSession] = None
 
+# ============================================================
+# 🔥 НОВОЕ: CIRCUIT BREAKER (Проблема #6)
+# ============================================================
+
+class CircuitBreaker:
+    """
+    Circuit Breaker per сервер URL.
+    
+    Предотвращает спам запросами к недоступному API:
+    - CLOSED: нормальная работа, запросы проходят
+    - OPEN: пауза (recovery_timeout секунд), запросы блокируются мгновенно
+    
+    Логика:
+    1. Считаем ошибки (5xx, timeout, network error)
+    2. При 5 ошибках подряд → переходим в OPEN на 60с
+    3. После 60с → пробуем один запрос (half-open)
+    4. Если успех → CLOSED, если ошибка → снова OPEN на 60с
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.state = "CLOSED"  # CLOSED | OPEN
+        self.last_failure_time = 0.0
+        self._lock = asyncio.Lock()
+
+    async def is_available(self) -> bool:
+        """Проверяет, можно ли делать запрос. Возвращает False если circuit OPEN."""
+        async with self._lock:
+            if self.state == "OPEN":
+                elapsed = time.monotonic() - self.last_failure_time
+                if elapsed > self.recovery_timeout:
+                    # Recovery timeout истёк — пробуем снова (half-open)
+                    logger.info(
+                        f"Circuit breaker: half-open, attempting recovery "
+                        f"(was OPEN for {elapsed:.0f}s)"
+                    )
+                    self.state = "CLOSED"
+                    self.failure_count = 0
+                    return True
+                return False
+            return True
+
+    async def record_success(self):
+        """Успешный запрос — сбрасываем счётчик."""
+        async with self._lock:
+            if self.failure_count > 0:
+                logger.info(
+                    f"Circuit breaker: request succeeded, resetting failure count "
+                    f"({self.failure_count} -> 0)"
+                )
+            self.failure_count = 0
+            self.state = "CLOSED"
+
+    async def record_failure(self):
+        """Неудачный запрос — увеличиваем счётчик, при пороге → OPEN."""
+        async with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.monotonic()
+            if self.failure_count >= self.failure_threshold:
+                if self.state != "OPEN":
+                    logger.warning(
+                        f"Circuit breaker: OPEN after {self.failure_count} failures. "
+                        f"Will retry in {self.recovery_timeout}s."
+                    )
+                self.state = "OPEN"
+
+    @property
+    def is_open(self) -> bool:
+        return self.state == "OPEN"
+
+
+# Глобальные circuit breakers per server URL.
+# ⚠️ Сбрасываются при рестарте бота (acceptable risk для single-worker).
+_circuit_breakers: dict[str, CircuitBreaker] = {}
+
+
+def _get_circuit_breaker(api_url: str) -> CircuitBreaker:
+    """Возвращает circuit breaker для конкретного сервера. Создаёт при первом обращении."""
+    if api_url not in _circuit_breakers:
+        _circuit_breakers[api_url] = CircuitBreaker(
+            failure_threshold=5,
+            recovery_timeout=60.0,
+        )
+    return _circuit_breakers[api_url]
+
 
 # ============================================================
-# 🔥 НОВОЕ: TOKEN BUCKET RATE LIMITER
+# 🔥 TOKEN BUCKET RATE LIMITER
 # ============================================================
+
 class TokenBucketRateLimiter:
     """
     Token Bucket Rate Limiter для ограничения запросов к Amnezia API.
@@ -40,11 +128,9 @@ class TokenBucketRateLimiter:
                 elapsed = now - self.last_refill
                 self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
                 self.last_refill = now
-
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return True
-
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
@@ -66,6 +152,7 @@ def _get_rate_limiter(api_url: str) -> TokenBucketRateLimiter:
 # ============================================================
 # DTO MODELS (Pydantic)
 # ============================================================
+
 class AmneziaClientCreateResponse(BaseModel):
     """Ответ API при создании клиента."""
     id: str
@@ -87,19 +174,19 @@ class AmneziaClientListItem(BaseModel):
     Элемент списка клиентов из GET /clients.
     🔥 ИСПРАВЛЕНО: Реальная структура API:
     {
-      "username": "tg_872658825_IPhone_7fb6",
-      "peers": [{
-        "id": "base64...",
-        "name": "Windows 11",
-        "status": "active",
-        "allowedIps": ["10.8.1.30/32"],
-        "lastHandshake": 0,
-        "traffic": {"received": 0, "sent": 0},
-        "endpoint": null,
-        "online": false,
-        "expiresAt": null,
-        "protocol": "amneziawg2"
-      }]
+        "username": "tg_872658825_IPhone_7fb6",
+        "peers": [{
+            "id": "base64...",
+            "name": "Windows 11",
+            "status": "active",
+            "allowedIps": ["10.8.1.30/32"],
+            "lastHandshake": 0,
+            "traffic": {"received": 0, "sent": 0},
+            "endpoint": null,
+            "online": false,
+            "expiresAt": null,
+            "protocol": "amneziawg2"
+        }]
     }
     """
     # 🔥 ИСПРАВЛЕНО: Реальные поля из API
@@ -138,6 +225,7 @@ class AmneziaServerInfo(BaseModel):
 # ============================================================
 # HTTP SESSION
 # ============================================================
+
 async def get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if _http_session is None:
@@ -157,7 +245,9 @@ async def close_http_session():
 # ============================================================
 # CLIENT
 # ============================================================
+
 class AmneziaClient:
+
     def __init__(self, api_url: str, api_key: str):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
@@ -166,11 +256,20 @@ class AmneziaClient:
     async def _request(self, method: str, path: str, **kwargs) -> Optional[dict]:
         url = f"{self.api_url}{path}"
 
-        # 🔥 НОВОЕ: Rate limiting per-server (агрессивный: 10 req/s, burst 20, timeout 30s)
+        # 🔥 ИСПРАВЛЕНО #6: Circuit breaker — проверяем ДО rate limiter.
+        # Если circuit OPEN — не тратим токены и не делаем бесполезные запросы.
+        cb = _get_circuit_breaker(self.api_url)
+        if not await cb.is_available():
+            logger.debug(
+                f"Circuit breaker OPEN for {self.api_url}{path}, skipping request"
+            )
+            return None
+
+        # Rate limiting per-server (агрессивный: 10 req/s, burst 20, timeout 30s)
         limiter = _get_rate_limiter(self.api_url)
 
         for attempt in range(API_RETRY_COUNT + 1):
-            # 🔥 НОВОЕ: Проверяем rate limit перед каждым запросом
+            # Проверяем rate limit перед каждым запросом
             if not await limiter.acquire(timeout=30.0):
                 logger.warning(
                     f"Rate limit timeout for {self.api_url}{path} "
@@ -182,24 +281,54 @@ class AmneziaClient:
             try:
                 async with session.request(method, url, headers=self._headers, **kwargs) as response:
                     if response.status == 204:
+                        await cb.record_success()
                         return {}
                     elif 200 <= response.status < 300:
+                        await cb.record_success()
                         try:
                             return await response.json()
                         except aiohttp.ContentTypeError:
                             return None
                     else:
+                        # 🔥 ИСПРАВЛЕНО #7: Exponential backoff для 5xx ошибок
+                        # Было: await asyncio.sleep(1) — фиксированная задержка
+                        # Стало: 1с → 2с → 4с — экспоненциальный рост
                         if attempt < API_RETRY_COUNT and response.status >= 500:
-                            await asyncio.sleep(1)
+                            backoff = 2 ** attempt  # 1, 2, 4
+                            logger.warning(
+                                f"API {self.api_url}{path} returned {response.status}, "
+                                f"retrying in {backoff}s (attempt {attempt + 1})"
+                            )
+                            await asyncio.sleep(backoff)
                             continue
+                        await cb.record_failure()
                         return None
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                # 🔥 ИСПРАВЛЕНО #7: Exponential backoff для сетевых ошибок
                 if attempt < API_RETRY_COUNT:
-                    await asyncio.sleep(1)
+                    backoff = 2 ** attempt  # 1, 2, 4
+                    logger.warning(
+                        f"Network error for {self.api_url}{path}: {type(e).__name__}, "
+                        f"retrying in {backoff}s (attempt {attempt + 1})"
+                    )
+                    await asyncio.sleep(backoff)
                 else:
+                    await cb.record_failure()
+                    logger.error(
+                        f"All retries exhausted for {self.api_url}{path}: "
+                        f"{type(e).__name__}"
+                    )
                     return None
-            except Exception:
+
+            except Exception as e:
+                await cb.record_failure()
+                logger.error(
+                    f"Unexpected error for {self.api_url}{path}: "
+                    f"{type(e).__name__}: {e}"
+                )
                 return None
+
         return None
 
     async def create_user(
@@ -252,47 +381,95 @@ class AmneziaClient:
     async def healthcheck(self) -> bool:
         return (await self._request("GET", "/healthz")) is not None
 
-    async def get_all_clients(
-        self, skip: int = 0, limit: int = 100
-    ) -> Optional[List[AmneziaClientListItem]]:
+    async def get_all_clients(self) -> Optional[List[AmneziaClientListItem]]:
         """
-        Возвращает список клиентов как список DTO.
-        🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
-        - API возвращает поле "items" (НЕ "clients")
-        - Каждый item содержит массив "peers" — один username может иметь несколько пиров
-        - Нужно Flatten: каждый peer становится отдельным AmneziaClientListItem
-        - Общее количество = сумма всех peers во всех items
+        Возвращает полный список клиентов с автоматической пагинацией.
+        
+        🔥 ИСПРАВЛЕНО #11: Пагинация
+        Было: limit=min(limit, 100) — максимум 100 клиентов.
+        Стало: автоматический цикл skip=0,100,200,... пока не получим пустую страницу.
+        Safety limit: максимум 1000 клиентов (10 страниц).
+        
+        API возвращает:
+        {
+            "items": [
+                {"username": "...", "peers": [{...}, {...}]}
+            ]
+        }
+        
+        Каждый peer → отдельный AmneziaClientListItem (flatten).
         """
         all_clients: List[AmneziaClientListItem] = []
+        page_size = 100
+        max_pages = 10  # Safety: не более 1000 клиентов
+        page_count = 0
 
-        # Используем total из API для определения окончания пагинации
-        result = await self._request(
-            "GET", "/clients",
-            params={"skip": skip, "limit": min(limit, 100)}
+        while page_count < max_pages:
+            result = await self._request(
+                "GET", "/clients",
+                params={"skip": page_count * page_size, "limit": page_size}
+            )
+
+            if result is None:
+                # API недоступен (или circuit breaker OPEN)
+                if page_count == 0:
+                    return None  # Первый запрос упал — возвращаем None
+                # Уже собрали часть данных — возвращаем что есть с warning
+                logger.warning(
+                    f"get_all_clients: API failed on page {page_count}, "
+                    f"returning partial result ({len(all_clients)} clients)"
+                )
+                break
+
+            # 🔥 Парсинг items (flatten структура API)
+            items_raw = result.get("items", [])
+            if not items_raw:
+                break  # Пустая страница — конец пагинации
+
+            page_clients = self._parse_clients_page(items_raw)
+            all_clients.extend(page_clients)
+
+            # Если получили меньше page_size — это последняя страница
+            if len(page_clients) < page_size:
+                break
+
+            page_count += 1
+
+        if page_count >= max_pages:
+            logger.warning(
+                f"get_all_clients: reached safety limit ({max_pages * page_size} clients). "
+                f"Some clients may be missing."
+            )
+
+        logger.info(
+            f"get_all_clients: parsed {len(all_clients)} peers "
+            f"across {page_count + 1} page(s)"
         )
-        if result is None:
-            return None
+        return all_clients
 
-        # 🔥 ИСПРАВЛЕНО: Поле называется "items", а не "clients"
-        items_raw = result.get("items", [])
-        if not items_raw:
-            return all_clients
+    @staticmethod
+    def _parse_clients_page(items_raw: list) -> List[AmneziaClientListItem]:
+        """
+        Парсит одну страницу API-ответа (items) в список DTO.
+        
+        API: {"items": [{"username": "...", "peers": [{...}, {...}]}]}
+        Нам нужно: плоский список, где каждый peer = отдельный элемент.
+        """
+        clients: List[AmneziaClientListItem] = []
 
-        # 🔥 ИСПРАВЛЕНО: Flatten структуры
-        # API: {"items": [{"username": "...", "peers": [{...}, {...}]}]}
-        # Нам нужно: плоский список AmneziaClientListItem, где каждый peer = отдельный элемент
         for item in items_raw:
             if not isinstance(item, dict):
                 continue
+
             username = item.get("username", "")
             peers = item.get("peers", [])
             if not isinstance(peers, list):
                 continue
 
-            # Каждый peer - отдельный клиент
             for peer in peers:
                 if not isinstance(peer, dict):
                     continue
+
                 peer_id = peer.get("id", "")
                 if not peer_id:
                     continue
@@ -320,16 +497,12 @@ class AmneziaClient:
                         lastSeen=peer.get("lastSeen"),
                         updatedAt=peer.get("updatedAt"),
                     )
-                    all_clients.append(client_item)
+                    clients.append(client_item)
                 except Exception as e:
                     logger.warning(f"Failed to parse peer item: {e}, peer={peer}")
                     continue
 
-        logger.info(
-            f"get_all_clients: parsed {len(all_clients)} peers "
-            f"from {len(items_raw)} usernames"
-        )
-        return all_clients
+        return clients
 
     async def delete_client(self, client_id: str) -> bool:
         """Удаляет клиента с сервера (используется при массовом удалении)."""

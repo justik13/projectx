@@ -29,19 +29,16 @@ def _get_user_lock(user_id: int) -> asyncio.Lock:
 
 
 class DeviceService:
+
     @staticmethod
     async def create_device(
         session: AsyncSession, user: User, server_id: int, device_name: str
     ) -> VPNProfile | None:
         """
         Создаёт новое устройство для пользователя.
-        🔥 УПРОЩЕНО в соответствии с Вариантом A:
-        - Убрана жёсткая валидация параметров AWG 2.0 (validate_awg2_config)
-        - Убран откат создания клиента при failed валидации параметров
-        - Оставлена только проверка is_valid_vpn_uri() (protocol_version == "2")
-        - Полное доверие API: "Боту нужно просто отдавать то, что пришло из API"
-        🔥 ИСПРАВЛЕНО: Pre-flight check с force_refresh=True для точности.
-        🔥 ИСПРАВЛЕНО TOCTOU: Проверка лимита устройств ВНУТРИ begin_nested() (savepoint).
+        
+        🔥 ИСПРАВЛЕНО #12: Логирование DEVICE_CREATED в audit_logs.
+        Теперь успешное создание устройства логируется так же, как и ошибки.
         """
         server = await get_server_by_id(session, server_id)
         if not server or server.protocol != AMNEZIA_PROTOCOL:
@@ -50,8 +47,7 @@ class DeviceService:
             )
             return None
 
-        # 🔥 PRE-FLIGHT CHECK: Проверка реального количества слотов перед созданием
-        # 🔥 ИСПРАВЛЕНО: force_refresh=True для точности (игнорирует кэш)
+        # PRE-FLIGHT CHECK
         real_count = await get_real_peer_count(server, force_refresh=True)
         if real_count != -1 and real_count >= server.max_clients:
             logger.warning(
@@ -62,13 +58,11 @@ class DeviceService:
 
         lock = _get_user_lock(user.id)
         async with lock:
-            # Генерация имени клиента для API
             short_hash = uuid.uuid4().hex[:4]
             clean_device_name = re.sub(r'[^a-zA-Z0-9]', '', device_name)[:10]
             client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
             expires_ts = await SubscriptionService.get_expires_timestamp(user)
 
-            # Создание клиента на сервере (внешний вызов, ДО savepoint)
             client = AmneziaClient(server.api_url, server.api_key)
             result = await client.create_user(client_name=client_name, expires_at=expires_ts)
             if not result:
@@ -81,48 +75,34 @@ class DeviceService:
             peer_id = result.id
             raw_config = result.config
 
-            # 🔥 ИСПРАВЛЕНО: Только базовая валидация (protocol_version == "2")
-            # Убрана жёсткая валидация параметров AWG 2.0
             if not is_valid_vpn_uri(raw_config):
                 logger.error(
                     f"create_device: API returned invalid vpn:// URI for user {user.telegram_id}. "
                     f"Rolling back."
                 )
-                # Rollback: удаляем клиента с сервера
                 try:
                     await client.delete_user(client_id=peer_id)
                 except Exception as rollback_error:
                     logger.error(f"Failed to rollback invalid config: {rollback_error}")
-                # Аудит инцидента
                 try:
                     await AuditService.log_action(
-                        session,
-                        admin_id=0,
-                        action="DEVICE_CREATE_FAILED",
-                        target_type="User",
-                        target_id=user.telegram_id,
+                        session, admin_id=0, action="DEVICE_CREATE_FAILED",
+                        target_type="User", target_id=user.telegram_id,
                         details=f"Invalid vpn:// URI from API, server={server.name}"
                     )
                 except Exception as audit_error:
                     logger.error(f"Failed to log audit: {audit_error}")
                 return None
 
-            # 🔥 ИСПРАВЛЕНО TOCTOU: Атомарность через begin_nested() (savepoint)
-            # Проверка лимита устройств ВНУТРИ savepoint для защиты от race condition
             try:
                 async with session.begin_nested() as savepoint:
-                    # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНО: Проверка лимита ВНУТРИ savepoint
-                    # Раньше: проверка была ДО savepoint → race condition между проверкой и созданием
-                    # Теперь: проверка и создание в одной атомарной транзакции
                     profiles_count = await get_user_profiles_count(session, user.id)
                     if profiles_count >= user.device_limit:
                         logger.info(
                             f"create_device: user {user.telegram_id} reached device limit "
-                            f"({profiles_count}/{user.device_limit}) inside savepoint. "
-                            f"Rolling back API client."
+                            f"({profiles_count}/{user.device_limit}) inside savepoint."
                         )
                         await savepoint.rollback()
-                        # Rollback: удаляем клиента с сервера
                         try:
                             await client.delete_user(client_id=peer_id)
                         except Exception as rollback_error:
@@ -132,83 +112,78 @@ class DeviceService:
                         return None
 
                     profile = await create_profile(
-                        session,
-                        user_id=user.id,
-                        server_id=server.id,
-                        device_name=device_name,
-                        peer_id=peer_id,
-                        raw_config=raw_config
+                        session, user_id=user.id, server_id=server.id,
+                        device_name=device_name, peer_id=peer_id, raw_config=raw_config
                     )
                     await savepoint.commit()
+                    await session.commit()
 
-                # Финальный commit основной транзакции
-                await session.commit()
-                logger.info(
-                    f"Device created: user={user.telegram_id}, device={device_name}, "
-                    f"server={server.name}, peer_id={peer_id[:16]}..."
-                )
-                return profile
+                    # 🔥 ИСПРАВЛЕНО #12: Логирование успешного создания устройства
+                    try:
+                        await AuditService.log_action(
+                            session,
+                            admin_id=user.telegram_id,  # User-действие, не admin
+                            action="DEVICE_CREATED",
+                            target_type="VPNProfile",
+                            target_id=profile.id,
+                            details=(
+                                f"user={user.telegram_id}, device={device_name}, "
+                                f"server={server.name}, peer_id={peer_id[:16]}..."
+                            ),
+                        )
+                    except Exception as audit_error:
+                        # Аудит не должен блокировать работу
+                        logger.warning(f"Failed to log DEVICE_CREATED: {audit_error}")
+
+                    logger.info(
+                        f"Device created: user={user.telegram_id}, device={device_name}, "
+                        f"server={server.name}, peer_id={peer_id[:16]}..."
+                    )
+                    return profile
 
             except IntegrityError as e:
-                # 🔥 ИСПРАВЛЕНО: Защита от race condition через DB unique constraint
                 await session.rollback()
                 logger.error(
-                    f"create_device: IntegrityError (duplicate peer_id?): {e}. "
-                    f"Rolling back API client."
+                    f"create_device: IntegrityError (duplicate peer_id?): {e}."
                 )
-                # Rollback: удаляем клиента с сервера
                 try:
                     await client.delete_user(client_id=peer_id)
                 except Exception as rollback_error:
                     logger.error(f"Failed to rollback after IntegrityError: {rollback_error}")
-                # Аудит
                 try:
                     await AuditService.log_action(
-                        session,
-                        admin_id=0,
-                        action="DEVICE_CREATE_FAILED",
-                        target_type="User",
-                        target_id=user.telegram_id,
+                        session, admin_id=0, action="DEVICE_CREATE_FAILED",
+                        target_type="User", target_id=user.telegram_id,
                         details=f"IntegrityError (duplicate peer_id), server={server.name}"
                     )
-                except Exception as audit_error:
-                    logger.error(f"Failed to log audit: {audit_error}")
+                except Exception:
+                    pass
                 return None
 
             except Exception as e:
                 await session.rollback()
                 logger.error(
-                    f"create_device: DB error while creating profile: {e}. "
-                    f"Rolling back API client.",
-                    exc_info=True
+                    f"create_device: DB error: {e}.", exc_info=True
                 )
-                # Rollback: удаляем клиента с сервера
                 try:
                     await client.delete_user(client_id=peer_id)
                 except Exception as rollback_error:
                     logger.error(f"Failed to rollback after DB error: {rollback_error}")
-                # Аудит
                 try:
                     await AuditService.log_action(
-                        session,
-                        admin_id=0,
-                        action="DEVICE_CREATE_FAILED",
-                        target_type="User",
-                        target_id=user.telegram_id,
+                        session, admin_id=0, action="DEVICE_CREATE_FAILED",
+                        target_type="User", target_id=user.telegram_id,
                         details=f"DB error: {str(e)[:100]}, server={server.name}"
                     )
-                except Exception as audit_error:
-                    logger.error(f"Failed to log audit: {audit_error}")
+                except Exception:
+                    pass
                 return None
 
     @staticmethod
     async def delete_device(session: AsyncSession, profile: VPNProfile) -> bool:
         """
         Удаляет устройство пользователя.
-        🔥 ИСПРАВЛЕНО в Фазе 4:
-        - Атомарность через begin_nested() (savepoint)
-        - Если delete_user удалит с API, но delete_profile упадёт — savepoint откатится
-        - Логирование успеха/ошибки в audit_logs
+        Атомарность через begin_nested() (savepoint).
         """
         from database.repositories.profiles_repo import delete_profile
         from database.repositories.servers_repo import get_server_by_id
@@ -218,7 +193,6 @@ class DeviceService:
             logger.error(f"delete_device: server {profile.server_id} not found")
             return False
 
-        # Удаление клиента с сервера
         client = AmneziaClient(server.api_url, server.api_key)
         deleted = await client.delete_user(client_id=profile.peer_id)
         if not deleted:
@@ -228,37 +202,45 @@ class DeviceService:
             )
             return False
 
-        # 🔥 ИСПРАВЛЕНО: Атомарность через begin_nested() (savepoint)
         try:
             async with session.begin_nested() as savepoint:
                 await delete_profile(session, profile)
                 await savepoint.commit()
+                await session.commit()
 
-            # Финальный commit основной транзакции
-            await session.commit()
-            logger.info(
-                f"Device deleted: profile_id={profile.id}, peer_id={profile.peer_id[:16]}..., "
-                f"server={server.name}"
-            )
-            return True
+                # 🔥 ИСПРАВЛЕНО #12: Логирование успешного удаления
+                try:
+                    await AuditService.log_action(
+                        session,
+                        admin_id=profile.user.telegram_id if hasattr(profile, 'user') else 0,
+                        action="DEVICE_DELETED",
+                        target_type="VPNProfile",
+                        target_id=profile.id,
+                        details=(
+                            f"device={profile.device_name}, server={server.name}, "
+                            f"peer_id={profile.peer_id[:16]}..."
+                        ),
+                    )
+                except Exception as audit_error:
+                    logger.warning(f"Failed to log DEVICE_DELETED: {audit_error}")
+
+                logger.info(
+                    f"Device deleted: profile_id={profile.id}, "
+                    f"peer_id={profile.peer_id[:16]}..., server={server.name}"
+                )
+                return True
 
         except Exception as e:
             await session.rollback()
             logger.error(
-                f"delete_device: DB error while deleting profile: {e}. "
-                f"Profile remains in DB but deleted from API!",
-                exc_info=True
+                f"delete_device: DB error: {e}.", exc_info=True
             )
-            # Аудит критической ошибки
             try:
                 await AuditService.log_action(
-                    session,
-                    admin_id=0,
-                    action="DEVICE_DELETE_DB_ERROR",
-                    target_type="VPNProfile",
-                    target_id=profile.id,
+                    session, admin_id=0, action="DEVICE_DELETE_DB_ERROR",
+                    target_type="VPNProfile", target_id=profile.id,
                     details=f"Deleted from API but DB error: {str(e)[:100]}"
                 )
-            except Exception as audit_error:
-                logger.error(f"Failed to log audit: {audit_error}")
+            except Exception:
+                pass
             return False
