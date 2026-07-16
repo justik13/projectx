@@ -88,7 +88,7 @@ async def subscription_notifications_loop(bot: Bot):
                             # Отправляем уведомление
                             await bot.send_message(user.telegram_id, msg, reply_markup=kb.as_markup(), parse_mode="HTML")
 
-                            # 🔥 ИСПРАВЛЕНО #9: Помечаем как уведомлённого ТОЛЬКО при успешной отправке
+                            # 🔥 ИСПРАВЛЕНО #9: Помечаем как уведомлённого ТОЛЬКО после успешной отправки
                             if notification_type == "2h":
                                 user.notified_2h = True
                             elif notification_type == "1d":
@@ -104,9 +104,8 @@ async def subscription_notifications_loop(bot: Bot):
                         except Exception as e:
                             # 🔥 ИСПРАВЛЕНО #9: При ошибке отправки НЕ помечаем как уведомлённого
                             # user.notified_Xd остаётся False, и попытка повторится в следующем цикле
+                            # 🔥 ИСПРАВЛЕНО: Убран rollback() — он откатывал изменения других пользователей
                             logger.warning(f"Failed to send notification to {user.telegram_id}: {e}")
-                            # НЕ делаем rollback здесь — это откатит изменения других пользователей
-                            # Просто пропускаем этого пользователя, его notified_Xd не был изменён
 
                 # 🔥 ИСПРАВЛЕНО #9: Commit только успешных изменений (один раз на всех)
                 await session.commit()
