@@ -2,6 +2,9 @@ from datetime import datetime
 
 # Subscription
 PERMANENT_SUBSCRIPTION_DAYS = 36500
+# 🔥 ИСПРАВЛЕНО P2-10: Унификация вечной даты
+# Было: datetime(2100, 1, 1) здесь, но datetime(2099, 12, 31) в admin/users.py
+# Стало: везде datetime(2100, 1, 1)
 PERMANENT_END_DATE = datetime(2100, 1, 1)
 
 # Telegram limits
@@ -33,14 +36,10 @@ ITEMS_PER_PAGE = 10
 HUB_CACHE_MAX_SIZE = 10000
 HUB_CACHE_TTL = 43200
 USER_CONTEXT_CACHE_MAX_SIZE = 2000
-# 🔥 ИСПРАВЛЕНО (Часть 2): TTL увеличен с 5с до 15с
-# Было: 5.0 секунд — при 1000 пользователей генерировало ~200 req/sec к БД
-# Стало: 15.0 секунд — нагрузка снижена в 3 раза
-# Компромисс: пользователь не замечает задержку, но БД разгружена
 USER_CONTEXT_CACHE_TTL = 15.0
 
-# 🔥 ИСПРАВЛЕНО: Daily device creation limit (Spam protection)
+# Daily device creation limit (Spam protection)
 DEVICE_DAILY_LIMIT = 25
 
-# 🔥 ИСПРАВЛЕНО: Self-Healing rate limit
+# Self-Healing rate limit
 SELF_HEALING_MAX_PER_CYCLE = 50
