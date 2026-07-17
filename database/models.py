@@ -10,7 +10,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -27,22 +27,27 @@ class User(Base):
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    
     # 🔥 ИСПРАВЛЕНО #13 (из Части 6): Soft delete поля
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    
     # 🔥 ИСПРАВЛЕНО #18: Счётчик неудачных попыток отправки уведомлений.
     # Используется для exponential backoff: 1ч → 2ч → 4ч → 8ч.
     # После 4 неудач (16ч суммарно) — сбрасывается в 0 при следующем цикле.
     notification_retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    
     # 🔥 ИСПРАВЛЕНО #6 (из Части 7): Timestamp последней попытки уведомления.
     # Используется для точного расчёта backoff delay.
     # Worker проверяет: if now - last_notification_attempt < backoff_delay: skip
     last_notification_attempt: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=False), nullable=True
     )
+    
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
+    
     notified_3d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_1d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_2h: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -54,7 +59,7 @@ class User(Base):
     # Админы исключены из лимита.
     device_creations_today: Mapped[int] = mapped_column(Integer, default=0)
     last_creation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-
+    
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
@@ -62,10 +67,11 @@ class User(Base):
 
 class VPNProfile(Base):
     __tablename__ = "vpn_profiles"
+    
     __table_args__ = (
         Index('uq_vpn_profiles_peer_id', 'peer_id', unique=True),
     )
-
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -74,7 +80,13 @@ class VPNProfile(Base):
         Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True
     )
     device_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    peer_id: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
+    
+    # 🔥 ИСПРАВЛЕНО #23 (Вариант C): Убрано шифрование с peer_id
+    # peer_id — это base64 WireGuard-ключ, не чувствительные данные.
+    # Шифрование Fernet недетерминировано (случайный IV), поэтому UNIQUE INDEX не работал.
+    # Теперь plain text + UNIQUE INDEX на уровне БД защищает от дубликатов.
+    peer_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    
     raw_config: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
     traffic_down: Mapped[int] = mapped_column(BigInteger, default=0)
     traffic_up: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -85,14 +97,14 @@ class VPNProfile(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-
+    
     user = relationship("User", back_populates="profiles")
     server = relationship("Server")
 
 
 class Server(Base):
     __tablename__ = "servers"
-
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     country_flag: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -109,7 +121,7 @@ class Server(Base):
 
 class Tariff(Base):
     __tablename__ = "tariffs"
-
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
     device_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
@@ -124,7 +136,7 @@ class Tariff(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
-
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -143,14 +155,14 @@ class Payment(Base):
     payment_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     qr_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     payment_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
-
+    
     user = relationship("User", back_populates="payments")
     tariff = relationship("Tariff")
 
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
-
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     admin_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     action: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -159,4 +171,33 @@ class AuditLog(Base):
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+
+class BroadcastProgress(Base):
+    """
+    🔥 ИСПРАВЛЕНО #24: Модель для отслеживания прогресса рассылки.
+    Позволяет возобновить рассылку после crash бота.
+    """
+    __tablename__ = "broadcast_progress"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_processed_index: Mapped[int] = mapped_column(Integer, default=0)
+    user_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    broadcast_text: Mapped[str] = mapped_column(Text, nullable=False)
+    media_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    content_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    label: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="in_progress", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), 
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
+        onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
