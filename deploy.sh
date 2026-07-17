@@ -226,12 +226,14 @@ setup_env() {
     echo -e "${BLUE}[1/4]${NC} Telegram Bot Token"
     read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN; echo ""
     [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
+
     if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then
         error "Неверный формат BOT_TOKEN"
     fi
 
     echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
     read -p "Введите ADMIN_IDS: " ADMIN_IDS
+
     if [[ ! "$ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
         error "Неверный формат ADMIN_IDS"
     fi
@@ -248,11 +250,28 @@ setup_env() {
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET; echo ""
         [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET обязателен"
+
         read -p "Введите домен для callback (например: just1kbot.1337.cx): " PLATEGA_CALLBACK_DOMAIN
         [ -z "$PLATEGA_CALLBACK_DOMAIN" ] && error "Домен обязателен"
     fi
 
-    local DB_KEY=$("$VENV_DIR/bin/python" -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+    # 🔥 ИСПРАВЛЕНО #14: Сохраняем существующий DB_ENCRYPTION_KEY при передеплое
+    # Раньше: при каждом деплое генерировался новый ключ → все зашифрованные
+    # поля (peer_id, raw_config, api_key) становились нечитаемыми → БД «кирпич».
+    # Теперь: если .env существует и содержит DB_ENCRYPTION_KEY — используем его.
+    local EXISTING_KEY=""
+    if [ -f "$PROJECT_DIR/.env" ]; then
+        EXISTING_KEY=$(grep "^DB_ENCRYPTION_KEY=" "$PROJECT_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'")
+    fi
+
+    local DB_KEY
+    if [ -n "$EXISTING_KEY" ]; then
+        DB_KEY="$EXISTING_KEY"
+        log "Используется существующий DB_ENCRYPTION_KEY (сохраняем зашифрованные данные)"
+    else
+        DB_KEY=$("$VENV_DIR/bin/python" -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+        log "Создан новый DB_ENCRYPTION_KEY (первая установка)"
+    fi
 
     : > "$PROJECT_DIR/.env"
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
@@ -267,17 +286,12 @@ setup_env() {
         write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
         write_env_var "PLATEGA_CALLBACK_URL" "$CALLBACK_URL"
         write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
-        # 🔥 ИСПРАВЛЕНО #2: Убран PLATEGA_RETURN_URL = placeholder.
-        # Дефолт из config/settings.py (https://t.me/{bot_username})
-        # корректно форматируется через bot.get_me() в payment_service.py.
-        # Запись плейсхолдера в .env перезаписывала дефолт и ломала редирект.
     fi
 
     chown projectx:projectx "$PROJECT_DIR/.env"
     chmod 600 "$PROJECT_DIR/.env"
     success ".env защищён"
 }
-
 # ═══════════════════════════════════════════════════════════════
 # PERMISSIONS & DATABASE
 # ═══════════════════════════════════════════════════════════════
@@ -306,6 +320,11 @@ setup_systemd() {
     log "Настройка systemd сервиса..."
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
+    # 🔥 ИСПРАВЛЕНО #2: Убран WatchdogSec=300
+    # WatchdogSec требует sd_notify("WATCHDOG=1") из Python-кода.
+    # Без этого systemd убивает бота каждые 5 минут (SIGABRT).
+    # MemoryStorage FSM стирается, in-memory locks сбрасываются,
+    # SQLite получает database is locked при экстренном завершении.
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
@@ -321,7 +340,6 @@ EnvironmentFile=$PROJECT_DIR/.env
 ExecStart=$VENV_DIR/bin/python -m bot.main
 Restart=always
 RestartSec=10
-WatchdogSec=300
 ProtectSystem=strict
 PrivateTmp=true
 ProtectHome=true
@@ -335,9 +353,8 @@ EOF
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
-    success "Systemd настроен (ProtectSystem=strict, WatchdogSec=300)"
+    success "Systemd настроен (ProtectSystem=strict, без WatchdogSec)"
 }
-
 # ═══════════════════════════════════════════════════════════════
 # NGINX + SSL
 # ═══════════════════════════════════════════════════════════════
