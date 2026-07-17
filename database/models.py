@@ -10,7 +10,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -27,26 +27,21 @@ class User(Base):
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
-    
     notification_retry_count: Mapped[int] = mapped_column(Integer, default=0)
     last_notification_attempt: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=False), nullable=True
     )
-    
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-    
     notified_3d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_1d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_2h: Mapped[bool] = mapped_column(Boolean, default=False)
-    
     device_creations_today: Mapped[int] = mapped_column(Integer, default=0)
     last_creation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    
+
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
@@ -54,11 +49,10 @@ class User(Base):
 
 class VPNProfile(Base):
     __tablename__ = "vpn_profiles"
-    
     __table_args__ = (
         Index('uq_vpn_profiles_peer_id', 'peer_id', unique=True),
     )
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -78,14 +72,14 @@ class VPNProfile(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-    
+
     user = relationship("User", back_populates="profiles")
     server = relationship("Server")
 
 
 class Server(Base):
     __tablename__ = "servers"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     country_flag: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -102,7 +96,7 @@ class Server(Base):
 
 class Tariff(Base):
     __tablename__ = "tariffs"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
     device_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
@@ -117,7 +111,19 @@ class Tariff(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
-    
+    # 🔥 ИСПРАВЛЕНО: Partial Unique Index для идемпотентности платежей
+    # Защищает от double-spend при retry от Platega
+    __table_args__ = (
+        Index(
+            'ix_payment_external_completed',
+            'external_id',
+            unique=True,
+            postgresql_where=(
+                "status = 'completed'"
+            ),
+        ),
+    )
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -136,14 +142,14 @@ class Payment(Base):
     payment_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     qr_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     payment_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    
+
     user = relationship("User", back_populates="payments")
     tariff = relationship("Tariff")
 
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     admin_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     action: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -157,17 +163,14 @@ class AuditLog(Base):
 
 class BroadcastProgress(Base):
     __tablename__ = "broadcast_progress"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     admin_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     total_count: Mapped[int] = mapped_column(Integer, nullable=False)
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     fail_count: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # 🔥 ИСПРАВЛЕНО: last_processed_id вместо JSON массива и индекса
     last_processed_id: Mapped[int] = mapped_column(BigInteger, default=0)
-    target_audience: Mapped[str] = mapped_column(String(20), default="all") # all | active
-    
+    target_audience: Mapped[str] = mapped_column(String(20), default="all")
     broadcast_text: Mapped[str] = mapped_column(Text, nullable=False)
     media_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content_type: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -177,7 +180,27 @@ class BroadcastProgress(Base):
         DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), 
+        DateTime(timezone=False),
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
         onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+
+# 🔥 НОВОЕ: Таблица для zombie-устройств (pending API deletions)
+# Когда сервер удаляется из БД, но API недоступен — записываем сюда.
+# Воркер cleanup.py будет периодически пытаться удалить пиры.
+class PendingAPIDeletion(Base):
+    __tablename__ = "pending_api_deletions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    server_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    api_key: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
+    peer_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    client_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )

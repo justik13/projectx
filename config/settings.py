@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     DEFAULT_DEVICE_LIMIT: int = 2
     REFERRAL_BONUS_DAYS: int = 3
     SUPPORT_USERNAME: str = "@support_username"
-
+    
     # Platega.io (СБП)
     PLATEGA_MERCHANT_ID: str = ""
     PLATEGA_SECRET: str = ""
@@ -21,14 +21,18 @@ class Settings(BaseSettings):
     PLATEGA_PAYMENT_METHOD: int = 2
     PLATEGA_RETURN_URL: str = "https://t.me/{bot_username}"
     PLATEGA_FAILED_URL: str = "https://t.me/{bot_username}"
-
+    
+    # Redis for FSM Storage
+    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_KEY_PREFIX: str = "projectx_bot:"
+    
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": False,
         "extra": "ignore"
     }
-
+    
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
     def parse_admins(cls, v: str | list | int) -> list[int]:

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v5.0 PostgreSQL)
+# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v6.0 + Redis)
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
@@ -99,6 +99,7 @@ preflight_checks() {
     if [ ! -f /etc/os-release ]; then
         error "Не удалось определить ОС"
     fi
+
     . /etc/os-release
     if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
         error "Поддерживаются только Ubuntu/Debian"
@@ -128,15 +129,22 @@ preflight_checks() {
 # SYSTEM DEPENDENCIES
 # ═══════════════════════════════════════════════════════════════
 install_dependencies() {
-    log "Установка системных зависимостей (включая PostgreSQL)..."
+    log "Установка системных зависимостей (PostgreSQL + Redis)..."
     apt-get update -qq || error "Не удалось обновить список пакетов"
 
     local install_log=$(mktemp)
-    if ! apt-get install -y python3 python3-venv python3-pip python3-dev git curl wget rsync build-essential cron logrotate ufw nginx certbot python3-certbot-nginx postgresql postgresql-contrib libpq-dev > "$install_log" 2>&1; then
+    if ! apt-get install -y \
+        python3 python3-venv python3-pip python3-dev \
+        git curl wget rsync build-essential cron logrotate \
+        ufw nginx certbot python3-certbot-nginx \
+        postgresql postgresql-contrib libpq-dev \
+        redis-server \
+        > "$install_log" 2>&1; then
         error "Ошибка apt. Лог: $install_log\n$(tail -20 "$install_log")"
     fi
     rm -f "$install_log"
-    success "Системные зависимости и PostgreSQL установлены"
+
+    success "Системные зависимости установлены (PostgreSQL + Redis)"
 
     if ! id "projectx" &>/dev/null; then
         useradd -r -s /bin/false -d /nonexistent projectx || error "Ошибка создания пользователя"
@@ -145,11 +153,79 @@ install_dependencies() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# REDIS SETUP
+# ═══════════════════════════════════════════════════════════════
+setup_redis() {
+    log "Настройка Redis для FSM Storage..."
+
+    # Запускаем Redis если не запущен
+    if ! systemctl is-active --quiet redis-server; then
+        systemctl start redis-server
+        systemctl enable redis-server
+    fi
+
+    # Конфигурируем Redis для безопасности и производительности
+    local redis_conf="/etc/redis/redis.conf"
+    if [[ -f "$redis_conf" ]]; then
+        # Создаём бэкап конфига
+        cp "$redis_conf" "$redis_conf.backup-$(date +%s)" 2>/dev/null || true
+
+        # Привязываем только к localhost (безопасность)
+        if ! grep -q "^bind 127.0.0.1" "$redis_conf"; then
+            sed -i 's/^bind .*/bind 127.0.0.1/' "$redis_conf"
+        fi
+
+        # Устанавливаем maxmemory 256MB (достаточно для FSM)
+        if ! grep -q "^maxmemory 256mb" "$redis_conf"; then
+            sed -i '/^maxmemory /d' "$redis_conf"
+            echo "maxmemory 256mb" >> "$redis_conf"
+        fi
+
+        # Политика вытеснения — удаляем любые ключи при переполнении
+        if ! grep -q "^maxmemory-policy allkeys-lru" "$redis_conf"; then
+            sed -i '/^maxmemory-policy /d' "$redis_conf"
+            echo "maxmemory-policy allkeys-lru" >> "$redis_conf"
+        fi
+
+        # Отключаем persist (RDB/AOF) — нам не нужна персистентность FSM
+        # FSM — это временные данные, которые можно потерять при перезапуске
+        if ! grep -q "^save \"\"" "$redis_conf"; then
+            sed -i '/^save /d' "$redis_conf"
+            echo 'save ""' >> "$redis_conf"
+        fi
+
+        # Отключаем AOF
+        if ! grep -q "^appendonly no" "$redis_conf"; then
+            sed -i 's/^appendonly .*/appendonly no/' "$redis_conf"
+        fi
+
+        # Перезапускаем Redis для применения конфига
+        systemctl restart redis-server
+    fi
+
+    # Проверяем что Redis отвечает
+    local redis_check=0
+    for i in $(seq 1 5); do
+        if redis-cli ping 2>/dev/null | grep -q "PONG"; then
+            redis_check=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [[ $redis_check -eq 0 ]]; then
+        error "Redis не отвечает на PING после настройки"
+    fi
+
+    success "Redis настроен и запущен (bind 127.0.0.1, maxmemory 256MB, LRU eviction)"
+}
+
+# ═══════════════════════════════════════════════════════════════
 # POSTGRESQL SETUP
 # ═══════════════════════════════════════════════════════════════
 setup_postgresql() {
     log "Настройка базы данных PostgreSQL..."
-    
+
     if ! systemctl is-active --quiet postgresql; then
         systemctl start postgresql
         systemctl enable postgresql
@@ -160,14 +236,16 @@ setup_postgresql() {
         warn "База данных projectx_bot уже существует. Пропускаем создание."
     else
         log "Создание пользователя и базы данных PostgreSQL..."
+
         read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD; echo ""
         [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
-        
+
         sudo -u postgres psql -c "CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';" > /dev/null 2>&1 || warn "Пользователь projectx уже существует"
         sudo -u postgres psql -c "CREATE DATABASE projectx_bot OWNER projectx;" > /dev/null 2>&1 || warn "БД projectx_bot уже существует"
         sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE projectx_bot TO projectx;" > /dev/null 2>&1
+
         success "Пользователь projectx и база projectx_bot созданы"
-        
+
         # Сохраняем пароль временно для .env
         echo "$DB_PASSWORD" > /tmp/.pg_pass
         chmod 600 /tmp/.pg_pass
@@ -179,6 +257,7 @@ setup_postgresql() {
 # ═══════════════════════════════════════════════════════════════
 setup_firewall() {
     log "Настройка UFW firewall..."
+
     if ! command -v ufw &>/dev/null; then
         warn "UFW не установлен, пропуск"
         return
@@ -188,7 +267,7 @@ setup_firewall() {
     if [ -f /etc/ssh/sshd_config ]; then
         SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
     fi
-    
+
     if [[ -z "$SSH_PORT" || ! "$SSH_PORT" =~ ^[0-9]+$ ]]; then
         SSH_PORT=22
         warn "Не удалось определить порт SSH из sshd_config, используется стандартный: $SSH_PORT"
@@ -205,10 +284,12 @@ setup_firewall() {
     ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
     ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
     ufw deny 8080/tcp comment 'Webhook Internal' >/dev/null 2>&1 || true
+    ufw deny 6379/tcp comment 'Redis (blocked external)' >/dev/null 2>&1 || true
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
     ufw --force enable >/dev/null 2>&1 || error "Ошибка включения UFW"
-    success "UFW настроен безопасно (SSH на порту $SSH_PORT)"
+
+    success "UFW настроен безопасно (SSH на порту $SSH_PORT, Redis заблокирован извне)"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -218,7 +299,13 @@ migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
         log "Синхронизация проекта..."
         mkdir -p "$PROJECT_DIR"
-        rsync -a --delete --exclude='.env' --exclude='*.db*' --exclude='.git' --exclude='venv/' --exclude='__pycache__/' "$START_DIR/" "$PROJECT_DIR/" || error "Ошибка rsync"
+        rsync -a --delete \
+            --exclude='.env' \
+            --exclude='*.db*' \
+            --exclude='.git' \
+            --exclude='venv/' \
+            --exclude='__pycache__/' \
+            "$START_DIR/" "$PROJECT_DIR/" || error "Ошибка rsync"
     fi
     cd "$PROJECT_DIR"
 }
@@ -230,12 +317,14 @@ setup_venv() {
     log "Настройка Python VENV..."
     [ ! -d "$VENV_DIR" ] && python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
+
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
 
     local pip_log="$PROJECT_DIR/pip-install.log"
     if ! pip install -r "$PROJECT_DIR/requirements.txt" > "$pip_log" 2>&1; then
         error "Ошибка установки pip. Лог: $pip_log"
     fi
+
     success "Зависимости Python установлены"
 }
 
@@ -279,7 +368,6 @@ setup_env() {
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET; echo ""
         [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET обязателен"
-
         read -p "Введите домен для callback (например: just1kbot.1337.cx): " PLATEGA_CALLBACK_DOMAIN
         [ -z "$PLATEGA_CALLBACK_DOMAIN" ] && error "Домен обязателен"
     fi
@@ -307,11 +395,16 @@ setup_env() {
     fi
 
     : > "$PROJECT_DIR/.env"
+
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
     write_env_var "DB_ENCRYPTION_KEY" "$DB_KEY"
     write_env_var "DATABASE_URL" "postgresql+asyncpg://projectx:${DB_PASSWORD}@localhost:5432/projectx_bot"
+
+    # 🔥 НОВОЕ: Redis URL для FSM Storage
+    write_env_var "REDIS_URL" "redis://localhost:6379/0"
+    write_env_var "REDIS_KEY_PREFIX" "projectx_bot:"
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         local CALLBACK_URL="https://${PLATEGA_CALLBACK_DOMAIN}/webhook/platega"
@@ -323,7 +416,7 @@ setup_env() {
 
     chown projectx:projectx "$PROJECT_DIR/.env"
     chmod 600 "$PROJECT_DIR/.env"
-    success ".env защищён"
+    success ".env защищён (включая REDIS_URL)"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -357,7 +450,8 @@ setup_systemd() {
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
-After=network.target postgresql.service
+After=network.target postgresql.service redis-server.service
+Requires=postgresql.service redis-server.service
 
 [Service]
 Type=simple
@@ -382,7 +476,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
-    success "Systemd настроен (ProtectSystem=strict)"
+    success "Systemd настроен (зависимости: PostgreSQL + Redis)"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -401,13 +495,16 @@ setup_nginx_ssl() {
     WEBHOOK_PORT=${WEBHOOK_PORT:-8080}
 
     log "Настройка Nginx для $DOMAIN (proxy на порт $WEBHOOK_PORT)"
+
     rm -f /etc/nginx/sites-enabled/default
 
     cat > "/etc/nginx/sites-available/projectx" << NGINXEOF
 limit_req_zone \$binary_remote_addr zone=mylimit:10m rate=10r/s;
+
 server {
     listen 80;
     server_name $DOMAIN;
+
     location /webhook/platega {
         limit_req zone=mylimit burst=20 nodelay;
         proxy_pass http://127.0.0.1:${WEBHOOK_PORT};
@@ -415,12 +512,15 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_connect_timeout 10s;
         proxy_read_timeout 30s;
+        client_max_body_size 1m;
     }
+
     location / { return 404; }
 }
 NGINXEOF
 
     ln -sf /etc/nginx/sites-available/projectx /etc/nginx/sites-enabled/
+
     if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx
         success "Nginx настроен и перезапущен"
@@ -438,7 +538,7 @@ NGINXEOF
 # BACKUP & MONITORING
 # ═══════════════════════════════════════════════════════════════
 setup_backup() {
-    log "Настройка бэкапов PostgreSQL..."
+    log "Настройка бэкапов PostgreSQL + Redis..."
     mkdir -p "$BACKUP_DIR"
     chown projectx:projectx "$BACKUP_DIR"
 
@@ -448,12 +548,19 @@ DIR="/root/backups/projectx"
 DATE=$(date +%Y%m%d_%H%M%S)
 DB_BACKUP="$DIR/db_$DATE.sql.gz"
 
-# Бэкап через pg_dump
+# Бэкап PostgreSQL через pg_dump
 if sudo -u postgres pg_dump -Fc projectx_bot | gzip > "$DB_BACKUP"; then
-    echo "[$(date)] Backup created: db_$DATE.sql.gz"
+    echo "[$(date)] PostgreSQL backup created: db_$DATE.sql.gz"
 else
     echo "[$(date)] ERROR: Failed to create PostgreSQL backup" >&2
     exit 1
+fi
+
+# Бэкап Redis (RDB snapshot)
+REDIS_DUMP="/var/lib/redis/dump.rdb"
+if [[ -f "$REDIS_DUMP" ]]; then
+    cp "$REDIS_DUMP" "$DIR/redis_$DATE.rdb" && gzip "$DIR/redis_$DATE.rdb"
+    echo "[$(date)] Redis backup created: redis_$DATE.rdb.gz"
 fi
 
 # Бэкап .env
@@ -465,7 +572,7 @@ EOF
 
     chmod +x /usr/local/bin/projectx-backup.sh
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "0 3 * * * /usr/local/bin/projectx-backup.sh") | crontab -
-    success "Автобэкапы PostgreSQL настроены"
+    success "Автобэкапы PostgreSQL + Redis настроены"
 }
 
 setup_monitoring() {
@@ -474,6 +581,7 @@ setup_monitoring() {
     cat > /usr/local/bin/projectx-healthcheck.sh << 'EOF'
 #!/bin/bash
 CRASH_FILE="/opt/projectx-bot/.crash-count"
+
 if [ "$(systemctl is-enabled projectx-bot 2>/dev/null)" = "enabled" ] && ! systemctl is-active --quiet projectx-bot; then
     COUNT=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
     if [ "$COUNT" -ge 5 ]; then exit 0; fi
@@ -524,24 +632,26 @@ show_status() {
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v5.0 (PostgreSQL)${NC}\n"
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v6.0 (PostgreSQL + Redis)${NC}\n"
+
     mkdir -p /var/log "$SNAPSHOT_DIR"
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 
-    preflight_checks || rollback "preflight_checks" "Pre-flight checks failed"
+    preflight_checks    || rollback "preflight_checks" "Pre-flight checks failed"
     install_dependencies || rollback "install_dependencies" "Failed to install dependencies"
-    setup_postgresql || rollback "setup_postgresql" "PostgreSQL setup failed"
-    setup_firewall || rollback "setup_firewall" "Firewall setup failed"
-    migrate_to_opt || rollback "migrate_to_opt" "Project sync failed"
-    setup_venv || rollback "setup_venv" "Python venv setup failed"
-    setup_env || rollback "setup_env" "Environment config failed"
-    verify_permissions || rollback "verify_permissions" "Permissions setup failed"
-    init_database || rollback "init_database" "Database initialization failed"
-    setup_systemd || rollback "setup_systemd" "Systemd setup failed"
-    setup_nginx_ssl || rollback "setup_nginx_ssl" "Nginx/SSL setup failed"
-    setup_backup || rollback "setup_backup" "Backup setup failed"
-    setup_monitoring || rollback "setup_monitoring" "Monitoring setup failed"
-    start_bot || rollback "start_bot" "Bot startup failed"
+    setup_postgresql    || rollback "setup_postgresql" "PostgreSQL setup failed"
+    setup_redis         || rollback "setup_redis" "Redis setup failed"
+    setup_firewall      || rollback "setup_firewall" "Firewall setup failed"
+    migrate_to_opt      || rollback "migrate_to_opt" "Project sync failed"
+    setup_venv          || rollback "setup_venv" "Python venv setup failed"
+    setup_env           || rollback "setup_env" "Environment config failed"
+    verify_permissions  || rollback "verify_permissions" "Permissions setup failed"
+    init_database       || rollback "init_database" "Database initialization failed"
+    setup_systemd       || rollback "setup_systemd" "Systemd setup failed"
+    setup_nginx_ssl     || rollback "setup_nginx_ssl" "Nginx/SSL setup failed"
+    setup_backup        || rollback "setup_backup" "Backup setup failed"
+    setup_monitoring    || rollback "setup_monitoring" "Monitoring setup failed"
+    start_bot           || rollback "start_bot" "Bot startup failed"
 
     success "✨ Deploy completed successfully!"
 }
@@ -550,12 +660,12 @@ main() {
 # CLI INTERFACE
 # ═══════════════════════════════════════════════════════════════
 case "${1:-}" in
-    --status) show_status ;;
-    --logs) journalctl -u "$SERVICE_NAME" -f ;;
+    --status)  show_status ;;
+    --logs)    journalctl -u "$SERVICE_NAME" -f ;;
     --restart) systemctl restart "$SERVICE_NAME"; show_status ;;
-    --stop) systemctl stop "$SERVICE_NAME"; systemctl disable "$SERVICE_NAME"; success "Бот остановлен" ;;
-    --start) systemctl enable "$SERVICE_NAME"; systemctl start "$SERVICE_NAME"; show_status ;;
-    --backup) /usr/local/bin/projectx-backup.sh; success "Бэкап создан" ;;
+    --stop)    systemctl stop "$SERVICE_NAME"; systemctl disable "$SERVICE_NAME"; success "Бот остановлен" ;;
+    --start)   systemctl enable "$SERVICE_NAME"; systemctl start "$SERVICE_NAME"; show_status ;;
+    --backup)  /usr/local/bin/projectx-backup.sh; success "Бэкап создан" ;;
     --help|-h) echo "Использование: ./deploy.sh [--status|--logs|--restart|--stop|--start|--backup]" ;;
-    *) main ;;
+    *)         main ;;
 esac

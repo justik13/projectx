@@ -1,18 +1,9 @@
-"""
-Сервис обработки платежей.
-
-🔥 ИСПРАВЛЕНО (Часть 3):
-- Обновлённый вызов ReferralService.process_bonus с новыми параметрами
-- fix P2-12: invalidate_user_cache вынесен из except в chargeback
-- fix P2-4: Обработка «оплачен после отмены» с алертом
-"""
-
 import logging
+import asyncio
 from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.middlewares.user_context import invalidate_user_cache
 from database.repositories.payments_repo import get_user_payments, get_payment_by_id
 from database.models import Payment
@@ -30,12 +21,6 @@ class PaymentService:
     async def handle_successful_payment(
         session: AsyncSession, payment_id: int
     ) -> bool:
-        """
-        Обрабатывает успешную оплату. Возвращает True при успехе.
-        
-        🔥 ИСПРАВЛЕНО (Часть 3):
-        - Передаём is_first_payment и duration_days в ReferralService
-        """
         try:
             async with session.begin_nested() as savepoint:
                 stmt = (
@@ -49,8 +34,6 @@ class PaymentService:
                 result = await session.execute(stmt)
 
                 if result.rowcount == 0:
-                    # 🔥 ИСПРАВЛЕНО P2-4: Платёж уже не pending
-                    # (оплата прошла после отмены)
                     await savepoint.commit()
                     await _alert_paid_after_cancel(session, payment_id)
                     return True
@@ -93,14 +76,12 @@ class PaymentService:
                     await savepoint.rollback()
                     return False
 
-                # Проверка is_first_payment по paid_at IS NOT NULL
                 payments = await get_user_payments(session, user.id)
                 successful_payments = [
                     p for p in payments if p.paid_at is not None
                 ]
                 is_first_payment = len(successful_payments) == 1
 
-                # 🔥 ИСПРАВЛЕНО (Часть 3): Новые параметры для ReferralService
                 if user.referred_by:
                     try:
                         await ReferralService.process_bonus(
@@ -142,8 +123,8 @@ class PaymentService:
                     f"Payment {payment_id} processed successfully "
                     f"for user {user.telegram_id}"
                 )
-
                 return True
+
         except Exception as e:
             await session.rollback()
             logger.error(
@@ -158,8 +139,8 @@ class PaymentService:
         amount: float, telegram_id: int, bot_username: str,
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
-
         settings = get_settings()
+
         payment = await create_payment(
             session=session, user_id=user_id, tariff_id=tariff_id,
             amount=int(amount), currency="RUB",
@@ -185,7 +166,6 @@ class PaymentService:
 
         if not transaction:
             payment.status = "failed"
-
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_FAILED",
@@ -199,7 +179,6 @@ class PaymentService:
                 logger.error(
                     f"Failed to log payment failure to audit: {e}"
                 )
-
             return payment, None
 
         payment.external_id = transaction.get("transactionId")
@@ -215,12 +194,6 @@ class PaymentService:
         callback_amount: float | None = None,
         callback_payload: str | None = None,
     ) -> tuple[bool, str]:
-        """
-        Обрабатывает callback от Platega.io.
-        
-        🔥 ИСПРАВЛЕНО (Часть 2):
-        - Сверка amount и payload из callback
-        """
         stmt = (
             select(Payment)
             .options(
@@ -243,7 +216,6 @@ class PaymentService:
         )
 
         if status == "CONFIRMED":
-            # Сверка amount
             if (
                 callback_amount is not None
                 and payment.amount != int(callback_amount)
@@ -269,7 +241,6 @@ class PaymentService:
                     pass
                 return False, "amount_mismatch"
 
-            # Сверка payload
             expected_payload = f"payment_{payment.id}"
             if (
                 callback_payload is not None
@@ -311,7 +282,6 @@ class PaymentService:
                 return True, "already_processed"
 
             payment.status = "cancelled"
-
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_CANCELLED",
@@ -325,7 +295,6 @@ class PaymentService:
                 logger.error(
                     f"Failed to log payment cancellation to audit: {e}"
                 )
-
             return True, "success"
 
         elif status == "CHARGEBACKED":
@@ -337,8 +306,8 @@ class PaymentService:
                 return True, "already_processed"
 
             payment.status = "refunded"
-
             user = payment.user
+
             if user:
                 from database.repositories.profiles_repo import get_user_profiles
                 from database.repositories.servers_repo import get_server_by_id
@@ -349,7 +318,10 @@ class PaymentService:
                 user.current_tariff_id = None
 
                 profiles = await get_user_profiles(session, user.id)
+
                 if profiles:
+                    # 🔥 ИСПРАВЛЕНО: Параллельное отключение через asyncio.gather
+                    tasks_info = []
                     for profile in profiles:
                         profile.is_active = False
                         try:
@@ -357,22 +329,56 @@ class PaymentService:
                                 session, profile.server_id
                             )
                             if server and server.api_url:
-                                api = AmneziaClient(
-                                    server.api_url, server.api_key
-                                )
-                                await api.update_client(
-                                    client_id=profile.peer_id,
-                                    status="disabled",
-                                )
+                                tasks_info.append({
+                                    'api_url': server.api_url,
+                                    'api_key': server.api_key,
+                                    'peer_id': profile.peer_id,
+                                    'profile_id': profile.id,
+                                })
                         except Exception as e:
                             logger.warning(
-                                "Chargeback: failed to disable profile %s "
-                                "on server %s: %s",
-                                profile.id, profile.server_id, e,
+                                "Chargeback: failed to get server for "
+                                "profile %s: %s",
+                                profile.id, e,
                             )
 
-                # 🔥 ИСПРАВЛЕНО P2-12: invalidate_user_cache ВЫНЕСЕН из except
-                # Было внутри except → при успехе кэш не сбрасывался
+                    if tasks_info:
+                        sem = asyncio.Semaphore(20)
+
+                        async def _disable_peer(info):
+                            async with sem:
+                                api = AmneziaClient(
+                                    info['api_url'], info['api_key']
+                                )
+                                try:
+                                    return await api.update_client(
+                                        client_id=info['peer_id'],
+                                        status="disabled",
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        "Chargeback: failed to disable "
+                                        "profile %s: %s",
+                                        info['profile_id'], e,
+                                    )
+                                    return False
+
+                        results = await asyncio.gather(
+                            *[_disable_peer(info) for info in tasks_info],
+                            return_exceptions=True,
+                        )
+                        api_errors = [
+                            r for r in results
+                            if isinstance(r, Exception) or r is False
+                        ]
+                        if api_errors:
+                            logger.warning(
+                                "Chargeback: %d/%d API calls failed for "
+                                "user %s",
+                                len(api_errors), len(tasks_info),
+                                user.telegram_id,
+                            )
+
                 invalidate_user_cache(user.telegram_id)
 
                 logger.warning(
@@ -399,7 +405,6 @@ class PaymentService:
                 )
 
             await _send_chargeback_alert(payment, transaction_id)
-
             return True, "success"
 
         logger.warning(f"Unknown Platega status: {status}")
@@ -422,14 +427,12 @@ class PaymentService:
             return False
 
         status = status_data.get("status")
-
         if status == "CONFIRMED":
             return await PaymentService.handle_successful_payment(
                 session, payment.id
             )
         elif status == "CANCELED":
             payment.status = "cancelled"
-
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_CANCELLED",
@@ -443,7 +446,6 @@ class PaymentService:
                 logger.error(
                     f"Failed to log payment cancellation to audit: {e}"
                 )
-
             return False
 
         return False
@@ -452,12 +454,7 @@ class PaymentService:
 async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
-    """
-    🔥 ИСПРАВЛЕНО P2-4: Алерт админу при ситуации
-    «оплата прошла после отмены платежа».
-    """
     from services.workers.heartbeat import get_bot_ref
-
     bot = get_bot_ref()
     if bot is None:
         logger.error(
@@ -520,10 +517,8 @@ async def _alert_paid_after_cancel(
 async def _send_chargeback_alert(
     payment: Payment, transaction_id: str
 ) -> None:
-    """Отправляет алерт админам о chargeback."""
     from services.workers.heartbeat import get_bot_ref
     from aiogram.utils.keyboard import InlineKeyboardBuilder
-    from aiogram.types import LinkPreviewOptions
 
     bot = get_bot_ref()
     if bot is None:
@@ -563,4 +558,24 @@ async def _send_chargeback_alert(
     alert_msg = (
         f"🚨 <b>CHARGEBACK (Возврат средств)</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Платёж ID:</b> <code>{
+        f"💳 <b>Платёж ID:</b> <code>{payment.id}</code>\n"
+        f"👤 <b>Пользователь:</b> "
+        f"<code>{user.telegram_id if user else '—'}</code> ({username})\n"
+        f"💎 <b>Тариф:</b> {tariff_name}\n"
+        f"💰 <b>Сумма:</b> <b>{payment.amount} {payment.currency}</b>\n"
+        f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Доступ отозван. Все устройства отключены.</i>"
+    )
+
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(
+                admin_id, alert_msg,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to send chargeback alert to admin {admin_id}: {e}"
+            )
