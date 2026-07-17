@@ -1,3 +1,9 @@
+"""
+🔥 ИСПРАВЛЕНО (Часть 1):
+- broadcast_stop с проверкой is_admin
+- Per-admin broadcast_stop_events (вместо глобального)
+"""
+
 import asyncio
 import logging
 from aiogram import Router, F
@@ -7,12 +13,16 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards import get_broadcast_confirm_keyboard, get_back_button
-from bot.keyboards.admin.broadcast import get_broadcast_result_keyboard, get_broadcast_close_keyboard
+from bot.keyboards.admin.broadcast import (
+    get_broadcast_result_keyboard, get_broadcast_close_keyboard
+)
 from bot.states import AdminStates
 from bot import texts
 from bot.constants import BROADCAST_DELAY
 from database.connection import session_scope
-from database.repositories.users_repo import get_active_users, get_all_users, mark_user_bot_blocked
+from database.repositories.users_repo import (
+    get_active_users, get_all_users, mark_user_bot_blocked
+)
 from services.audit_service import AuditService
 from utils.admin import is_admin
 from utils.telegram import render_hub, send_hub_photo
@@ -20,13 +30,21 @@ from utils.telegram import render_hub, send_hub_photo
 router = Router()
 logger = logging.getLogger(__name__)
 
-_broadcast_stop_event = asyncio.Event()
+# 🔥 ИСПРАВЛЕНО #11: Per-admin stop events вместо глобального
+# Раньше: _broadcast_stop_event = asyncio.Event() — один на всех админов.
+# Если админ A делает рассылку, а админ B нажимает Stop — рассылка A останавливается.
+# Теперь: per-admin dict, каждый админ управляет своей рассылкой.
+_broadcast_stop_events: dict[int, asyncio.Event] = {}
 
 # 🔥 ИСПРАВЛЕНО #1: Защита от double-launch рассылки.
-# Хранит admin_id, у которого сейчас идёт рассылка.
-# ActionLock освобождается мгновенно после create_task,
-# поэтому без этой проверки админ может нажать «Отправить» дважды.
 _broadcast_in_progress: set[int] = set()
+
+
+def _get_stop_event(admin_id: int) -> asyncio.Event:
+    """Возвращает per-admin stop event, создаёт при первом обращении."""
+    if admin_id not in _broadcast_stop_events:
+        _broadcast_stop_events[admin_id] = asyncio.Event()
+    return _broadcast_stop_events[admin_id]
 
 
 @router.callback_query(F.data == "admin_broadcast")
@@ -35,13 +53,16 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     await state.clear()
+
     try:
         await callback.message.edit_text(
             texts.BROADCAST_PROMPT, reply_markup=get_back_button("admin_menu"),
         )
     except Exception:
         pass
+
     await state.set_state(AdminStates.entering_broadcast_message)
 
 
@@ -53,48 +74,66 @@ async def process_broadcast_message(message: Message, state: FSMContext):
 
     broadcast_text = message.text or message.caption
     if not broadcast_text:
-        await render_hub(message.bot, message.chat.id, texts.ERROR_TEXT_OR_MEDIA, get_back_button("admin_menu"))
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_TEXT_OR_MEDIA, get_back_button("admin_menu")
+        )
         return
 
     media_id = None
     content_type = message.content_type
+
     if message.photo:
         media_id = message.photo[-1].file_id
     elif message.document:
         media_id = message.document.file_id
 
-    preview = texts.BROADCAST_PREVIEW.format(content_type=content_type, text=broadcast_text)
+    preview = texts.BROADCAST_PREVIEW.format(
+        content_type=content_type, text=broadcast_text
+    )
 
     try:
         if media_id and content_type == "photo":
             await send_hub_photo(
                 message.bot, message.chat.id, message.photo[-1],
-                caption=preview, reply_markup=get_broadcast_confirm_keyboard(), parse_mode="HTML",
+                caption=preview, reply_markup=get_broadcast_confirm_keyboard(),
+                parse_mode="HTML",
             )
         elif media_id and content_type == "document":
             from utils.telegram import send_hub_document
             await send_hub_document(
                 message.bot, message.chat.id, message.document,
-                caption=preview, reply_markup=get_broadcast_confirm_keyboard(), parse_mode="HTML",
+                caption=preview, reply_markup=get_broadcast_confirm_keyboard(),
+                parse_mode="HTML",
             )
         else:
             await render_hub(
                 message.bot, message.chat.id, preview,
                 get_broadcast_confirm_keyboard(), parse_mode="HTML",
             )
+
         await state.update_data(
-            broadcast_text=broadcast_text, media_id=media_id, content_type=content_type,
+            broadcast_text=broadcast_text, media_id=media_id,
+            content_type=content_type,
         )
         await state.set_state(AdminStates.confirming_broadcast)
     except Exception as e:
-        await render_hub(message.bot, message.chat.id, texts.ERROR_VALIDATION.format(error=e), get_back_button("admin_menu"))
+        await render_hub(
+            message.bot, message.chat.id,
+            texts.ERROR_VALIDATION.format(error=e),
+            get_back_button("admin_menu")
+        )
 
 
 async def _send_with_html(bot, uid, text, media_id, content_type, kb):
     if content_type == "photo" and media_id:
-        await bot.send_photo(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
+        await bot.send_photo(
+            uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb
+        )
     elif content_type == "document" and media_id:
-        await bot.send_document(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
+        await bot.send_document(
+            uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb
+        )
     else:
         await bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
 
@@ -115,14 +154,21 @@ async def _dispatch_message(bot, uid, text, media_id, content_type):
         await _send_with_html(bot, uid, text, media_id, content_type, kb)
     except TelegramBadRequest as e:
         if "can't parse entities" in str(e).lower() or "parse" in str(e).lower():
-            logger.warning(f"HTML parse failed for user {uid}, falling back to plain text")
+            logger.warning(
+                f"HTML parse failed for user {uid}, falling back to plain text"
+            )
             await _send_plain(bot, uid, text, media_id, content_type, kb)
         else:
             raise
 
 
-async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, content_type, label, admin_id):
-    _broadcast_stop_event.clear()
+async def _send_broadcast_to_users(
+    bot, user_ids, broadcast_text, media_id, content_type, label, admin_id
+):
+    # 🔥 ИСПРАВЛЕНО #11: Используем per-admin stop event
+    stop_event = _get_stop_event(admin_id)
+    stop_event.clear()
+
     total_count = len(user_ids)
     success_count = 0
     fail_count = 0
@@ -130,8 +176,10 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
 
     try:
         for uid in user_ids:
-            if _broadcast_stop_event.is_set():
+            # 🔥 ИСПРАВЛЕНО #11: Проверяем per-admin stop event
+            if stop_event.is_set():
                 break
+
             try:
                 await _dispatch_message(bot, uid, broadcast_text, media_id, content_type)
                 success_count += 1
@@ -140,7 +188,9 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
                 fail_count += 1
                 await asyncio.sleep(e.retry_after + 1)
                 try:
-                    await _dispatch_message(bot, uid, broadcast_text, media_id, content_type)
+                    await _dispatch_message(
+                        bot, uid, broadcast_text, media_id, content_type
+                    )
                     success_count += 1
                     fail_count -= 1
                 except Exception:
@@ -153,6 +203,8 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
     finally:
         # 🔥 ИСПРАВЛЕНО #1: Освобождаем lock в любом случае (даже при ошибке)
         _broadcast_in_progress.discard(admin_id)
+        # Очищаем stop event
+        stop_event.clear()
 
     if blocked_user_ids:
         try:
@@ -184,8 +236,12 @@ async def _send_broadcast_to_users(bot, user_ids, broadcast_text, media_id, cont
         pass
 
 
-@router.callback_query(F.data == "broadcast_send_all", AdminStates.confirming_broadcast)
-async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+@router.callback_query(
+    F.data == "broadcast_send_all", AdminStates.confirming_broadcast
+)
+async def broadcast_to_all(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession = None
+):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -194,7 +250,9 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: 
 
     # 🔥 ИСПРАВЛЕНО #1: Проверка ДО create_task
     if admin_id in _broadcast_in_progress:
-        await callback.answer("⏳ Рассылка уже идёт, дождитесь завершения", show_alert=True)
+        await callback.answer(
+            "⏳ Рассылка уже идёт, дождитесь завершения", show_alert=True
+        )
         return
 
     await callback.answer("🚀 Рассылка запущена в фоне")
@@ -216,7 +274,8 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: 
     _broadcast_in_progress.add(admin_id)
 
     asyncio.create_task(_send_broadcast_to_users(
-        callback.bot, user_ids, broadcast_text, media_id, content_type, "Всего", admin_id,
+        callback.bot, user_ids, broadcast_text, media_id,
+        content_type, "Всего", admin_id,
     ))
 
     try:
@@ -228,11 +287,16 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: 
         )
     except Exception:
         pass
+
     await state.clear()
 
 
-@router.callback_query(F.data == "broadcast_send_active", AdminStates.confirming_broadcast)
-async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+@router.callback_query(
+    F.data == "broadcast_send_active", AdminStates.confirming_broadcast
+)
+async def broadcast_to_active(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession = None
+):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
@@ -241,7 +305,9 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, sessio
 
     # 🔥 ИСПРАВЛЕНО #1: Проверка ДО create_task
     if admin_id in _broadcast_in_progress:
-        await callback.answer("⏳ Рассылка уже идёт, дождитесь завершения", show_alert=True)
+        await callback.answer(
+            "⏳ Рассылка уже идёт, дождитесь завершения", show_alert=True
+        )
         return
 
     await callback.answer("🚀 Рассылка запущена в фоне")
@@ -263,7 +329,8 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, sessio
     _broadcast_in_progress.add(admin_id)
 
     asyncio.create_task(_send_broadcast_to_users(
-        callback.bot, user_ids, broadcast_text, media_id, content_type, "Активных", admin_id,
+        callback.bot, user_ids, broadcast_text, media_id,
+        content_type, "Активных", admin_id,
     ))
 
     try:
@@ -275,13 +342,22 @@ async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, sessio
         )
     except Exception:
         pass
+
     await state.clear()
 
 
 @router.callback_query(F.data == "broadcast_stop")
 async def stop_broadcast(callback: CallbackQuery):
+    # 🔥 ИСПРАВЛЕНО #11: Проверка is_admin + per-admin stop event
+    if not is_admin(callback.from_user.id):
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
+        return
+
+    admin_id = callback.from_user.id
+    stop_event = _get_stop_event(admin_id)
+    stop_event.set()
+
     await callback.answer("⏹ Рассылка остановлена", show_alert=True)
-    _broadcast_stop_event.set()
 
 
 @router.callback_query(F.data == "broadcast_dismiss")
