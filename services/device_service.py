@@ -37,6 +37,7 @@ from services.audit_service import AuditService
 from services.slots_cache import get_real_peer_count
 from database.repositories.profiles_repo import create_profile, get_user_profiles_count
 from database.repositories.servers_repo import get_server_by_id
+from database.repositories.users_repo import get_user_by_telegram_id
 from database.models import User, VPNProfile
 from bot.constants import AMNEZIA_PROTOCOL, DEVICE_DAILY_LIMIT
 from utils.vpn_parser import is_valid_vpn_uri
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 # Часовой пояс Москвы для сброса daily limit
 MSK_TZ = ZoneInfo("Europe/Moscow")
+
 
 # ⚠️ In-memory lock — сбрасывается при рестарте бота.
 # Для single-worker это acceptable risk.
@@ -78,25 +80,26 @@ class DeviceService:
     ) -> VPNProfile | None:
         """
         Создаёт новое устройство для пользователя.
-
+        
         Flow:
         1. Pre-flight check: проверяем реальные слоты через API (force_refresh=True)
         2. Захватываем per-user lock для предотвращения race conditions
-        3. 🔥 ИСПРАВЛЕНО: Проверяем daily device creation limit (25/день)
-        4. Генерируем client_name: tg_{telegram_id}_{device_name}_{4-char-hash}
-        5. Создаём клиента на сервере Amnezia API
-        6. Валидируем vpn:// URI (проверяем protocol_version == "2")
-        7. Проверяем device_limit через savepoint
-        8. Сохраняем профиль в БД
-        9. 🔥 ИСПРАВЛЕНО: Увеличиваем daily счётчик ПОСЛЕ успешного создания
-        10. Логируем в audit_logs
-
+        3. 🔥 ИСПРАВЛЕНО #26: Перезагружаем user из текущей сессии (защита от detached объекта)
+        4. 🔥 ИСПРАВЛЕНО: Проверяем daily device creation limit (25/день)
+        5. Генерируем client_name: tg_{telegram_id}_{device_name}_{4-char-hash}
+        6. Создаём клиента на сервере Amnezia API
+        7. Валидируем vpn:// URI (проверяем protocol_version == "2")
+        8. Проверяем device_limit через savepoint
+        9. Сохраняем профиль в БД
+        10. 🔥 ИСПРАВЛЕНО: Увеличиваем daily счётчик ПОСЛЕ успешного создания
+        11. Логируем в audit_logs
+        
         Args:
             session: SQLAlchemy async session
             user: Объект пользователя (User)
             server_id: ID сервера в БД
             device_name: Имя устройства (макс. 16 символов)
-
+            
         Returns:
             VPNProfile если успешно создано
             None если:
@@ -105,14 +108,14 @@ class DeviceService:
             - API вернул невалидный vpn:// URI
             - Достигнут device_limit
             - DB IntegrityError (дубликат peer_id)
-
+            
         Side effects:
             - Создаёт клиента на Amnezia API
             - Увеличивает User.device_creations_today
             - Пишет в audit_logs (action="DEVICE_CREATED")
             - При блокировке по daily limit — логирует "DEVICE_CREATE_BLOCKED"
             - При ошибке — откатывает создание через API DELETE
-
+            
         Thread-safety:
             Использует per-user asyncio.Lock для предотвращения race conditions
             при параллельном создании устройств.
@@ -123,7 +126,7 @@ class DeviceService:
                 f"create_device: invalid server {server_id} or protocol mismatch"
             )
             return None
-
+        
         # PRE-FLIGHT CHECK: реальное количество слотов через API
         real_count = await get_real_peer_count(server, force_refresh=True)
         if real_count != -1 and real_count >= server.max_clients:
@@ -132,14 +135,25 @@ class DeviceService:
                 f"(API: {real_count}/{server.max_clients}). Aborting."
             )
             return None
-
+        
         lock = _get_user_lock(user.id)
         async with lock:
+            # 🔥 ИСПРАВЛЕНО #26: Перезагружаем user из текущей сессии
+            # UserContextMiddleware кэширует User объект с TTL=5с.
+            # Если пользователь делает 2 создания устройств за 5 секунд,
+            # второй user будет detached (из предыдущей, уже закрытой сессии).
+            # Изменения device_creations_today не попадут в БД.
+            # Решение: перезагружаем user из текущей сессии внутри lock.
+            user = await get_user_by_telegram_id(session, user.telegram_id)
+            if not user:
+                logger.error(f"create_device: user {user.telegram_id} not found after reload")
+                return None
+            
             # 🔥 ИСПРАВЛЕНО: Daily device creation limit (25/день МСК)
             # Админы исключены из лимита
             if not is_admin(user.telegram_id):
                 now_msk = datetime.now(MSK_TZ).date()
-
+                
                 # Проверяем, нужно ли сбрасывать счётчик (новый день по МСК)
                 if not _is_same_day_msk(user.last_creation_date, now_msk):
                     # Новый день — сбрасываем счётчик
@@ -147,13 +161,14 @@ class DeviceService:
                     user.last_creation_date = now_msk
                     # 🔥 ИСПРАВЛЕНО: flush для применения изменений до проверки
                     await session.flush()
-
+                
                 if user.device_creations_today >= DEVICE_DAILY_LIMIT:
                     # Превышен лимит — блокируем создание
                     logger.warning(
                         f"create_device: user {user.telegram_id} exceeded daily limit "
                         f"({user.device_creations_today}/{DEVICE_DAILY_LIMIT}). Blocked."
                     )
+                    
                     # 🔥 ИСПРАВЛЕНО: Логируем блокировку в audit_logs (Вариант A)
                     try:
                         await AuditService.log_action(
@@ -164,7 +179,7 @@ class DeviceService:
                         )
                     except Exception as audit_error:
                         logger.error(f"Failed to log DEVICE_CREATE_BLOCKED: {audit_error}")
-
+                    
                     # ВАЖНО: Возвращаем специальное значение, чтобы handler понял причину
                     # Но тип возвращаемого значения — VPNProfile | None
                     # Используем соглашение: None + специальный logger warning
@@ -174,30 +189,30 @@ class DeviceService:
                     # Устанавливаем маркер в user для handler'а
                     user._daily_limit_exceeded = True  # type: ignore[attr-defined]
                     return None
-
+            
             short_hash = uuid.uuid4().hex[:4]
             clean_device_name = re.sub(r'[^a-zA-Z0-9]', '', device_name)[:10]
-
+            
             # 🔥 ИСПРАВЛЕНО #9: Fallback для пустого имени
             if not clean_device_name:
                 clean_device_name = "Device"
-
+            
             client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
+            
             expires_ts = await SubscriptionService.get_expires_timestamp(user)
-
             client = AmneziaClient(server.api_url, server.api_key)
             result = await client.create_user(client_name=client_name, expires_at=expires_ts)
-
+            
             if not result:
                 logger.error(
                     f"create_device: API create_user failed for user {user.telegram_id}, "
                     f"server {server.name}"
                 )
                 return None
-
+            
             peer_id = result.id
             raw_config = result.config
-
+            
             # Валидация vpn:// URI (должен быть protocol_version == "2")
             if not is_valid_vpn_uri(raw_config):
                 logger.error(
@@ -208,6 +223,7 @@ class DeviceService:
                     await client.delete_user(client_id=peer_id)
                 except Exception as rollback_error:
                     logger.error(f"Failed to rollback invalid config: {rollback_error}")
+                
                 try:
                     await AuditService.log_action(
                         session, admin_id=0, action="DEVICE_CREATE_FAILED",
@@ -216,39 +232,44 @@ class DeviceService:
                     )
                 except Exception as audit_error:
                     logger.error(f"Failed to log audit: {audit_error}")
+                
                 return None
-
+            
             try:
                 # Атомарность через savepoint (begin_nested)
                 async with session.begin_nested() as savepoint:
                     profiles_count = await get_user_profiles_count(session, user.id)
+                    
                     if profiles_count >= user.device_limit:
                         logger.info(
                             f"create_device: user {user.telegram_id} reached device limit "
                             f"({profiles_count}/{user.device_limit}) inside savepoint."
                         )
                         await savepoint.rollback()
+                        
                         try:
                             await client.delete_user(client_id=peer_id)
                         except Exception as rollback_error:
                             logger.error(
                                 f"Failed to rollback API client after limit check: {rollback_error}"
                             )
+                        
                         return None
-
+                    
                     profile = await create_profile(
                         session, user_id=user.id, server_id=server.id,
                         device_name=device_name, peer_id=peer_id, raw_config=raw_config
                     )
-
+                    
                     # 🔥 ИСПРАВЛЕНО: Увеличиваем daily счётчик ПОСЛЕ успешного создания
                     # (если API упал — лимит не тратится впустую)
                     if not is_admin(user.telegram_id):
                         user.device_creations_today += 1
-
+                    
                     await savepoint.commit()
-                    await session.commit()
-
+                    # 🔥 ИСПРАВЛЕНО #27: Убран session.commit() — DBSessionMiddleware сделает финальный commit
+                    # await session.commit()  # ← УДАЛЕНО
+                    
                     # Логирование успешного создания устройства
                     try:
                         await AuditService.log_action(
@@ -265,23 +286,26 @@ class DeviceService:
                         )
                     except Exception as audit_error:
                         logger.warning(f"Failed to log DEVICE_CREATED: {audit_error}")
-
+                    
                     logger.info(
                         f"Device created: user={user.telegram_id}, device={device_name}, "
                         f"server={server.name}, peer_id={peer_id[:16]}..., "
                         f"daily={user.device_creations_today}/{DEVICE_DAILY_LIMIT}"
                     )
+                    
                     return profile
-
+            
             except IntegrityError as e:
                 await session.rollback()
                 logger.error(
                     f"create_device: IntegrityError (duplicate peer_id?): {e}."
                 )
+                
                 try:
                     await client.delete_user(client_id=peer_id)
                 except Exception as rollback_error:
                     logger.error(f"Failed to rollback after IntegrityError: {rollback_error}")
+                
                 try:
                     await AuditService.log_action(
                         session, admin_id=0, action="DEVICE_CREATE_FAILED",
@@ -290,17 +314,20 @@ class DeviceService:
                     )
                 except Exception:
                     pass
+                
                 return None
-
+            
             except Exception as e:
                 await session.rollback()
                 logger.error(
                     f"create_device: DB error: {e}.", exc_info=True
                 )
+                
                 try:
                     await client.delete_user(client_id=peer_id)
                 except Exception as rollback_error:
                     logger.error(f"Failed to rollback after DB error: {rollback_error}")
+                
                 try:
                     await AuditService.log_action(
                         session, admin_id=0, action="DEVICE_CREATE_FAILED",
@@ -309,62 +336,65 @@ class DeviceService:
                     )
                 except Exception:
                     pass
+                
                 return None
-
+    
     @staticmethod
     async def delete_device(session: AsyncSession, profile: VPNProfile) -> bool:
         """
         Удаляет устройство пользователя.
-
+        
         Flow:
         1. Получаем сервер из БД
         2. Удаляем клиента из Amnezia API (DELETE /clients)
         3. Удаляем профиль из БД через savepoint
         4. Логируем в audit_logs (action="DEVICE_DELETED")
-
+        
         Args:
             session: SQLAlchemy async session
             profile: VPNProfile объект для удаления
-
+            
         Returns:
             True если успешно удалено из API и БД
             False если:
             - Сервер не найден
             - API delete_user вернул False (ошибка сети/таймаут)
             - DB error при удалении профиля
-
+            
         Side effects:
             - Удаляет клиента с Amnezia API (ключ становится невалидным)
             - Удаляет профиль из БД
             - Пишет в audit_logs
-
+            
         Atomicity:
             Использует begin_nested() (savepoint) для гарантии, что
             если удаление из API прошло, но БД упала — всё откатится.
         """
         from database.repositories.profiles_repo import delete_profile
         from database.repositories.servers_repo import get_server_by_id
-
+        
         server = await get_server_by_id(session, profile.server_id)
         if not server:
             logger.error(f"delete_device: server {profile.server_id} not found")
             return False
-
+        
         client = AmneziaClient(server.api_url, server.api_key)
         deleted = await client.delete_user(client_id=profile.peer_id)
+        
         if not deleted:
             logger.error(
                 f"delete_device: API delete_user failed for peer_id={profile.peer_id[:16]}..., "
                 f"server={server.name}"
             )
             return False
-
+        
         try:
             async with session.begin_nested() as savepoint:
                 await delete_profile(session, profile)
                 await savepoint.commit()
-                await session.commit()
-
+                # 🔥 ИСПРАВЛЕНО #27: Убран session.commit() — DBSessionMiddleware сделает финальный commit
+                # await session.commit()  # ← УДАЛЕНО
+                
                 # Логирование успешного удаления
                 try:
                     await AuditService.log_action(
@@ -380,17 +410,20 @@ class DeviceService:
                     )
                 except Exception as audit_error:
                     logger.warning(f"Failed to log DEVICE_DELETED: {audit_error}")
-
+                
                 logger.info(
                     f"Device deleted: profile_id={profile.id}, "
                     f"peer_id={profile.peer_id[:16]}..., server={server.name}"
                 )
+                
                 return True
+        
         except Exception as e:
             await session.rollback()
             logger.error(
                 f"delete_device: DB error: {e}.", exc_info=True
             )
+            
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="DEVICE_DELETE_DB_ERROR",
@@ -399,4 +432,5 @@ class DeviceService:
                 )
             except Exception:
                 pass
+            
             return False
