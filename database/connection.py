@@ -23,19 +23,22 @@ async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
     db_url = f"sqlite+aiosqlite:///{settings.DB_PATH}"
-
-    # 🔥 ИСПРАВЛЕНО #14 (из Части 5): Connection pool для SQLite
+    
+    # 🔥 ИСПРАВЛЕНО #25: Увеличен connection pool для 1000 пользователей
+    # Было: pool_size=5, max_overflow=10
+    # Стало: pool_size=20, max_overflow=30, timeout=60с
     _engine = create_async_engine(
         db_url,
         echo=False,
-        connect_args={"check_same_thread": False, "timeout": 30},
-        pool_size=5,
-        max_overflow=10,
-        pool_timeout=30,
+        connect_args={"check_same_thread": False, "timeout": 60},
+        pool_size=20,
+        max_overflow=30,
+        pool_timeout=60,
         pool_pre_ping=True,
     )
+    
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
-
+    
     @event.listens_for(_engine.sync_engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
@@ -45,12 +48,12 @@ async def init_db():
         cursor.execute("PRAGMA cache_size=-64000")
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
-
+    
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _run_migrations(conn)
         await _seed_default_tariffs()
-
+    
     logging.info(f"Database initialized at {settings.DB_PATH}")
     return _engine, _sessionmaker
 
@@ -66,6 +69,7 @@ async def _run_migrations(conn):
                 sync_conn.execute(text("ALTER TABLE tariffs ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 2"))
             
             user_columns = {col['name'] for col in inspector.get_columns('users')}
+            
             if 'device_limit' not in user_columns:
                 sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0"))
             
@@ -131,6 +135,48 @@ async def _run_migrations(conn):
                     text("ALTER TABLE users ADD COLUMN last_notification_attempt DATETIME DEFAULT NULL")
                 )
                 logging.info("Migration: added last_notification_attempt column to users")
+            
+            # 🔥 ИСПРАВЛЕНО #23: Миграция для daily device limit (Spam protection)
+            if 'device_creations_today' not in user_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE users ADD COLUMN device_creations_today INTEGER NOT NULL DEFAULT 0")
+                )
+                logging.info("Migration: added device_creations_today column to users")
+            
+            if 'last_creation_date' not in user_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE users ADD COLUMN last_creation_date DATE DEFAULT NULL")
+                )
+                logging.info("Migration: added last_creation_date column to users")
+            
+            # 🔥 ИСПРАВЛЕНО #24: Миграция для BroadcastProgress таблицы
+            tables = inspector.get_table_names()
+            if 'broadcast_progress' not in tables:
+                sync_conn.execute(text("""
+                    CREATE TABLE broadcast_progress (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        admin_id INTEGER NOT NULL,
+                        total_count INTEGER NOT NULL,
+                        success_count INTEGER DEFAULT 0,
+                        fail_count INTEGER DEFAULT 0,
+                        last_processed_index INTEGER DEFAULT 0,
+                        user_ids_json TEXT NOT NULL,
+                        broadcast_text TEXT NOT NULL,
+                        media_id VARCHAR(255),
+                        content_type VARCHAR(50) NOT NULL,
+                        label VARCHAR(50) NOT NULL,
+                        status VARCHAR(20) DEFAULT 'in_progress',
+                        created_at DATETIME,
+                        updated_at DATETIME
+                    )
+                """))
+                sync_conn.execute(
+                    text("CREATE INDEX ix_broadcast_progress_admin_id ON broadcast_progress(admin_id)")
+                )
+                sync_conn.execute(
+                    text("CREATE INDEX ix_broadcast_progress_status ON broadcast_progress(status)")
+                )
+                logging.info("Migration: created broadcast_progress table")
         
         await conn.run_sync(check_and_migrate)
     except Exception as e:
