@@ -42,13 +42,13 @@ from services.device_service import DeviceService
 from services.audit_service import AuditService
 from config.settings import get_settings
 from utils.admin import is_admin
+from bot.constants import PERMANENT_SUBSCRIPTION_DAYS, PERMANENT_END_DATE
+from bot.middlewares.user_context import invalidate_user_cache
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 USERS_PER_PAGE = 10
-PERMANENT_SUBSCRIPTION_DAYS = 36500
-PERMANENT_END_DATE = datetime(2099, 12, 31, 23, 59, 59)
 
 
 # ──────────────────────────────────────────────────────────
@@ -530,6 +530,7 @@ async def admin_sub_apply_tariff(callback: CallbackQuery, session: AsyncSession)
             new_device_limit=new_tariff.device_limit,
             new_tariff_id=new_tariff.id,
         )
+        invalidate_user_cache(telegram_id)  # 🔥 ИСПРАВЛЕНО: Инвалидация кэша
 
         tariff_name = get_tariff_group_name(new_tariff.device_limit)
 
@@ -654,6 +655,7 @@ async def admin_sub_apply_extend(callback: CallbackQuery, session: AsyncSession)
             session, telegram_id, days,
             new_device_limit=None, new_tariff_id=None,
         )
+        invalidate_user_cache(telegram_id)  # 🔥 ИСПРАВЛЕНО: Инвалидация кэша
 
         user = await get_user_by_telegram_id(session, telegram_id)
 
@@ -878,6 +880,7 @@ async def admin_sub_apply_reduce(callback: CallbackQuery, session: AsyncSession)
         user.notified_2h = False
 
         await session.flush()
+        invalidate_user_cache(telegram_id)  # 🔥 ИСПРАВЛЕНО: Инвалидация кэша
         # 🔥 УБРАН ручной commit — DBSessionMiddleware сделает это автоматически
 
         await AuditService.log_action(
@@ -1124,6 +1127,7 @@ async def admin_sub_grant_apply(callback: CallbackQuery, session: AsyncSession):
             new_device_limit=tariff.device_limit,
             new_tariff_id=tariff.id,
         )
+        invalidate_user_cache(telegram_id)  # 🔥 ИСПРАВЛЕНО: Инвалидация кэша
 
         days_text = "∞ навсегда" if days >= PERMANENT_SUBSCRIPTION_DAYS else f"{days} дн."
         tariff_name = get_tariff_group_name(tariff.device_limit)

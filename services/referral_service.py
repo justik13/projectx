@@ -20,6 +20,7 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.repositories.users_repo import get_user_by_telegram_id, update_user
 from services.subscription import SubscriptionService
+from bot.middlewares.user_context import invalidate_user_cache
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ class ReferralService:
                 await SubscriptionService.extend_subscription(
                     session, user_telegram_id, REFERRAL_FIRST_PURCHASE_BONUS
                 )
+                invalidate_user_cache(user_telegram_id)  # 🔥 ИСПРАВЛЕНО: Инвалидация кэша
                 logger.info(
                     f"Referral bonus: user {user_telegram_id} got "
                     f"+{REFERRAL_FIRST_PURCHASE_BONUS} days (first purchase)"
@@ -106,6 +108,7 @@ class ReferralService:
                 await SubscriptionService.extend_subscription(
                     session, referrer_telegram_id, REFERRER_FIRST_PURCHASE_BONUS
                 )
+                invalidate_user_cache(referrer_telegram_id)  # 🔥 ИСПРАВЛЕНО: Инвалидация кэша
                 new_referral_days = (
                     (referrer.referral_days or 0) + REFERRER_FIRST_PURCHASE_BONUS
                 )
@@ -134,6 +137,7 @@ class ReferralService:
                 await SubscriptionService.extend_subscription(
                     session, referrer_telegram_id, REFERRER_RENEWAL_BONUS
                 )
+                invalidate_user_cache(referrer_telegram_id)  # 🔥 ИСПРАВЛЕНО: Инвалидация кэша
                 new_referral_days = (
                     (referrer.referral_days or 0) + REFERRER_RENEWAL_BONUS
                 )

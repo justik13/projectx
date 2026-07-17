@@ -13,6 +13,7 @@ from database.models import User
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from bot.constants import PERMANENT_SUBSCRIPTION_DAYS, PERMANENT_END_DATE
+from bot.middlewares.user_context import invalidate_user_cache
 from services.amnezia_client import AmneziaClient
 import asyncio
 import logging
@@ -86,7 +87,10 @@ class SubscriptionService:
             user.current_tariff_id = new_tariff_id
         
         await session.flush()
-        
+
+        # 🔥 ИСПРАВЛЕНО: Инвалидация кэша User
+        invalidate_user_cache(telegram_id)
+
         # 🔥 ИСПРАВЛЕНО: Фоновая синхронизация expiresAt БЕЗ session
         expires_ts = await SubscriptionService.get_expires_timestamp(user)
         asyncio.create_task(
