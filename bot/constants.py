@@ -33,16 +33,14 @@ ITEMS_PER_PAGE = 10
 HUB_CACHE_MAX_SIZE = 10000
 HUB_CACHE_TTL = 43200
 USER_CONTEXT_CACHE_MAX_SIZE = 2000
-USER_CONTEXT_CACHE_TTL = 5.0
+# 🔥 ИСПРАВЛЕНО (Часть 2): TTL увеличен с 5с до 15с
+# Было: 5.0 секунд — при 1000 пользователей генерировало ~200 req/sec к БД
+# Стало: 15.0 секунд — нагрузка снижена в 3 раза
+# Компромисс: пользователь не замечает задержку, но БД разгружена
+USER_CONTEXT_CACHE_TTL = 15.0
 
 # 🔥 ИСПРАВЛЕНО: Daily device creation limit (Spam protection)
-# Максимальное количество созданий устройств в сутки на одного пользователя.
-# Защита от spam-атаки ротацией устройств (create → download → delete → repeat).
-# Админы (ADMIN_IDS) исключены из этого лимита.
-# Сброс счётчика происходит в 00:00 МСК.
 DEVICE_DAILY_LIMIT = 25
 
 # 🔥 ИСПРАВЛЕНО: Self-Healing rate limit
-# Максимальное количество self-healing PATCH запросов за один цикл traffic_sync.
-# Предотвращает спам API при массовых рассинхронах (например, после длительного простоя).
 SELF_HEALING_MAX_PER_CYCLE = 50
