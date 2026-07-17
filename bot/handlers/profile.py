@@ -78,8 +78,8 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
     if edit:
         try:
             await target.edit_text(rendered, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest:
-            pass
+        except TelegramBadRequest as e:
+            logger.debug(f"profile edit_text failed: {e}")
     else:
         await target.answer(rendered, reply_markup=kb, parse_mode="HTML")
 
@@ -138,7 +138,10 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
         if len(payments) > 10:
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
 
-    await callback.message.edit_text(rendered, reply_markup=get_history_keyboard(), parse_mode="HTML")
+    try:
+        await callback.message.edit_text(rendered, reply_markup=get_history_keyboard(), parse_mode="HTML")
+    except TelegramBadRequest as e:
+        logger.debug(f"history edit_text failed: {e}")
 
 
 @router.callback_query(F.data == "referral")
@@ -150,22 +153,24 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
 
-    user_with_refs = await get_user_with_referrals(session, db_user.telegram_id)
+    user_with_refs, referrals = await get_user_with_referrals(session, db_user.telegram_id)
     bot_info = await callback.bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{db_user.telegram_id}"
 
-    referrals = getattr(user_with_refs, '_referrals_cache', []) if user_with_refs else []
     invited_count = len(referrals)
 
-    await callback.message.edit_text(
-        texts.REFERRAL_TEXT.format(
-            bonus_days=get_settings().REFERRAL_BONUS_DAYS,
-            referral_link=referral_link,
-            invited_count=invited_count,
-            bonus_total=db_user.referral_days,
-        ),
-        reply_markup=get_referral_keyboard(referral_link), parse_mode="HTML",
-    )
+    try:
+        await callback.message.edit_text(
+            texts.REFERRAL_TEXT.format(
+                bonus_days=get_settings().REFERRAL_BONUS_DAYS,
+                referral_link=referral_link,
+                invited_count=invited_count,
+                bonus_total=db_user.referral_days,
+            ),
+            reply_markup=get_referral_keyboard(referral_link), parse_mode="HTML",
+        )
+    except TelegramBadRequest as e:
+        logger.debug(f"referral edit_text failed: {e}")
 
 
 @router.callback_query(F.data == "referrals_list")
@@ -177,8 +182,7 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
 
-    user_with_refs = await get_user_with_referrals(session, db_user.telegram_id)
-    referrals = getattr(user_with_refs, '_referrals_cache', []) if user_with_refs else []
+    user_with_refs, referrals = await get_user_with_referrals(session, db_user.telegram_id)
     bonus_days = get_settings().REFERRAL_BONUS_DAYS
 
     if not referrals:
@@ -194,4 +198,7 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
 
         rendered += texts.REFERRAL_LIST_FOOTER.format(count=len(referrals))
 
-    await callback.message.edit_text(rendered, reply_markup=get_back_button("referral"), parse_mode="HTML")
+    try:
+        await callback.message.edit_text(rendered, reply_markup=get_back_button("referral"), parse_mode="HTML")
+    except TelegramBadRequest as e:
+        logger.debug(f"referrals_list edit_text failed: {e}")

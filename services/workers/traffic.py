@@ -1,18 +1,9 @@
-"""
-Фоновый воркер синхронизации трафика.
-
-🔥 ИСПРАВЛЕНО (Часть 3):
-- Batch UPDATE: 100 записей за один запрос вместо N отдельных
-- fix: totalDownload or old_value больше не съедает легитимный 0
-- Self-Healing учитывает истёкшие подписки
-"""
-
 import asyncio
 import logging
 from datetime import datetime, timezone
 from collections import defaultdict
 from sqlalchemy import select, update, case
-from database.connection import get_session
+from database.connection import get_session, session_scope
 from services.amnezia_client import AmneziaClient
 from database.models import VPNProfile, Server, User
 from bot.constants import (
@@ -22,18 +13,9 @@ from bot.constants import (
 
 logger = logging.getLogger("BackgroundWorker")
 
-# Размер батча для batch UPDATE (оптимально для SQLite)
 BATCH_SIZE = 100
 
-
 async def traffic_sync_loop(shutdown_event: asyncio.Event):
-    """
-    Фоновый воркер синхронизации трафика.
-    
-    🔥 ИСПРАВЛЕНО (Часть 3):
-    - Batch UPDATE: CASE-based update для 100 записей за раз
-    - fix: totalDownload or old_value → используем explicit None check
-    """
     while not shutdown_event.is_set():
         try:
             try:
@@ -44,8 +26,8 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
             except asyncio.TimeoutError:
                 pass
 
-            session = await get_session()
-            try:
+            # 🔥 ИСПРАВЛЕНО: Безопасное управление сессией через session_scope
+            async with session_scope() as session:
                 stmt = (
                     select(
                         VPNProfile.id, VPNProfile.peer_id, VPNProfile.server_id,
@@ -82,8 +64,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                     servers_map[s_id] = {
                         'api_url': api_url, 'api_key': api_key, 'name': s_name,
                     }
-            finally:
-                await session.close()
 
             if not servers_map:
                 continue
@@ -98,9 +78,7 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                         return server_id, None
                     return server_id, {c.id: c for c in api_clients_list}
                 except Exception as e:
-                    logger.error(
-                        f"Ошибка трафика с {server_info['name']}: {e}"
-                    )
+                    logger.error(f"Ошибка трафика с {server_info['name']}: {e}")
                     return server_id, None
 
             tasks = [
@@ -128,10 +106,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
 
                     api_data = api_clients[p_dict['peer_id']]
 
-                    # 🔥 ИСПРАВЛЕНО (Часть 3): explicit None check вместо "or"
-                    # Было: t_down = api_data.traffics.totalDownload or p_dict['traffic_down']
-                    # Это съедало легитимный 0 (если трафик реально 0)
-                    # Стало: проверяем None явно
                     api_t_down = api_data.traffics.totalDownload
                     api_t_up = api_data.traffics.totalUpload
 
@@ -174,10 +148,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
 
                     if local_should_be_disabled and api_is_active:
                         if not server_is_active:
-                            logger.debug(
-                                f"Self-healing skipped: peer {p_dict['peer_id'][:16]}... "
-                                f"on {server_info['name']} — server is disabled by admin"
-                            )
                             if (
                                 p_dict['traffic_down'] != t_down
                                 or p_dict['traffic_up'] != t_up
@@ -228,13 +198,9 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                             'is_active': api_is_active,
                         }
 
-            # 🔥 ИСПРАВЛЕНО (Часть 3): Batch UPDATE
             if updates_data:
                 await _batch_update_profiles(updates_data)
-                logger.info(
-                    f"Трафик синхронизирован для {len(updates_data)} устройств "
-                    f"({(len(updates_data) + BATCH_SIZE - 1) // BATCH_SIZE} batches)"
-                )
+                logger.info(f"Трафик синхронизирован для {len(updates_data)} устройств")
 
             if healing_tasks:
                 await _self_heal_disabled_peers(healing_tasks)
@@ -243,34 +209,22 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
             logger.info("Traffic sync worker cancelled")
             break
         except Exception as e:
-            logger.error(
-                f"Критическая ошибка в цикле трафика: {e}", exc_info=True
-            )
+            logger.error(f"Критическая ошибка в цикле трафика: {e}", exc_info=True)
             if shutdown_event.is_set():
                 break
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
 
     logger.info("Traffic sync worker stopped gracefully")
 
-
 async def _batch_update_profiles(updates_data: dict):
-    """
-    🔥 ИСПРАВЛЕНО (Часть 3): Batch UPDATE через CASE-based query.
-    
-    Было: 750 отдельных UPDATE запросов за цикл
-    Стало: ~8 запросов (по 100 записей каждый)
-    
-    Для SQLite это даёт ~10x ускорение.
-    """
-    session = await get_session()
-    try:
+    # 🔥 ИСПРАВЛЕНО: Безопасное управление сессией
+    async with session_scope() as session:
         items = list(updates_data.items())
 
         for i in range(0, len(items), BATCH_SIZE):
             batch = items[i:i + BATCH_SIZE]
             batch_ids = [p_id for p_id, _ in batch]
 
-            # Определяем какие поля есть в батче
             has_traffic_down = any('traffic_down' in data for _, data in batch)
             has_traffic_up = any('traffic_up' in data for _, data in batch)
             has_last_connected = any('last_connected' in data for _, data in batch)
@@ -280,37 +234,25 @@ async def _batch_update_profiles(updates_data: dict):
 
             if has_traffic_down:
                 values['traffic_down'] = case(
-                    *[
-                        (VPNProfile.id == p_id, data.get('traffic_down', VPNProfile.traffic_down))
-                        for p_id, data in batch
-                    ],
+                    *[(VPNProfile.id == p_id, data.get('traffic_down', VPNProfile.traffic_down)) for p_id, data in batch],
                     else_=VPNProfile.traffic_down,
                 )
 
             if has_traffic_up:
                 values['traffic_up'] = case(
-                    *[
-                        (VPNProfile.id == p_id, data.get('traffic_up', VPNProfile.traffic_up))
-                        for p_id, data in batch
-                    ],
+                    *[(VPNProfile.id == p_id, data.get('traffic_up', VPNProfile.traffic_up)) for p_id, data in batch],
                     else_=VPNProfile.traffic_up,
                 )
 
             if has_last_connected:
                 values['last_connected'] = case(
-                    *[
-                        (VPNProfile.id == p_id, data.get('last_connected', VPNProfile.last_connected))
-                        for p_id, data in batch
-                    ],
+                    *[(VPNProfile.id == p_id, data.get('last_connected', VPNProfile.last_connected)) for p_id, data in batch],
                     else_=VPNProfile.last_connected,
                 )
 
             if has_is_active:
                 values['is_active'] = case(
-                    *[
-                        (VPNProfile.id == p_id, data.get('is_active', VPNProfile.is_active))
-                        for p_id, data in batch
-                    ],
+                    *[(VPNProfile.id == p_id, data.get('is_active', VPNProfile.is_active)) for p_id, data in batch],
                     else_=VPNProfile.is_active,
                 )
 
@@ -322,25 +264,12 @@ async def _batch_update_profiles(updates_data: dict):
                 )
                 await session.execute(stmt)
 
-        await session.commit()
-    except Exception as e:
-        logger.error(f"Batch update failed: {e}", exc_info=True)
-        await session.rollback()
-    finally:
-        await session.close()
-
-
 async def _self_heal_disabled_peers(healing_tasks: list):
-    """🔥 Self-Healing: принудительно отключает на API клиентов."""
     if not healing_tasks:
         return
 
     total_count = len(healing_tasks)
     if total_count > SELF_HEALING_MAX_PER_CYCLE:
-        logger.warning(
-            f"Self-healing: {total_count} peers need healing, "
-            f"limiting to {SELF_HEALING_MAX_PER_CYCLE} per cycle"
-        )
         healing_tasks = healing_tasks[:SELF_HEALING_MAX_PER_CYCLE]
 
     sem = asyncio.Semaphore(10)
@@ -352,27 +281,16 @@ async def _self_heal_disabled_peers(healing_tasks: list):
         async with sem:
             client = AmneziaClient(task['api_url'], task['api_key'])
             try:
-                result = await client.update_client(
-                    client_id=task['peer_id'], status="disabled"
-                )
+                result = await client.update_client(client_id=task['peer_id'], status="disabled")
                 if result:
                     success_count += 1
-                    logger.info(
-                        f"Self-healing: disabled peer {task['peer_id'][:16]}... "
-                        f"on {task['server_name']} (user={task['telegram_id']}, "
-                        f"reason={task['reason']})"
-                    )
                 else:
                     fail_count += 1
             except Exception as e:
                 fail_count += 1
                 logger.error(f"Self-healing error: {e}")
 
-    await asyncio.gather(
-        *[_patch_peer(t) for t in healing_tasks], return_exceptions=True
-    )
+    await asyncio.gather(*[_patch_peer(t) for t in healing_tasks], return_exceptions=True)
 
     if success_count > 0 or fail_count > 0:
-        logger.info(
-            f"Self-healing completed: {success_count} success, {fail_count} fail"
-        )
+        logger.info(f"Self-healing completed: {success_count} success, {fail_count} fail")

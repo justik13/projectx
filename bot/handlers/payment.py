@@ -1,13 +1,3 @@
-"""
-Хендлеры оплаты (Stars, SBP через Platega).
-
-🔥 ИСПРАВЛЕНО (Часть 1):
-- #1: Stars ownership — сравнение через payment.user.telegram_id
-- #7: IDOR в cancel_invoice/cancel_payment — проверка владельца
-- #15: Downgrade abuse — проверка по profiles_count, не device_limit
-- #17: pre_checkout_query — валидация payload перед ok=True
-"""
-
 import logging
 from datetime import datetime, timezone
 from aiogram import Router, F
@@ -39,13 +29,11 @@ from utils.tariff_names import get_tariff_display_name
 router = Router()
 logger = logging.getLogger(__name__)
 
-
 async def _is_subscription_active(user) -> bool:
     if not user or not user.subscription_end:
         return False
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     return user.subscription_end > now
-
 
 @router.callback_query(F.data.in_(["menu_buy", "menu_subscription"]))
 async def hub_menu_payment(
@@ -62,7 +50,6 @@ async def hub_menu_payment(
         await _show_hub(callback, db_user, session)
     else:
         await _show_showcase(callback, session)
-
 
 async def _show_showcase(callback: CallbackQuery, session: AsyncSession) -> None:
     tariffs = await get_active_tariffs(session)
@@ -82,7 +69,6 @@ async def _show_showcase(callback: CallbackQuery, session: AsyncSession) -> None
 
     kb = get_tariff_showcase_keyboard(grouped)
     await render_hub(callback.bot, callback.message.chat.id, texts.PAYMENT_SHOWCASE_HEADER, kb)
-
 
 async def _show_hub(callback: CallbackQuery, user, session: AsyncSession) -> None:
     profiles = await get_user_profiles(session, user.id)
@@ -105,12 +91,10 @@ async def _show_hub(callback: CallbackQuery, user, session: AsyncSession) -> Non
 
     await render_hub(callback.bot, callback.message.chat.id, text, builder.as_markup())
 
-
 @router.callback_query(F.data == "payment_showcase")
 async def show_tariff_showcase_callback(callback: CallbackQuery, session: AsyncSession) -> None:
     await callback.answer()
     await _show_showcase(callback, session)
-
 
 @router.callback_query(F.data.startswith("select_tariff_type:"))
 async def select_tariff_type(callback: CallbackQuery, session: AsyncSession) -> None:
@@ -130,7 +114,6 @@ async def select_tariff_type(callback: CallbackQuery, session: AsyncSession) -> 
     text = desc + texts.PAYMENT_DURATION_HEADER
     kb = get_tariff_duration_keyboard(type_tariffs)
     await render_hub(callback.bot, callback.message.chat.id, text, kb)
-
 
 @router.callback_query(F.data.in_(["payment_quick_renew", "payment_renew"]))
 async def show_quick_renew(callback: CallbackQuery, db_user, session: AsyncSession) -> None:
@@ -153,7 +136,6 @@ async def show_quick_renew(callback: CallbackQuery, db_user, session: AsyncSessi
     )
     kb = get_renew_keyboard(renew_tariffs)
     await render_hub(callback.bot, callback.message.chat.id, text, kb)
-
 
 @router.callback_query(F.data == "payment_change_tariff")
 async def show_change_tariff(callback: CallbackQuery, db_user, session: AsyncSession) -> None:
@@ -178,7 +160,6 @@ async def show_change_tariff(callback: CallbackQuery, db_user, session: AsyncSes
     kb = get_change_tariff_keyboard(tariffs, current_limit, is_subscription_active=is_active)
     await render_hub(callback.bot, callback.message.chat.id, text, kb)
 
-
 @router.callback_query(F.data.startswith("select_tariff:"))
 async def select_tariff(
     callback: CallbackQuery, state: FSMContext,
@@ -193,12 +174,6 @@ async def select_tariff(
 
     device_limit = getattr(tariff, 'device_limit', 2)
 
-    # 🔥 ИСПРАВЛЕНО #15: Downgrade abuse protection
-    # Проверяем фактическое количество профилей, а не device_limit из user.
-    # Абуз: пользователь покупает Pro (10 устр.), создаёт 10 устройств,
-    # ждёт окончания подписки, покупает Базовый (2 устр.).
-    # Старая проверка пропускала, т.к. подписка неактивна.
-    # Новая проверка: если профилей больше, чем лимит нового тарифа — блокируем.
     if db_user:
         profiles_count = await get_user_profiles_count(session, db_user.id)
         if profiles_count > device_limit:
@@ -206,11 +181,14 @@ async def select_tariff(
                 profiles_count=profiles_count,
                 new_limit=device_limit,
             )
-            await callback.message.edit_text(
-                text,
-                reply_markup=get_back_button("payment_change_tariff"),
-                parse_mode="HTML",
-            )
+            try:
+                await callback.message.edit_text(
+                    text,
+                    reply_markup=get_back_button("payment_change_tariff"),
+                    parse_mode="HTML",
+                )
+            except TelegramBadRequest as e:
+                logger.warning(f"select_tariff edit_text failed: {e}")
             await callback.answer()
             return
 
@@ -222,20 +200,21 @@ async def select_tariff(
         price_stars=tariff.price_stars,
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_payment_method_keyboard(tariff.id, device_limit),
-        parse_mode="HTML",
-    )
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_payment_method_keyboard(tariff.id, device_limit),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as e:
+        logger.warning(f"select_tariff edit_text failed: {e}")
     await callback.answer()
-
 
 @router.callback_query(F.data.startswith("pay_stars:"))
 async def pay_stars(
     callback: CallbackQuery, state: FSMContext,
     db_user=None, session: AsyncSession = None,
 ) -> None:
-    """Оплата через Telegram Stars"""
     try:
         await callback.answer("💳 Отправляю инвойс...")
         tariff_id = int(callback.data.split(":")[1])
@@ -283,35 +262,24 @@ async def pay_stars(
                 get_back_button(f"select_tariff:{tariff_id}")
             )
             payment.status = "failed"
-            return
     except Exception as e:
         logger.error(f"pay_stars error: {e}", exc_info=True)
         await callback.answer("❌ Ошибка при создании платежа", show_alert=True)
 
-
 @router.pre_checkout_query()
 async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery) -> None:
-    """
-    🔥 ИСПРАВЛЕНО #17: Валидация payload перед ok=True.
-    Telegram отправляет pre_checkout_query для валидации перед списанием Stars.
-    Отвечая ok=True без проверки, бот позволяет списать деньги за некорректный инвойс.
-    """
     payload = pre_checkout_query.invoice_payload
     if not payload or not payload.startswith("stars_payment:"):
         await pre_checkout_query.answer(ok=False, error_message="Invalid payment payload")
-        logger.warning(f"pre_checkout_query: invalid payload: {payload}")
         return
 
     try:
         payment_id = int(payload.split(":")[1])
     except (ValueError, IndexError):
         await pre_checkout_query.answer(ok=False, error_message="Invalid payment ID")
-        logger.warning(f"pre_checkout_query: invalid payment_id in payload: {payload}")
         return
 
-    # Payload валиден — разрешаем списание
     await pre_checkout_query.answer(ok=True)
-
 
 @router.message(F.successful_payment)
 async def process_successful_payment(
@@ -324,33 +292,22 @@ async def process_successful_payment(
 
     payload = message.successful_payment.invoice_payload
     if not payload.startswith("stars_payment:"):
-        logger.warning(f"process_successful_payment: invalid payload: {payload}")
         return
 
     try:
         payment_id = int(payload.split(":")[1])
     except (ValueError, IndexError):
-        logger.error(f"Invalid Stars payment payload: {payload}")
         return
 
     payment = await get_payment_by_id(session, payment_id)
     if not payment:
-        logger.error(f"Stars payment {payment_id} not found in DB")
         await render_hub(
             message.bot, message.chat.id,
             texts.PAYMENT_DELAYED, get_back_button("menu_subscription")
         )
         return
 
-    # 🔥 ИСПРАВЛЕНО #1: Stars ownership check
-    # Раньше: payment.user_id (PK) != message.from_user.id (Telegram ID) → всегда mismatch
-    # Теперь: проверяем через связь payment.user.telegram_id
     if not payment.user or payment.user.telegram_id != message.from_user.id:
-        logger.warning(
-            f"Stars payment ownership mismatch: "
-            f"payment.user.telegram_id={payment.user.telegram_id if payment.user else None}, "
-            f"message.from_user.id={message.from_user.id}, payment_id={payment_id}"
-        )
         await render_hub(
             message.bot, message.chat.id,
             texts.PAYMENT_DELAYED, get_back_button("menu_subscription")
@@ -383,7 +340,6 @@ async def process_successful_payment(
             texts.PAYMENT_DELAYED, get_back_button("menu_subscription")
         )
 
-
 @router.callback_query(F.data.startswith("cancel_invoice:"))
 async def cancel_invoice(
     callback: CallbackQuery, state: FSMContext,
@@ -394,18 +350,12 @@ async def cancel_invoice(
     payment_id = int(parts[1])
     tariff_id = int(parts[2])
 
-    # 🔥 ИСПРАВЛЕНО #7: IDOR protection — проверка владельца платежа
     if db_user and session:
         payment = await get_payment_by_id_simple(session, payment_id)
         if not payment:
-            logger.warning(f"cancel_invoice: payment {payment_id} not found")
             await callback.answer("Платёж не найден", show_alert=True)
             return
         if payment.user_id != db_user.id:
-            logger.warning(
-                f"cancel_invoice IDOR attempt: user {db_user.telegram_id} "
-                f"tried to cancel payment {payment_id} owned by user_id={payment.user_id}"
-            )
             await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
             return
 
@@ -441,12 +391,10 @@ async def cancel_invoice(
     else:
         await _show_showcase(callback, session)
 
-
 @router.callback_query(F.data.startswith("pay_sbp:"))
 async def pay_sbp(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession = None
 ) -> None:
-    """Оплата через SBP (Platega.io)"""
     try:
         await callback.answer("⏳ Создаю платеж...")
         tariff_id = int(callback.data.split(":")[1])
@@ -497,7 +445,6 @@ async def pay_sbp(
         logger.error(f"pay_sbp error: {e}", exc_info=True)
         await callback.answer("❌ Ошибка при создании платежа", show_alert=True)
 
-
 @router.callback_query(F.data.startswith("check_payment:"))
 async def check_payment_status(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession = None
@@ -518,4 +465,14 @@ async def check_payment_status(
             texts.PAYMENT_SUCCESS_RENEW.format(
                 tariff_name=tariff_name, valid_until=valid_until
             )
-            i
+            if profiles else
+            texts.PAYMENT_SUCCESS_NEW.format(
+                tariff_name=tariff_name, valid_until=valid_until
+            )
+        )
+        await render_hub(
+            callback.bot, callback.message.chat.id,
+            text, get_payment_success_keyboard()
+        )
+    else:
+        await callback.answer("❌ Платёж ещё не поступил. Попробуйте позже.", show_alert=True)

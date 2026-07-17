@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import event, text, inspect, select, func
+from sqlalchemy import select, func
 from database.models import Base, Tariff
 from config.settings import get_settings
 from contextlib import asynccontextmanager
@@ -22,180 +22,37 @@ DEFAULT_TARIFFS = [
 async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
-    db_url = f"sqlite+aiosqlite:///{settings.DB_PATH}"
     
-    # 🔥 ИСПРАВЛЕНО #25: Увеличен connection pool для 1000 пользователей
-    # Было: pool_size=5, max_overflow=10
-    # Стало: pool_size=20, max_overflow=30, timeout=60с
+    # Используем asyncpg для PostgreSQL
     _engine = create_async_engine(
-        db_url,
+        settings.DATABASE_URL,
         echo=False,
-        connect_args={"check_same_thread": False, "timeout": 60},
         pool_size=20,
-        max_overflow=30,
-        pool_timeout=60,
-        pool_pre_ping=True,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_pre_ping=True, # Проверка соединения перед использованием (важно для PG)
     )
     
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     
-    @event.listens_for(_engine.sync_engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys = ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA cache_size=-64000")
-        cursor.execute("PRAGMA busy_timeout=30000")
-        cursor.close()
-    
+    # Создаем все таблицы на основе моделей (без миграций, так как старых данных нет)
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await _run_migrations(conn)
-        await _seed_default_tariffs()
+        await _seed_default_tariffs(conn)
     
-    logging.info(f"Database initialized at {settings.DB_PATH}")
+    logging.info(f"PostgreSQL database initialized at {settings.DATABASE_URL}")
     return _engine, _sessionmaker
 
 
-async def _run_migrations(conn):
-    """Автоматические миграции схемы БД."""
-    try:
-        def check_and_migrate(sync_conn):
-            inspector = inspect(sync_conn)
-            
-            tariff_columns = {col['name'] for col in inspector.get_columns('tariffs')}
-            if 'device_limit' not in tariff_columns:
-                sync_conn.execute(text("ALTER TABLE tariffs ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 2"))
-            
-            user_columns = {col['name'] for col in inspector.get_columns('users')}
-            
-            if 'device_limit' not in user_columns:
-                sync_conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0"))
-            
-            if 'current_tariff_id' not in user_columns:
-                sync_conn.execute(text("ALTER TABLE users ADD COLUMN current_tariff_id INTEGER DEFAULT NULL"))
-            
-            payment_columns = {col['name'] for col in inspector.get_columns('payments')}
-            PAYMENT_MIGRATIONS = [
-                ("external_id", "VARCHAR(255)"),
-                ("payment_url", "VARCHAR(1000)"),
-                ("qr_code", "TEXT"),
-                ("payment_method", "VARCHAR(50)"),
-            ]
-            for field_name, field_type in PAYMENT_MIGRATIONS:
-                if field_name not in payment_columns:
-                    sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {field_name} {field_type}"))
-            
-            indexes = inspector.get_indexes('vpn_profiles')
-            index_names = {idx['name'] for idx in indexes}
-            if 'uq_vpn_profiles_peer_id' not in index_names:
-                try:
-                    sync_conn.execute(
-                        text("CREATE UNIQUE INDEX uq_vpn_profiles_peer_id ON vpn_profiles(peer_id)")
-                    )
-                    logging.info("Migration: created unique index on vpn_profiles.peer_id")
-                except Exception as e:
-                    logging.warning(f"Migration: failed to create unique index on peer_id: {e}")
-            
-            # 🔥 ИСПРАВЛЕНО #13 (из Части 6): Миграция для soft delete полей
-            if 'is_deleted' not in user_columns:
-                sync_conn.execute(
-                    text("ALTER TABLE users ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0")
-                )
-                logging.info("Migration: added is_deleted column to users")
-            
-            if 'deleted_at' not in user_columns:
-                sync_conn.execute(
-                    text("ALTER TABLE users ADD COLUMN deleted_at DATETIME DEFAULT NULL")
-                )
-                logging.info("Migration: added deleted_at column to users")
-            
-            indexes = inspector.get_indexes('users')
-            index_names = {idx['name'] for idx in indexes}
-            if 'ix_users_is_deleted' not in index_names:
-                try:
-                    sync_conn.execute(
-                        text("CREATE INDEX ix_users_is_deleted ON users(is_deleted)")
-                    )
-                    logging.info("Migration: created index on users.is_deleted")
-                except Exception as e:
-                    logging.warning(f"Migration: failed to create index on is_deleted: {e}")
-            
-            # 🔥 ИСПРАВЛЕНО #18: Миграция для notification_retry_count
-            if 'notification_retry_count' not in user_columns:
-                sync_conn.execute(
-                    text("ALTER TABLE users ADD COLUMN notification_retry_count INTEGER NOT NULL DEFAULT 0")
-                )
-                logging.info("Migration: added notification_retry_count column to users")
-            
-            # 🔥 ИСПРАВЛЕНО #6 (из Части 7): Миграция для last_notification_attempt
-            if 'last_notification_attempt' not in user_columns:
-                sync_conn.execute(
-                    text("ALTER TABLE users ADD COLUMN last_notification_attempt DATETIME DEFAULT NULL")
-                )
-                logging.info("Migration: added last_notification_attempt column to users")
-            
-            # 🔥 ИСПРАВЛЕНО #23: Миграция для daily device limit (Spam protection)
-            if 'device_creations_today' not in user_columns:
-                sync_conn.execute(
-                    text("ALTER TABLE users ADD COLUMN device_creations_today INTEGER NOT NULL DEFAULT 0")
-                )
-                logging.info("Migration: added device_creations_today column to users")
-            
-            if 'last_creation_date' not in user_columns:
-                sync_conn.execute(
-                    text("ALTER TABLE users ADD COLUMN last_creation_date DATE DEFAULT NULL")
-                )
-                logging.info("Migration: added last_creation_date column to users")
-            
-            # 🔥 ИСПРАВЛЕНО #24: Миграция для BroadcastProgress таблицы
-            tables = inspector.get_table_names()
-            if 'broadcast_progress' not in tables:
-                sync_conn.execute(text("""
-                    CREATE TABLE broadcast_progress (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        admin_id INTEGER NOT NULL,
-                        total_count INTEGER NOT NULL,
-                        success_count INTEGER DEFAULT 0,
-                        fail_count INTEGER DEFAULT 0,
-                        last_processed_index INTEGER DEFAULT 0,
-                        user_ids_json TEXT NOT NULL,
-                        broadcast_text TEXT NOT NULL,
-                        media_id VARCHAR(255),
-                        content_type VARCHAR(50) NOT NULL,
-                        label VARCHAR(50) NOT NULL,
-                        status VARCHAR(20) DEFAULT 'in_progress',
-                        created_at DATETIME,
-                        updated_at DATETIME
-                    )
-                """))
-                sync_conn.execute(
-                    text("CREATE INDEX ix_broadcast_progress_admin_id ON broadcast_progress(admin_id)")
-                )
-                sync_conn.execute(
-                    text("CREATE INDEX ix_broadcast_progress_status ON broadcast_progress(status)")
-                )
-                logging.info("Migration: created broadcast_progress table")
-        
-        await conn.run_sync(check_and_migrate)
-    except Exception as e:
-        logging.warning(f"Migration check failed: {e}")
-
-
-async def _seed_default_tariffs():
-    session = await get_session()
-    try:
-        result = await session.execute(select(func.count(Tariff.id)))
-        if result.scalar_one() == 0:
-            for t in DEFAULT_TARIFFS:
-                session.add(Tariff(**t, is_active=True))
-            await session.commit()
-    except Exception as e:
-        logging.error(f"Tariff seeding failed: {e}")
-        await session.rollback()
-    finally:
-        await session.close()
+async def _seed_default_tariffs(conn):
+    """Сидирование тарифов по умолчанию"""
+    result = await conn.execute(select(func.count(Tariff.id)))
+    if result.scalar_one() == 0:
+        for t in DEFAULT_TARIFFS:
+            await conn.execute(
+                Tariff.__table__.insert().values(**t, is_active=True)
+            )
+        logging.info("Default tariffs seeded successfully.")
 
 
 async def get_session() -> AsyncSession:

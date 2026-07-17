@@ -28,18 +28,10 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     
-    # 🔥 ИСПРАВЛЕНО #13 (из Части 6): Soft delete поля
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     
-    # 🔥 ИСПРАВЛЕНО #18: Счётчик неудачных попыток отправки уведомлений.
-    # Используется для exponential backoff: 1ч → 2ч → 4ч → 8ч.
-    # После 4 неудач (16ч суммарно) — сбрасывается в 0 при следующем цикле.
     notification_retry_count: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # 🔥 ИСПРАВЛЕНО #6 (из Части 7): Timestamp последней попытки уведомления.
-    # Используется для точного расчёта backoff delay.
-    # Worker проверяет: if now - last_notification_attempt < backoff_delay: skip
     last_notification_attempt: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=False), nullable=True
     )
@@ -52,11 +44,6 @@ class User(Base):
     notified_1d: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_2h: Mapped[bool] = mapped_column(Boolean, default=False)
     
-    # 🔥 ИСПРАВЛЕНО: Daily device creation limit (Spam protection)
-    # Счётчик созданных устройств за текущий день (МСК).
-    # Сбрасывается в 0 при наступлении нового дня по МСК.
-    # Лимит: DEVICE_DAILY_LIMIT (25) из bot/constants.py
-    # Админы исключены из лимита.
     device_creations_today: Mapped[int] = mapped_column(Integer, default=0)
     last_creation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     
@@ -80,13 +67,7 @@ class VPNProfile(Base):
         Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True
     )
     device_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    
-    # 🔥 ИСПРАВЛЕНО #23 (Вариант C): Убрано шифрование с peer_id
-    # peer_id — это base64 WireGuard-ключ, не чувствительные данные.
-    # Шифрование Fernet недетерминировано (случайный IV), поэтому UNIQUE INDEX не работал.
-    # Теперь plain text + UNIQUE INDEX на уровне БД защищает от дубликатов.
     peer_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    
     raw_config: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
     traffic_down: Mapped[int] = mapped_column(BigInteger, default=0)
     traffic_up: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -175,10 +156,6 @@ class AuditLog(Base):
 
 
 class BroadcastProgress(Base):
-    """
-    🔥 ИСПРАВЛЕНО #24: Модель для отслеживания прогресса рассылки.
-    Позволяет возобновить рассылку после crash бота.
-    """
     __tablename__ = "broadcast_progress"
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -186,8 +163,11 @@ class BroadcastProgress(Base):
     total_count: Mapped[int] = mapped_column(Integer, nullable=False)
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     fail_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_processed_index: Mapped[int] = mapped_column(Integer, default=0)
-    user_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    
+    # 🔥 ИСПРАВЛЕНО: last_processed_id вместо JSON массива и индекса
+    last_processed_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    target_audience: Mapped[str] = mapped_column(String(20), default="all") # all | active
+    
     broadcast_text: Mapped[str] = mapped_column(Text, nullable=False)
     media_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content_type: Mapped[str] = mapped_column(String(50), nullable=False)

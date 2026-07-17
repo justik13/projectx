@@ -6,7 +6,7 @@ from pydantic import field_validator
 class Settings(BaseSettings):
     BOT_TOKEN: str
     ADMIN_IDS: List[int]
-    DB_PATH: str = "./bot_data.db"
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/projectx_bot"
     DB_ENCRYPTION_KEY: str = ""
     DEFAULT_DEVICE_LIMIT: int = 2
     REFERRAL_BONUS_DAYS: int = 3

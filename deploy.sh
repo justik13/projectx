@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v4.2 Secure)
+# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v5.0 PostgreSQL)
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
@@ -106,8 +106,8 @@ preflight_checks() {
 
     local avail_kb=$(df / | awk 'NR==2 {print $4}')
     local avail_gb=$((avail_kb / 1024 / 1024))
-    if [ "$avail_gb" -lt 1 ]; then
-        error "Недостаточно места. Доступно: ${avail_gb}GB, нужно 1GB"
+    if [ "$avail_gb" -lt 2 ]; then
+        error "Недостаточно места. Доступно: ${avail_gb}GB, нужно 2GB"
     fi
 
     if ! curl -s --max-time 10 ${http_proxy+--proxy "$http_proxy"} https://archive.ubuntu.com/ubuntu/dists/noble/Release >/dev/null 2>&1; then
@@ -128,19 +128,49 @@ preflight_checks() {
 # SYSTEM DEPENDENCIES
 # ═══════════════════════════════════════════════════════════════
 install_dependencies() {
-    log "Установка системных зависимостей (1-3 минуты)..."
+    log "Установка системных зависимостей (включая PostgreSQL)..."
     apt-get update -qq || error "Не удалось обновить список пакетов"
 
     local install_log=$(mktemp)
-    if ! apt-get install -y python3 python3-venv python3-pip python3-dev git curl wget sqlite3 rsync build-essential cron logrotate ufw nginx certbot python3-certbot-nginx > "$install_log" 2>&1; then
+    if ! apt-get install -y python3 python3-venv python3-pip python3-dev git curl wget rsync build-essential cron logrotate ufw nginx certbot python3-certbot-nginx postgresql postgresql-contrib libpq-dev > "$install_log" 2>&1; then
         error "Ошибка apt. Лог: $install_log\n$(tail -20 "$install_log")"
     fi
     rm -f "$install_log"
-    success "Системные зависимости установлены"
+    success "Системные зависимости и PostgreSQL установлены"
 
     if ! id "projectx" &>/dev/null; then
         useradd -r -s /bin/false -d /nonexistent projectx || error "Ошибка создания пользователя"
         success "Создан системный пользователь projectx"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# POSTGRESQL SETUP
+# ═══════════════════════════════════════════════════════════════
+setup_postgresql() {
+    log "Настройка базы данных PostgreSQL..."
+    
+    if ! systemctl is-active --quiet postgresql; then
+        systemctl start postgresql
+        systemctl enable postgresql
+    fi
+
+    # Проверка, существует ли уже БД
+    if sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='projectx_bot'" | grep -q 1; then
+        warn "База данных projectx_bot уже существует. Пропускаем создание."
+    else
+        log "Создание пользователя и базы данных PostgreSQL..."
+        read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD; echo ""
+        [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
+        
+        sudo -u postgres psql -c "CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';" > /dev/null 2>&1 || warn "Пользователь projectx уже существует"
+        sudo -u postgres psql -c "CREATE DATABASE projectx_bot OWNER projectx;" > /dev/null 2>&1 || warn "БД projectx_bot уже существует"
+        sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE projectx_bot TO projectx;" > /dev/null 2>&1
+        success "Пользователь projectx и база projectx_bot созданы"
+        
+        # Сохраняем пароль временно для .env
+        echo "$DB_PASSWORD" > /tmp/.pg_pass
+        chmod 600 /tmp/.pg_pass
     fi
 }
 
@@ -155,7 +185,6 @@ setup_firewall() {
     fi
 
     local SSH_PORT=""
-    # 🔥 ИСПРАВЛЕНО: Читаем порт из конфига SSH, а не из ss
     if [ -f /etc/ssh/sshd_config ]; then
         SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
     fi
@@ -189,7 +218,7 @@ migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
         log "Синхронизация проекта..."
         mkdir -p "$PROJECT_DIR"
-        rsync -a --delete --exclude='.env' --exclude='bot_data.db*' --exclude='.git' --exclude='venv/' --exclude='__pycache__/' "$START_DIR/" "$PROJECT_DIR/" || error "Ошибка rsync"
+        rsync -a --delete --exclude='.env' --exclude='*.db*' --exclude='.git' --exclude='venv/' --exclude='__pycache__/' "$START_DIR/" "$PROJECT_DIR/" || error "Ошибка rsync"
     fi
     cd "$PROJECT_DIR"
 }
@@ -255,10 +284,6 @@ setup_env() {
         [ -z "$PLATEGA_CALLBACK_DOMAIN" ] && error "Домен обязателен"
     fi
 
-    # 🔥 ИСПРАВЛЕНО #14: Сохраняем существующий DB_ENCRYPTION_KEY при передеплое
-    # Раньше: при каждом деплое генерировался новый ключ → все зашифрованные
-    # поля (peer_id, raw_config, api_key) становились нечитаемыми → БД «кирпич».
-    # Теперь: если .env существует и содержит DB_ENCRYPTION_KEY — используем его.
     local EXISTING_KEY=""
     if [ -f "$PROJECT_DIR/.env" ]; then
         EXISTING_KEY=$(grep "^DB_ENCRYPTION_KEY=" "$PROJECT_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'")
@@ -267,10 +292,18 @@ setup_env() {
     local DB_KEY
     if [ -n "$EXISTING_KEY" ]; then
         DB_KEY="$EXISTING_KEY"
-        log "Используется существующий DB_ENCRYPTION_KEY (сохраняем зашифрованные данные)"
+        log "Используется существующий DB_ENCRYPTION_KEY"
     else
         DB_KEY=$("$VENV_DIR/bin/python" -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
-        log "Создан новый DB_ENCRYPTION_KEY (первая установка)"
+        log "Создан новый DB_ENCRYPTION_KEY"
+    fi
+
+    # Читаем пароль от БД
+    if [ ! -f /tmp/.pg_pass ]; then
+        read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD; echo ""
+    else
+        DB_PASSWORD=$(cat /tmp/.pg_pass)
+        rm -f /tmp/.pg_pass
     fi
 
     : > "$PROJECT_DIR/.env"
@@ -278,7 +311,7 @@ setup_env() {
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
     write_env_var "DB_ENCRYPTION_KEY" "$DB_KEY"
-    write_env_var "DB_PATH" "./bot_data.db"
+    write_env_var "DATABASE_URL" "postgresql+asyncpg://projectx:${DB_PASSWORD}@localhost:5432/projectx_bot"
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         local CALLBACK_URL="https://${PLATEGA_CALLBACK_DOMAIN}/webhook/platega"
@@ -292,19 +325,20 @@ setup_env() {
     chmod 600 "$PROJECT_DIR/.env"
     success ".env защищён"
 }
+
 # ═══════════════════════════════════════════════════════════════
-# PERMISSIONS & DATABASE
+# PERMISSIONS & DATABASE INIT
 # ═══════════════════════════════════════════════════════════════
 verify_permissions() {
     chown -R projectx:projectx "$PROJECT_DIR"
     find "$PROJECT_DIR" -type d -exec chmod 750 {} \;
-    find "$PROJECT_DIR" -type f -name "*.db*" -exec chmod 600 {} \;
+    find "$PROJECT_DIR" -type f -exec chmod 640 {} \;
     chmod 600 "$PROJECT_DIR/.env"
-    success "Права доступа установлены (dir=750, files=600)"
+    success "Права доступа установлены (dir=750, files=640)"
 }
 
 init_database() {
-    log "Инициализация БД..."
+    log "Инициализация схемы БД PostgreSQL..."
     cd "$PROJECT_DIR"
     runuser -u projectx -- "$VENV_DIR/bin/python" -c "
 import asyncio
@@ -320,15 +354,10 @@ setup_systemd() {
     log "Настройка systemd сервиса..."
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
-    # 🔥 ИСПРАВЛЕНО #2: Убран WatchdogSec=300
-    # WatchdogSec требует sd_notify("WATCHDOG=1") из Python-кода.
-    # Без этого systemd убивает бота каждые 5 минут (SIGABRT).
-    # MemoryStorage FSM стирается, in-memory locks сбрасываются,
-    # SQLite получает database is locked при экстренном завершении.
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
-After=network.target
+After=network.target postgresql.service
 
 [Service]
 Type=simple
@@ -353,8 +382,9 @@ EOF
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
-    success "Systemd настроен (ProtectSystem=strict, без WatchdogSec)"
+    success "Systemd настроен (ProtectSystem=strict)"
 }
+
 # ═══════════════════════════════════════════════════════════════
 # NGINX + SSL
 # ═══════════════════════════════════════════════════════════════
@@ -367,7 +397,6 @@ setup_nginx_ssl() {
     local DOMAIN=$(echo "$URL" | sed -E 's|https?://([^/:]+).*|\1|')
     [ -z "$DOMAIN" ] && return
 
-    # 🔥 ИСПРАВЛЕНО: Читаем порт вебхука из .env
     local WEBHOOK_PORT=$(grep "^PLATEGA_WEBHOOK_PORT=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
     WEBHOOK_PORT=${WEBHOOK_PORT:-8080}
 
@@ -409,40 +438,21 @@ NGINXEOF
 # BACKUP & MONITORING
 # ═══════════════════════════════════════════════════════════════
 setup_backup() {
-    log "Настройка бэкапов..."
+    log "Настройка бэкапов PostgreSQL..."
     mkdir -p "$BACKUP_DIR"
     chown projectx:projectx "$BACKUP_DIR"
 
-    # 🔥 ИСПРАВЛЕНО #20: Добавлена проверка целостности бэкапа через PRAGMA integrity_check
-    # Раньше: sqlite3 .backup создавал бэкап без проверки.
-    # Если БД была повреждена, бэкап тоже был повреждён, но об этом узнавали только при восстановлении.
-    # Теперь: после создания бэкапа запускается PRAGMA integrity_check.
-    # Если проверка падает — бэкап удаляется, отправляется алерт админу.
     cat > /usr/local/bin/projectx-backup.sh << 'EOF'
 #!/bin/bash
 DIR="/root/backups/projectx"
 DATE=$(date +%Y%m%d_%H%M%S)
-DB_SOURCE="/opt/projectx-bot/bot_data.db"
-DB_BACKUP="$DIR/db_$DATE.db"
+DB_BACKUP="$DIR/db_$DATE.sql.gz"
 
-# Создаём бэкап через sqlite3 .backup (консистентный снапшот)
-if sqlite3 "$DB_SOURCE" ".backup '$DB_BACKUP'"; then
-    # 🔥 ИСПРАВЛЕНО #20: Проверка целостности бэкапа
-    INTEGRITY=$(sqlite3 "$DB_BACKUP" "PRAGMA integrity_check;" 2>&1)
-    if [ "$INTEGRITY" = "ok" ]; then
-        gzip "$DB_BACKUP"
-        echo "[$(date)] Backup created and verified: db_$DATE.db.gz"
-    else
-        # Бэкап повреждён — удаляем и логируем ошибку
-        rm -f "$DB_BACKUP"
-        echo "[$(date)] ERROR: Backup integrity check failed! Source DB may be corrupted." >&2
-        echo "Integrity check result: $INTEGRITY" >&2
-        # Алерт админу (если настроен mail или Telegram)
-        # logger -p user.err "ProjectX backup integrity check failed"
-        exit 1
-    fi
+# Бэкап через pg_dump
+if sudo -u postgres pg_dump -Fc projectx_bot | gzip > "$DB_BACKUP"; then
+    echo "[$(date)] Backup created: db_$DATE.sql.gz"
 else
-    echo "[$(date)] ERROR: Failed to create backup" >&2
+    echo "[$(date)] ERROR: Failed to create PostgreSQL backup" >&2
     exit 1
 fi
 
@@ -455,7 +465,7 @@ EOF
 
     chmod +x /usr/local/bin/projectx-backup.sh
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "0 3 * * * /usr/local/bin/projectx-backup.sh") | crontab -
-    success "Автобэкапы настроены (с проверкой integrity_check)"
+    success "Автобэкапы PostgreSQL настроены"
 }
 
 setup_monitoring() {
@@ -514,12 +524,13 @@ show_status() {
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v4.2 (Secure & Stable)${NC}\n"
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v5.0 (PostgreSQL)${NC}\n"
     mkdir -p /var/log "$SNAPSHOT_DIR"
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 
     preflight_checks || rollback "preflight_checks" "Pre-flight checks failed"
     install_dependencies || rollback "install_dependencies" "Failed to install dependencies"
+    setup_postgresql || rollback "setup_postgresql" "PostgreSQL setup failed"
     setup_firewall || rollback "setup_firewall" "Firewall setup failed"
     migrate_to_opt || rollback "migrate_to_opt" "Project sync failed"
     setup_venv || rollback "setup_venv" "Python venv setup failed"

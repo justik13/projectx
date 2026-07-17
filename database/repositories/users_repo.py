@@ -27,7 +27,6 @@ class UserUpdateFields(TypedDict, total=False):
 async def get_user_by_telegram_id(
     session: AsyncSession, telegram_id: int
 ) -> Optional[User]:
-    # 🔥 ИСПРАВЛЕНО #13: Фильтр по is_deleted
     stmt = select(User).where(
         User.telegram_id == telegram_id,
         User.is_deleted == False,
@@ -71,7 +70,8 @@ async def extend_subscription(
     else:
         current_end = now
     if days >= 36500:
-        new_end = datetime(2100, 1, 1)
+        from bot.constants import PERMANENT_END_DATE
+        new_end = PERMANENT_END_DATE
     else:
         new_end = current_end + timedelta(days=days)
     return await update_user(session, user, subscription_end=new_end)
@@ -80,7 +80,6 @@ async def extend_subscription(
 async def get_all_users(
     session: AsyncSession, limit: int | None = None, offset: int = 0
 ) -> List[User]:
-    # 🔥 ИСПРАВЛЕНО #13: Фильтр по is_deleted
     stmt = select(User).where(User.is_deleted == False).order_by(User.created_at.desc())
     if limit is not None:
         stmt = stmt.limit(limit)
@@ -91,7 +90,6 @@ async def get_all_users(
 
 
 async def get_user_count(session: AsyncSession) -> int:
-    # 🔥 ИСПРАВЛЕНО #13: Считаем только не удалённых
     stmt = select(func.count(User.id)).where(User.is_deleted == False)
     result = await session.execute(stmt)
     return result.scalar_one()
@@ -99,7 +97,6 @@ async def get_user_count(session: AsyncSession) -> int:
 
 async def get_active_subscriptions_count(session: AsyncSession) -> int:
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
-    # 🔥 ИСПРАВЛЕНО #13: Фильтр по is_deleted
     stmt = select(func.count(User.id)).where(
         User.subscription_end > now_naive,
         User.is_deleted == False,
@@ -110,7 +107,6 @@ async def get_active_subscriptions_count(session: AsyncSession) -> int:
 
 async def get_new_users_count_24h(session: AsyncSession) -> int:
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
-    # 🔥 ИСПРАВЛЕНО #13: Фильтр по is_deleted
     stmt = select(func.count(User.id)).where(
         User.created_at > now_naive - timedelta(hours=24),
         User.is_deleted == False,
@@ -123,7 +119,6 @@ async def get_users_paginated(
     session: AsyncSession, page: int = 1, per_page: int = 10
 ) -> list[User]:
     offset = (page - 1) * per_page
-    # 🔥 ИСПРАВЛЕНО #13: Фильтр по is_deleted
     result = await session.execute(
         select(User)
         .where(User.is_deleted == False)
@@ -152,7 +147,6 @@ async def get_users_paginated_with_profiles(
 
 async def get_active_users(session: AsyncSession) -> list[User]:
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
-    # 🔥 ИСПРАВЛЕНО #13: Фильтр по is_deleted
     result = await session.execute(
         select(User).where(
             User.subscription_end > now_naive,
@@ -171,7 +165,7 @@ async def get_user_referrals(
         select(User)
         .where(
             User.referred_by == telegram_id,
-            User.is_deleted == False,  # 🔥 ИСПРАВЛЕНО #13
+            User.is_deleted == False,
         )
         .order_by(User.created_at.desc())
     )
@@ -181,29 +175,24 @@ async def get_user_referrals(
 
 async def get_user_with_referrals(
     session: AsyncSession, telegram_id: int
-) -> Optional[User]:
+) -> tuple[Optional[User], list[User]]:
+    """🔥 ИСПРАВЛЕНО: Возвращаем кортеж вместо динамического атрибута"""
     stmt = (
         select(User)
         .options(selectinload(User.profiles))
         .where(
             User.telegram_id == telegram_id,
-            User.is_deleted == False,  # 🔥 ИСПРАВЛЕНО #13
+            User.is_deleted == False,
         )
     )
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
+    
+    referrals = []
     if user:
-        referrals_stmt = (
-            select(User)
-            .where(
-                User.referred_by == telegram_id,
-                User.is_deleted == False,  # 🔥 ИСПРАВЛЕНО #13
-            )
-            .order_by(User.created_at.desc())
-        )
-        referrals_result = await session.execute(referrals_stmt)
-        user._referrals_cache = referrals_result.scalars().all()
-    return user
+        referrals = await get_user_referrals(session, telegram_id)
+    
+    return user, referrals
 
 
 async def mark_user_bot_blocked(
@@ -218,7 +207,6 @@ async def mark_user_bot_blocked(
 async def count_users_with_tariff(
     session: AsyncSession, tariff_id: int
 ) -> int:
-    # 🔥 ИСПРАВЛЕНО #13: Фильтр по is_deleted
     stmt = select(func.count(User.id)).where(
         User.current_tariff_id == tariff_id,
         User.is_deleted == False,

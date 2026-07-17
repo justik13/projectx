@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# 🗑️  ProjectX Bot — Safe Uninstaller (v2.0.1 Clean)
+# 🗑️  ProjectX Bot — Safe Uninstaller (v2.1 PostgreSQL)
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
@@ -50,12 +50,10 @@ if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "[not set]" ]]; then
     warn "Не удалось получить путь из systemd, используется директория по умолчанию: $PROJECT_DIR"
 fi
 
-# Усиленная проверка безопасности пути
 if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "/" || "$PROJECT_DIR" == "/opt" || "$PROJECT_DIR" == "/usr" || "$PROJECT_DIR" == "/root" || "$PROJECT_DIR" == "/home" || "$PROJECT_DIR" == "/etc" || "$PROJECT_DIR" == "/var" || "$PROJECT_DIR" == "/tmp" ]]; then
     error "Обнаружен небезопасный путь для удаления: '$PROJECT_DIR'. Прерывание."
 fi
 
-# Дополнительная проверка: путь должен содержать "projectx"
 if [[ ! "$PROJECT_DIR" =~ projectx ]]; then
     error "Путь '$PROJECT_DIR' не содержит 'projectx'. Прерывание из соображений безопасности."
 fi
@@ -66,7 +64,7 @@ echo ""
 echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${YELLOW}    🗑  ProjectX Bot — Панель Деинсталляции${NC}"
 echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
-echo -e "1) ${RED}Полное очищение${NC} (удалить ВСЁ: код, БД, ключи .env, бэкапы, юзера)"
+echo -e "1) ${RED}Полное очищение${NC} (удалить ВСЁ: код, БД PostgreSQL, ключи .env, бэкапы, юзера)"
 echo -e "2) ${GREEN}Удаление с сохранением данных${NC} (БД и .env будут упакованы в архив)"
 echo -e "3) Отмена операции (выход без изменений)"
 echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
@@ -81,6 +79,11 @@ case $choice in
             success "Деинсталляция отменена пользователем"
             exit 0
         fi
+        
+        log "Удаление базы данных PostgreSQL..."
+        sudo -u postgres psql -c "DROP DATABASE IF EXISTS projectx_bot;" > /dev/null 2>&1 || warn "Не удалось удалить БД projectx_bot"
+        sudo -u postgres psql -c "DROP USER IF EXISTS projectx;" > /dev/null 2>&1 || warn "Не удалось удалить пользователя projectx"
+        success "База данных и пользователь PostgreSQL удалены"
         
         log "Выполняется тотальное удаление данных..."
         if [[ -d "$PROJECT_DIR" ]]; then
@@ -106,12 +109,11 @@ case $choice in
         mkdir -p "$SAFE_BACKUP_DIR"
         success "Создана папка безопасного сохранения: $SAFE_BACKUP_DIR"
         
-        DB_FILE="$PROJECT_DIR/bot_data.db"
-        if [[ -f "$DB_FILE" ]]; then
-            sqlite3 "$DB_FILE" ".backup '$SAFE_BACKUP_DIR/bot_data.db'"
-            success "Зарезервирована консистентная копия БД (через sqlite3 .backup)"
+        log "Резервное копирование базы данных PostgreSQL..."
+        if sudo -u postgres pg_dump -Fc projectx_bot > "$SAFE_BACKUP_DIR/projectx_db.dump"; then
+            success "База данных успешно экспортирована в $SAFE_BACKUP_DIR/projectx_db.dump"
         else
-            warn "Файл БД не найден, копирование пропущено"
+            warn "Не удалось сделать дамп БД (возможно, она уже удалена)"
         fi
         
         ENV_FILE="$PROJECT_DIR/.env"
@@ -144,7 +146,6 @@ esac
 
 log "Очистка зависимостей операционной системы..."
 
-# Очистка конфигурации Nginx (если она была создана)
 NGINX_AVAILABLE="/etc/nginx/sites-available/projectx"
 NGINX_ENABLED="/etc/nginx/sites-enabled/projectx"
 if [[ -f "$NGINX_AVAILABLE" || -L "$NGINX_ENABLED" ]]; then

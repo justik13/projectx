@@ -3,7 +3,7 @@ import logging
 from aiogram import Bot
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import select
-from database.connection import get_session
+from database.connection import session_scope
 from database.models import Payment
 from config.settings import get_settings
 from bot.constants import STALE_PAYMENT_THRESHOLD, WORKER_ERROR_SLEEP_INTERVAL
@@ -13,23 +13,18 @@ logger = logging.getLogger("BackgroundWorker")
 
 
 async def stale_payments_checker_loop(bot: Bot, shutdown_event: asyncio.Event):
-    """
-    Проверяет зависшие платежи и уведомляет админов.
-    🔥 ИСПРАВЛЕНО #5: Graceful shutdown через shutdown_event.
-    """
     settings = get_settings()
     
     while not shutdown_event.is_set():
         try:
-            # 🔥 ИСПРАВЛЕНО #5: wait_for вместо sleep
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=STALE_PAYMENT_THRESHOLD)
                 break
             except asyncio.TimeoutError:
                 pass
 
-            session = await get_session()
-            try:
+            # 🔥 ИСПРАВЛЕНО: Безопасное управление сессией
+            async with session_scope() as session:
                 threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
                 stmt = (
                     select(Payment)
@@ -59,8 +54,6 @@ async def stale_payments_checker_loop(bot: Bot, shutdown_event: asyncio.Event):
                             await bot.send_message(admin_id, msg, parse_mode="HTML")
                         except Exception as e:
                             logger.error(f"Stale alert failed to {admin_id}: {e}")
-            finally:
-                await session.close()
 
         except asyncio.CancelledError:
             logger.info("Stale payments worker cancelled")

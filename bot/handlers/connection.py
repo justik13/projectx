@@ -19,7 +19,7 @@ from database.repositories.profiles_repo import (
 from database.repositories.servers_repo import get_available_servers, get_server_by_id
 from database.repositories.users_repo import get_user_by_telegram_id
 from database.repositories.tariffs_repo import get_tariff_by_id
-from services.device_service import DeviceService
+from services.device_service import DeviceService, DailyLimitExceeded, DeviceLimitExceeded, ServerUnavailable, InvalidConfig
 from services.subscription import SubscriptionService
 from services.slots_cache import get_real_peer_count
 from utils.formatters import format_datetime, format_traffic, format_connection_device_card
@@ -33,11 +33,8 @@ logger = logging.getLogger(__name__)
 
 DEVICE_NAME_REGEX = re.compile(r"^[a-zA-Z0-9\s_-]+$")
 
-# ⚠️ In-memory locks — ОСТАВЛЕНЫ для Message-хендлеров (ввод имени устройства)
-# ActionLockMiddleware не перехватывает Message, только CallbackQuery.
 _deleting_devices: set[int] = set()
 _creating_devices: set[int] = set()
-
 
 async def _get_effective_device_limit(user: User, session: AsyncSession) -> int:
     if user.current_tariff_id:
@@ -45,7 +42,6 @@ async def _get_effective_device_limit(user: User, session: AsyncSession) -> int:
         if tariff:
             return tariff.device_limit
     return 0
-
 
 async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardBuilder]:
     profiles = await get_user_profiles(session, user.id)
@@ -83,7 +79,6 @@ async def _build_connections_screen(user: User, session: AsyncSession) -> tuple[
     builder.adjust(1)
     return rendered, builder
 
-
 async def _render_connections(target, user: User, session: AsyncSession):
     if not user:
         await render_hub(
@@ -107,7 +102,6 @@ async def _render_connections(target, user: User, session: AsyncSession):
 
     await render_hub(target.bot, target.chat.id, rendered, builder.as_markup())
 
-
 @router.callback_query(F.data == "menu_connections")
 async def hub_menu_connections(
     callback: CallbackQuery, state: FSMContext,
@@ -115,12 +109,10 @@ async def hub_menu_connections(
 ):
     await callback.answer()
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
     await _render_connections(callback.message, db_user, session)
-
 
 @router.callback_query(F.data == "back_to_connections")
 async def back_to_connections(
@@ -129,12 +121,10 @@ async def back_to_connections(
 ):
     await callback.answer()
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
     await _render_connections(callback.message, db_user, session)
-
 
 @router.callback_query(F.data.startswith("manage_device:"))
 async def manage_device(
@@ -164,7 +154,6 @@ async def manage_device(
 
     await render_hub(callback.bot, callback.message.chat.id, rendered, get_device_keyboard(profile.id))
 
-
 @router.callback_query(F.data.startswith("show_config:"))
 async def show_config(
     callback: CallbackQuery, state: FSMContext,
@@ -188,7 +177,6 @@ async def show_config(
         ),
         get_back_button(f"manage_device:{profile.id}")
     )
-
 
 @router.callback_query(F.data.startswith("download_conf:"))
 async def download_conf(
@@ -262,7 +250,6 @@ async def download_conf(
         parse_mode="HTML"
     )
 
-
 @router.callback_query(F.data.startswith("rename_device:"))
 async def rename_device_start(
     callback: CallbackQuery, state: FSMContext,
@@ -285,7 +272,6 @@ async def rename_device_start(
         texts.DEVICE_RENAME_PROMPT,
         get_back_button(f"manage_device:{profile_id}")
     )
-
 
 @router.message(DeviceManagementStates.rename_device)
 async def rename_device_process(message: Message, state: FSMContext, session: AsyncSession):
@@ -316,7 +302,6 @@ async def rename_device_process(message: Message, state: FSMContext, session: As
 
     await state.clear()
 
-
 @router.callback_query(F.data.startswith("request_delete_device:"))
 async def request_delete_device(
     callback: CallbackQuery, state: FSMContext,
@@ -338,7 +323,6 @@ async def request_delete_device(
         get_device_delete_confirm_keyboard(profile_id)
     )
 
-
 @router.callback_query(F.data.startswith("cancel_delete_device:"))
 async def cancel_delete_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer("❌ Удаление отменено")
@@ -351,7 +335,6 @@ async def cancel_delete_device(callback: CallbackQuery, state: FSMContext, sessi
         f"📱 <b>Управление устройством</b>",
         get_device_keyboard(profile_id)
     )
-
 
 @router.callback_query(F.data.startswith("confirm_delete_device:"))
 async def confirm_delete_device(
@@ -386,7 +369,6 @@ async def confirm_delete_device(
 
     finally:
         _deleting_devices.discard(profile_id)
-
 
 @router.callback_query(F.data == "add_device")
 async def start_add_device(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -450,7 +432,6 @@ async def start_add_device(callback: CallbackQuery, state: FSMContext, session: 
     finally:
         _creating_devices.discard(user_id)
 
-
 @router.callback_query(F.data.startswith("select_server:"), DeviceCreationStates.choose_server)
 async def select_server(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.answer()
@@ -472,7 +453,6 @@ async def select_server(callback: CallbackQuery, state: FSMContext, session: Asy
         texts.DEVICE_ADD_NAME_PROMPT.format(flag=flag, server_name=safe(server.name)),
         get_back_button("add_device")
     )
-
 
 @router.message(DeviceCreationStates.enter_device_name)
 async def enter_device_name(
@@ -511,10 +491,24 @@ async def enter_device_name(
             await state.clear()
             return
 
-        device_limit = await _get_effective_device_limit(user, session)
-        profiles_count = await get_user_profiles_count(session, user.id)
+        data = await state.get_data()
 
-        if profiles_count >= device_limit:
+        # 🔥 ИСПРАВЛЕНО: Используем try-except для обработки кастомных исключений
+        try:
+            profile = await DeviceService.create_device(
+                session, user, data.get("server_id"), device_name
+            )
+        except DailyLimitExceeded:
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_DEVICE_DAILY_LIMIT,
+                get_back_button("back_to_connections"),
+                parse_mode="HTML"
+            )
+            await state.clear()
+            return
+        except DeviceLimitExceeded:
+            device_limit = await _get_effective_device_limit(user, session)
             await render_hub(
                 message.bot, message.chat.id,
                 texts.ERROR_DEVICE_LIMIT_REACHED.format(limit=device_limit),
@@ -522,31 +516,22 @@ async def enter_device_name(
             )
             await state.clear()
             return
-
-        data = await state.get_data()
-
-        if hasattr(user, '_daily_limit_exceeded'):
-            delattr(user, '_daily_limit_exceeded')
-
-        profile = await DeviceService.create_device(
-            session, user, data.get("server_id"), device_name
-        )
-
-        if not profile:
-            if hasattr(user, '_daily_limit_exceeded'):
-                await render_hub(
-                    message.bot, message.chat.id,
-                    texts.ERROR_DEVICE_DAILY_LIMIT,
-                    get_back_button("back_to_connections"),
-                    parse_mode="HTML"
-                )
-                delattr(user, '_daily_limit_exceeded')
-            else:
-                await render_hub(
-                    message.bot, message.chat.id,
-                    texts.ERROR_SERVER_UNAVAILABLE,
-                    get_back_button("back_to_connections")
-                )
+        except (ServerUnavailable, InvalidConfig):
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_SERVER_UNAVAILABLE,
+                get_back_button("back_to_connections")
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            logger.error(f"Unexpected error in enter_device_name: {e}", exc_info=True)
+            await render_hub(
+                message.bot, message.chat.id,
+                texts.ERROR_TECHNICAL_MESSAGE,
+                get_back_button("back_to_connections"),
+                parse_mode="HTML"
+            )
             await state.clear()
             return
 
