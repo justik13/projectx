@@ -16,6 +16,5 @@ def get_device_delete_confirm_keyboard(profile_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Да, удалить", callback_data=f"confirm_delete_device:{profile_id}")
     builder.button(text="❌ Отмена", callback_data=f"cancel_delete_device:{profile_id}")
-    # 🔥 Убрана кнопка "🏠 В главное меню" для чистоты UX
     builder.adjust(2)
     return builder.as_markup()

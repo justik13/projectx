@@ -3,9 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import Server, VPNProfile
 from services.slots_cache import get_real_peer_count
 from typing import Optional, List, TypedDict
-
-
-# 🔥 ИСПРАВЛЕНО: TypedDict для типизации update kwargs
 class ServerUpdateFields(TypedDict, total=False):
     name: str
     country_flag: str | None
@@ -14,9 +11,6 @@ class ServerUpdateFields(TypedDict, total=False):
     protocol: str
     max_clients: int
     is_active: bool
-
-
-# 🔥 ИСПРАВЛЕНО: Поля, которые нельзя обновлять через update_server
 PROTECTED_SERVER_FIELDS = {"id", "api_key", "created_at"}
 
 
@@ -39,7 +33,6 @@ async def get_available_servers(session: AsyncSession) -> List[Server]:
     Раньше: считали профили для ВСЕХ серверов, включая неактивные.
     Теперь: считаем только для активных → меньше нагрузка на БД.
     """
-    # 🔥 ИСПРАВЛЕНО #12: Подсчёт профилей ТОЛЬКО для активных серверов
     stmt_counts = (
         select(VPNProfile.server_id, func.count(VPNProfile.id).label('profile_count'))
         .join(Server, VPNProfile.server_id == Server.id)
@@ -81,7 +74,6 @@ async def create_server(
         protocol=protocol, max_clients=max_clients
     )
     session.add(server)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     await session.refresh(server)
     return server
@@ -109,7 +101,6 @@ async def update_server(
 
 async def delete_server(session: AsyncSession, server: Server) -> None:
     await session.delete(server)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
 
 
@@ -124,10 +115,8 @@ async def get_total_free_ips(session: AsyncSession) -> int:
 
     total_free = 0
     for server in active_servers:
-        # Используем кэш (без force_refresh для производительности)
         real_count = await get_real_peer_count(server, force_refresh=False)
         if real_count == -1:
-            # API недоступен — используем данные из БД как fallback
             stmt = select(func.count(VPNProfile.id)).where(
                 VPNProfile.server_id == server.id
             )
@@ -173,6 +162,5 @@ async def delete_profiles_by_server_id(
     from sqlalchemy import delete as sql_delete
     stmt = sql_delete(VPNProfile).where(VPNProfile.server_id == server_id)
     result = await session.execute(stmt)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     return result.rowcount

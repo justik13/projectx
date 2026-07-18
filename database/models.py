@@ -17,8 +17,6 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tos_accepted: Mapped[bool] = mapped_column(Boolean, default=True)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True (хранится в UTC)
     subscription_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     
     device_limit: Mapped[int] = mapped_column(Integer, default=0)
@@ -27,26 +25,18 @@ class User(Base):
     )
     referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     referral_days: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True
     last_payment_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     
     notification_retry_count: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True
     last_notification_attempt: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + теперь возвращает aware datetime
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
@@ -60,8 +50,6 @@ class User(Base):
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
-    
-    # 🔥 ИСПРАВЛЕНО MEDIUM #6: Relationship для рефералов (self-referential)
     referrals = relationship(
         "User",
         backref=backref("referrer", remote_side=[telegram_id]),
@@ -88,15 +76,11 @@ class VPNProfile(Base):
     raw_config: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
     traffic_down: Mapped[int] = mapped_column(BigInteger, default=0)
     traffic_up: Mapped[int] = mapped_column(BigInteger, default=0)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True
     last_connected: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     
     last_ip: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     sync_fail_count: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + aware datetime
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
@@ -117,8 +101,6 @@ class Server(Base):
     protocol: Mapped[str] = mapped_column(String(50), default="amneziawg2")
     max_clients: Mapped[int] = mapped_column(Integer, default=50)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + aware datetime
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
@@ -134,8 +116,6 @@ class Tariff(Base):
     price_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + aware datetime
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
@@ -164,13 +144,9 @@ class Payment(Base):
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + aware datetime
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
@@ -191,8 +167,6 @@ class AuditLog(Base):
     target_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     target_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + aware datetime
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
@@ -213,13 +187,9 @@ class BroadcastProgress(Base):
     content_type: Mapped[str] = mapped_column(String(50), nullable=False)
     label: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="in_progress", index=True)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + aware datetime
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + aware datetime
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=now_utc,
@@ -237,13 +207,9 @@ class PendingAPIDeletion(Base):
     peer_id: Mapped[str] = mapped_column(String(255), nullable=False)
     client_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    
-    # 🔥 ИЗМЕНЕНО: timezone=True + aware datetime
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )

@@ -9,8 +9,6 @@ from .payments import stale_payments_checker_loop
 from .heartbeat import heartbeat_loop, set_bot_ref
 
 logger = logging.getLogger(__name__)
-
-# 🔥 ИСПРАВЛЕНО #5 (из Части 3): Graceful shutdown
 shutdown_event = asyncio.Event()
 
 
@@ -28,7 +26,6 @@ async def start_background_workers(bot: Bot) -> list[asyncio.Task]:
     4. subscription_notifications_loop — уведомления о скором истечении каждые 30 мин
     5. heartbeat_loop — обновление timestamp + мониторинг CB каждые 60с
     """
-    # 🔥 ИСПРАВЛЕНО #7: Устанавливаем ссылку на bot для алертов
     set_bot_ref(bot)
 
     tasks = [

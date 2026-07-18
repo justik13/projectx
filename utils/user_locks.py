@@ -19,8 +19,6 @@ import logging
 from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
-
-# (lock, last_used_timestamp)
 _user_action_locks: Dict[int, Tuple[asyncio.Lock, float]] = {}
 
 _last_cleanup_time: float = 0.0
@@ -39,17 +37,13 @@ def get_user_action_lock(user_id: int) -> asyncio.Lock:
     global _last_cleanup_time
     
     now = time.monotonic()
-    
-    # Периодический cleanup (раз в час)
     if now - _last_cleanup_time > _CLEANUP_INTERVAL:
         _cleanup_old_locks(now)
         _last_cleanup_time = now
     
     if user_id not in _user_action_locks:
-        # Создаём новый lock с текущим timestamp
         _user_action_locks[user_id] = (asyncio.Lock(), now)
     else:
-        # Обновляем last_used timestamp
         lock, _ = _user_action_locks[user_id]
         _user_action_locks[user_id] = (lock, now)
     

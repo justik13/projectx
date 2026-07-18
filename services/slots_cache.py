@@ -6,12 +6,7 @@ from services.amnezia_client import AmneziaClient
 from database.models import Server
 
 logger = logging.getLogger(__name__)
-
-# Кэш реального количества пиров на серверах.
-# TTL 5 минут (300 секунд), maxsize 100 (с запасом на кол-во серверов)
 _slots_cache = TTLCache(maxsize=100, ttl=300)
-
-# 🔥 ИСПРАВЛЕНО #4: (lock, last_used_timestamp) вместо просто lock
 _locks: dict[int, tuple[asyncio.Lock, float]] = {}
 
 _last_cleanup_time: float = 0.0
@@ -37,17 +32,11 @@ async def get_real_peer_count(server: Server, force_refresh: bool = False) -> in
     global _last_cleanup_time
     
     now = time.monotonic()
-    
-    # 🔥 ИСПРАВЛЕНО #4: Периодический cleanup locks
     if now - _last_cleanup_time > _CLEANUP_INTERVAL:
         _cleanup_old_locks(now)
         _last_cleanup_time = now
-    
-    # 🔥 ИСПРАВЛЕНО: Если force_refresh=True — пропускаем проверку кэша
     if not force_refresh and server.id in _slots_cache:
         return _slots_cache[server.id]
-    
-    # Получаем или создаём lock для этого сервера
     if server.id not in _locks:
         _locks[server.id] = (asyncio.Lock(), now)
     else:
@@ -57,7 +46,6 @@ async def get_real_peer_count(server: Server, force_refresh: bool = False) -> in
     lock = _locks[server.id][0]
     
     async with lock:
-        # Double-check после получения блокировки (только если не force_refresh)
         if not force_refresh and server.id in _slots_cache:
             return _slots_cache[server.id]
         

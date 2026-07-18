@@ -25,8 +25,6 @@ from services.amnezia_client import close_http_session
 from services.workers import start_background_workers, shutdown_event
 from bot.handlers.webhook import setup_webhook_routes
 from bot.handlers.admin.broadcast import resume_pending_broadcasts
-
-# Формат логов с request_id
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - [%(request_id)s] %(name)s: %(message)s",
@@ -50,8 +48,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     """
     from bot.middlewares.correlation import get_current_request_id
     request_id = get_current_request_id()
-
-    # 🔥 Полная ошибка с traceback идет ТОЛЬКО в логи (journalctl)
     logger.critical(
         "[%s] Unhandled exception: %s",
         request_id,
@@ -68,9 +64,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
 
     try:
         settings = get_settings()
-        
-        # 🔥 ИСПРАВЛЕНО MEDIUM #13: В Telegram — только Request ID и тип ошибки
-        # БЕЗ traceback, БЕЗ кусков кода, БЕЗ путей файлов
         error_type = type(event.exception).__name__
         error_short = str(event.exception)[:200]
         
@@ -122,39 +115,20 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     """Создаёт и настраивает bot + dispatcher"""
     settings = get_settings()
     bot = Bot(token=settings.BOT_TOKEN)
-
-    # Убран неподдерживаемый в aiogram 3.x параметр key_prefix
     storage = RedisStorage.from_url(settings.REDIS_URL)
     dp = Dispatcher(storage=storage)
-
-    # ── Порядок middleware КРИТИЧЕН ──
-    # 1. CorrelationMiddleware ПЕРВЫМ — генерирует ID
     dp.message.middleware(CorrelationMiddleware())
     dp.callback_query.middleware(CorrelationMiddleware())
-
-    # 2. DBSession — нужен всем (создаёт сессию БД)
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
-
-    # 3. CleanChat — удаляет сообщения пользователя (SMH)
     dp.message.middleware(CleanChatMiddleware())
-
-    # 4. UserContext — загружает User из БД в data["db_user"]
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
-
-    # 5. BanCheck — проверяет бан ПОСЛЕ загрузки юзера
     dp.message.middleware(BanCheckMiddleware())
     dp.callback_query.middleware(BanCheckMiddleware())
-
-    # 6. Throttling — глобальный rate limit 0.3с + action_type 2.0с
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
-
-    # 7. ActionLock — эксклюзивная блокировка тяжёлых действий
     dp.callback_query.middleware(ActionLockMiddleware())
-
-    # 8. ChatAction — показывает "typing..." / "uploading..."
     dp.message.middleware(ChatActionMiddleware())
 
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
@@ -187,7 +161,6 @@ async def start_webhook_server(port: int):
     setup_webhook_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Слушаем только localhost, Nginx проксирует сюда
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
     logger.info("Webhook server started on 127.0.0.1:%d", port)
@@ -236,8 +209,6 @@ async def main():
         except Exception as e:
             logger.critical("❌ DB_ENCRYPTION_KEY невалиден: %s", e)
             return
-
-        # Проверка конфигурации Platega ДО запуска
         if not _validate_platega_config():
             return
 
@@ -253,12 +224,8 @@ async def main():
         webhook_runner = None
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
             webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
-
-        # Возобновляем прерванные рассылки после рестарта
         await resume_pending_broadcasts(bot)
         logger.info("Pending broadcasts resumed (if any)")
-
-        # Graceful shutdown
         loop = asyncio.get_running_loop()
 
         def _signal_handler():
@@ -270,20 +237,14 @@ async def main():
                 loop.add_signal_handler(sig, _signal_handler)
             except NotImplementedError:
                 pass
-
-        # Запускаем background workers
         worker_tasks = await start_background_workers(bot)
         logger.info("Запуск polling...")
         polling_task = asyncio.create_task(dp.start_polling(bot))
-
-        # Ждём либо shutdown signal, либо завершение polling
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         done, pending = await asyncio.wait(
             [polling_task, shutdown_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-
-        # Если shutdown был запрошен — останавливаем polling
         if shutdown_event.is_set():
             logger.info("Shutdown requested, stopping polling...")
             await dp.stop_polling()

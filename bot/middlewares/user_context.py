@@ -24,15 +24,10 @@ from bot.constants import USER_CONTEXT_CACHE_MAX_SIZE, USER_CONTEXT_CACHE_TTL
 from database.models import User
 
 logger = logging.getLogger(__name__)
-
-# Кэш: telegram_id -> User | None. TTL из конфига.
-# cachetools сам инвалидирует просроченные ключи при обращении.
 _user_cache: TTLCache[int, User | None] = TTLCache(
     maxsize=USER_CONTEXT_CACHE_MAX_SIZE, 
     ttl=USER_CONTEXT_CACHE_TTL
 )
-
-# Sentinel для различения "ключ отсутствует" и "значение None"
 _SENTINEL = object()
 
 
@@ -48,7 +43,6 @@ class UserContextMiddleware(BaseMiddleware):
         event: Message | CallbackQuery,
         data: dict[str, Any],
     ) -> Any:
-        # Определяем telegram_id
         telegram_id: int | None = None
         if isinstance(event, Message) and event.from_user:
             telegram_id = event.from_user.id
@@ -58,14 +52,10 @@ class UserContextMiddleware(BaseMiddleware):
         if telegram_id is None:
             data["db_user"] = None
             return await handler(event, data)
-
-        # Пробуем кэш
         cached = _user_cache.get(telegram_id, _SENTINEL)
         if cached is not _SENTINEL:
             data["db_user"] = cached
             return await handler(event, data)
-
-        # Загрузка из БД
         session: AsyncSession | None = data.get("session")
         if session is None:
             data["db_user"] = None
@@ -77,8 +67,6 @@ class UserContextMiddleware(BaseMiddleware):
         )
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
-
-        # Кэшируем (включая None — чтобы не долбить БД на каждый запрос нового юзера)
         _user_cache[telegram_id] = user
         data["db_user"] = user
 

@@ -7,8 +7,6 @@ from config.settings import get_settings
 from services.amnezia_client import get_http_session
 
 logger = logging.getLogger(__name__)
-
-# 🔥 ИСПРАВЛЕНО: Явный ClientTimeout для aiohttp 3.14+ (убирает deprecation warning)
 PLATEGA_TIMEOUT = ClientTimeout(total=30, connect=10)
 
 
@@ -74,7 +72,6 @@ class PlategaClient:
             ) as response:
                 if response.status == 200:
                     result = await response.json()
-                    # 🔥 ИСПРАВЛЕНО: Нормализация status через .upper()
                     if "status" in result and isinstance(result["status"], str):
                         result["status"] = result["status"].upper()
                     return result

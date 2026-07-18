@@ -22,26 +22,15 @@ from bot import texts
 from utils.user_locks import get_user_action_lock
 
 logger = logging.getLogger(__name__)
-
-# Паттерны callback_data, требующие эксклюзивного доступа.
-# Если callback_data начинается с одного из этих префиксов (или равен ему) —
-# захватывается per-user asyncio.Lock.
 LOCKED_ACTION_PREFIXES = (
-    # ── Устройства ──
     "add_device",                    # 🔥 ИСПРАВЛЕНО #4+#5: Начало создания устройства
     "select_server:",                # 🔥 ИСПРАВЛЕНО #4+#5: Выбор сервера при создании
     "confirm_delete_device:",        # Подтверждение удаления (user)
     "admin_delete_device_apply:",    # Подтверждение удаления (admin)
-
-    # ── Скачивание конфигов ──
     "download_conf:",                # Генерация .vpn + .conf + инструкция
-
-    # ── Оплата ──
     "pay_stars:",                    # Создание Stars инвойса
     "pay_sbp:",                      # Создание Platega/SBP платежа
     "check_payment:",                # Проверка статуса Platega
-
-    # ── Админка: применение изменений ──
     "admin_sub_apply_tariff:",       # Смена тарифа пользователю
     "admin_sub_apply_extend:",       # Продление подписки
     "admin_sub_apply_reduce:",       # Уменьшение дней
@@ -51,8 +40,6 @@ LOCKED_ACTION_PREFIXES = (
     "confirm_server_delete:",        # Удаление сервера
     "admin_server_toggle:",          # Вкл/выкл сервера
     "admin_tariff_toggle:",          # Вкл/выкл тарифа
-
-    # ── Рассылка ──
     "broadcast_send_all",            # Отправить всем
     "broadcast_send_active",         # Отправить активным
 )
@@ -86,7 +73,6 @@ class ActionLockMiddleware(BaseMiddleware):
     """
 
     async def __call__(self, handler, event, data):
-        # Работаем только с callback_query
         if not isinstance(event, CallbackQuery):
             return await handler(event, data)
 
@@ -95,15 +81,10 @@ class ActionLockMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         callback_data = event.data or ""
-
-        # Безопасное действие (навигация) — пропускаем без lock
         if not _is_locked_action(callback_data):
             return await handler(event, data)
-
-        # Тяжёлое действие — пытаемся захватить lock
         lock = get_user_action_lock(user_id)
         if lock.locked():
-            # Lock уже занят другим действием этого пользователя
             try:
                 await event.answer(
                     texts.ERROR_ACTION_IN_PROGRESS,
@@ -117,9 +98,5 @@ class ActionLockMiddleware(BaseMiddleware):
                 callback_data[:50],
             )
             return
-
-        # Захватываем lock и выполняем handler
-        # Между lock.locked() и async with lock нет await,
-        # поэтому race condition невозможен (single-threaded event loop)
         async with lock:
             return await handler(event, data)

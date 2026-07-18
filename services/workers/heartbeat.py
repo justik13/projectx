@@ -48,7 +48,6 @@ async def heartbeat_loop(shutdown_event: asyncio.Event):
 
 
 async def _check_circuit_breakers():
-    # 🔥 ИСПРАВЛЕНО: Локальный импорт для избежания circular dependency
     from database.connection import session_scope
     from database.repositories.servers_repo import get_server_by_api_url
 
@@ -66,7 +65,6 @@ async def _check_circuit_breakers():
 
         server_name = api_url
         try:
-            # Безопасная сессия
             async with session_scope() as session:
                 server = await get_server_by_api_url(session, api_url)
                 if server:

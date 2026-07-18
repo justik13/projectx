@@ -2,8 +2,6 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from database.models import VPNProfile
-
-# 🔥 БЕЗЫЙ WHITELIST: Только эти поля можно обновлять через update_profile
 ALLOWED_PROFILE_UPDATE_FIELDS = {
     'device_name', 'last_connected', 'traffic_down', 'traffic_up',
     'last_ip', 'is_active', 'sync_fail_count'
@@ -28,7 +26,6 @@ async def create_profile(session: AsyncSession, user_id: int, server_id: int, de
         raw_config=raw_config
     )
     session.add(profile)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit() для работы внутри begin_nested()
     await session.flush()
     await session.refresh(profile)
     return profile
@@ -41,14 +38,12 @@ async def update_profile(session: AsyncSession, profile: VPNProfile, **kwargs) -
     for key, value in kwargs.items():
         if key in ALLOWED_PROFILE_UPDATE_FIELDS:
             setattr(profile, key, value)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     await session.refresh(profile)
     return profile
 
 async def delete_profile(session: AsyncSession, profile: VPNProfile) -> None:
     await session.delete(profile)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
 
 async def get_user_profiles_count(session: AsyncSession, user_id: int) -> int:

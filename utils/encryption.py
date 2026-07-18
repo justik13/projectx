@@ -4,8 +4,6 @@ from config.settings import get_settings
 import logging
 
 logger = logging.getLogger(__name__)
-
-# Кэш инстансов Fernet для оптимизации CPU.
 _fernet_cache: dict[str, Fernet] = {}
 _FERNET_CACHE_MAX_SIZE = 10
 
@@ -27,8 +25,6 @@ class EncryptedString(TypeDecorator):
             return None
         settings = get_settings()
         key = settings.DB_ENCRYPTION_KEY
-        
-        # 🔥 ИСПРАВЛЕНО CRITICAL #2: Жесткий Fail-Fast вместо молчаливой записи в plaintext
         if not key:
             raise RuntimeError(
                 "CRITICAL: DB_ENCRYPTION_KEY is empty! "
@@ -51,7 +47,6 @@ class EncryptedString(TypeDecorator):
         key = settings.DB_ENCRYPTION_KEY
         
         if not key:
-            # Если ключ пропал, мы не можем расшифровать. Возвращаем None.
             logger.error("DB_ENCRYPTION_KEY not found during decryption. Returning None.")
             return None
             
@@ -60,7 +55,6 @@ class EncryptedString(TypeDecorator):
             decrypted = f.decrypt(value.encode("utf-8"))
             return decrypted.decode("utf-8")
         except InvalidToken:
-            # Возможно, данные были записаны в plaintext (старая уязвимость) или ключ изменился
             logger.warning("Ошибка расшифровки: неверный токен (возможно, plaintext или смена ключа)")
             return None
         except Exception as e:

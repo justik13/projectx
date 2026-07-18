@@ -18,11 +18,6 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================
-# DECODING
-# ============================================================
-
 def _decode_base64url(payload: str) -> Optional[bytes]:
     """Декодирует base64url строку в байты."""
     try:
@@ -99,11 +94,6 @@ def decode_vpn_uri_to_json(uri: str) -> Optional[dict]:
         return None
     
     return data
-
-
-# ============================================================
-# BUILDERS
-# ============================================================
 
 def build_vpn_file(uri: str) -> Optional[str]:
     """
@@ -219,13 +209,9 @@ def is_valid_vpn_uri(uri: str) -> bool:
     for container in containers:
         if not isinstance(container, dict):
             continue
-        
-        # Ищем секцию awg
         awg = container.get("awg")
         if not awg or not isinstance(awg, dict):
             continue
-        
-        # Требуем protocol_version == "2"
         protocol_version = awg.get("protocol_version")
         if str(protocol_version) == "2":
             return True

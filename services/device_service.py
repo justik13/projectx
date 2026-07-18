@@ -23,10 +23,6 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
 CRITICAL_SLOTS_THRESHOLD = 5
-
-# 🔥 ИСПРАВЛЕНО HIGH #6: Overselling слотов (Race Condition)
-# Используем Redis для распределенных блокировок серверов при создании устройств.
-# Это гарантирует, что на сервере с 1 свободным слотом не создастся 2 устройства.
 _redis_client: aioredis.Redis | None = None
 
 async def _get_redis() -> aioredis.Redis:
@@ -46,9 +42,6 @@ class DailyLimitExceeded(DeviceCreationError): pass
 class DeviceLimitExceeded(DeviceCreationError): pass
 class ServerUnavailable(DeviceCreationError): pass
 class InvalidConfig(DeviceCreationError): pass
-
-
-# Per-user locks для защиты от спама внутри одного пользователя
 _user_locks: dict[int, asyncio.Lock] = {}
 
 def _get_user_lock(user_id: int) -> asyncio.Lock:
@@ -88,13 +81,6 @@ class DeviceService:
                 f"create_device: server {server.name} (id={server.id}) is disabled"
             )
             raise ServerUnavailable("Server is disabled by admin")
-
-        # ═══════════════════════════════════════════════════════════
-        # 🔥 ИСПРАВЛЕНО HIGH #6: Redis Lock от Overselling
-        # Блокируем server_id в Redis на время создания устройства.
-        # Это гарантирует атомарность: 50 concurrent запросов не создадут
-        # 50 пиров на сервере с 1 свободным слотом.
-        # ═══════════════════════════════════════════════════════════
         redis = await _get_redis()
         lock_key = f"lock:create_device:server:{server.id}"
         redis_lock = redis.lock(lock_key, timeout=30, blocking_timeout=10)
@@ -106,8 +92,6 @@ class DeviceService:
                     f"create_device: failed to acquire Redis lock for server {server.id}"
                 )
                 raise ServerUnavailable("Server is busy, try again")
-
-            # Шаг 1: O(1) COUNT из локальной БД
             local_count = await _get_server_profiles_count(session, server.id)
             free_slots = server.max_clients - local_count
             if free_slots <= 0:
@@ -116,8 +100,6 @@ class DeviceService:
                     f"(local_count={local_count}/{server.max_clients})"
                 )
                 raise ServerUnavailable("Server is full")
-
-            # Шаг 2: Если свободно менее CRITICAL — идем в API
             if free_slots < CRITICAL_SLOTS_THRESHOLD:
                 logger.info(
                     f"create_device: critical zone on {server.name}, "
@@ -133,8 +115,6 @@ class DeviceService:
                         f"(api_count={real_count}/{server.max_clients})"
                     )
                     raise ServerUnavailable("Server is full")
-
-            # Per-user lock для защиты от спама одним пользователем
             lock = _get_user_lock(user.id)
             async with lock:
                 result = await session.execute(

@@ -2,9 +2,6 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional, List
 from utils.datetime_helpers import to_msk, now_msk, format_datetime_msk, days_left_msk
-
-
-# Часовой пояс Москвы для всех отображений
 MSK_TZ = ZoneInfo("Europe/Moscow")
 
 
@@ -57,11 +54,6 @@ def format_datetime_short(dt: Optional[datetime]) -> str:
     """
     return format_datetime_msk(dt, "%d.%m")
 
-
-# ============================================================
-# FORMATTER SERVICES (вынесено из handlers)
-# ============================================================
-
 def format_user_card_text(
     user,
     profiles: list,
@@ -76,8 +68,6 @@ def format_user_card_text(
     """
     from bot import texts
     from utils.telegram import safe
-    
-    # Защита от naive datetime
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     

@@ -1,7 +1,6 @@
 
 .aider*
 .aider.conf.yml
-# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -25,37 +24,23 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
-# Environment
 .env
 .env.local
 .env.*.local
-
-# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Database
 *.db
 *.sqlite
 *.sqlite3
-
-# Logs
 *.log
 logs/
-
-# Temporary
 tmp/
 temp/
-
-# Testing
 .coverage
 htmlcov/
 .pytest_cache/

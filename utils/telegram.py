@@ -23,7 +23,6 @@ async def _safe_delete_batch(bot, chat_id: int, msg_ids: List[int]):
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except TelegramBadRequest as e:
             err_str = str(e).lower()
-            # Игнорируем ожидаемые ошибки (сообщение уже удалено или не найдено)
             if "message to delete not found" in err_str or "message can't be deleted" in err_str or "chat not found" in err_str:
                 pass
             else:

@@ -21,10 +21,6 @@ DEFAULT_TARIFFS = [
 async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
-    
-    # ═══════════════════════════════════════════════════════════
-    # 🔥 ИСПРАВЛЕНО P0-3: pool_size 20→30, max_overflow 10→20
-    # ═══════════════════════════════════════════════════════════
     _engine = create_async_engine(
         settings.DATABASE_URL,
         echo=False,
@@ -34,15 +30,9 @@ async def init_db():
         pool_pre_ping=True,
     )
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
-
-    # Создаём все таблицы на основе моделей
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _seed_default_tariffs(conn)
-        
-        # 🔥 ИСПРАВЛЕНО: Применяем дополнительные индексы ВНУТРИ живой транзакции.
-        # Ранее вызов был после выхода из async with, что приводило к InterfaceError
-        # (соединение уже закрыто и возвращено в пул) и тихому провалу из-за try/except.
         await _apply_additional_indexes(conn)
 
     logging.info(f"PostgreSQL database initialized at {settings.DATABASE_URL}")
@@ -64,25 +54,21 @@ async def _apply_additional_indexes(conn):
     которые не могут быть выражены через SQLAlchemy ORM.
     """
     indexes_sql = [
-        # Идемпотентность платежей — защита от double-spend
         """
         CREATE UNIQUE INDEX IF NOT EXISTS ix_payment_external_completed
         ON payments (external_id)
         WHERE status = 'completed' AND external_id IS NOT NULL
         """,
-        # Индекс для быстрого поиска активных подписок
         """
         CREATE INDEX IF NOT EXISTS ix_users_active_subscription
         ON users (subscription_end)
         WHERE is_deleted = false AND subscription_end IS NOT NULL
         """,
-        # Индекс для быстрого поиска забаненных пользователей
         """
         CREATE INDEX IF NOT EXISTS ix_users_banned
         ON users (telegram_id)
         WHERE is_banned = true AND is_deleted = false
         """,
-        # Индекс для быстрой выборки пользователей с истекающей подпиской
         """
         CREATE INDEX IF NOT EXISTS ix_users_expiring_subscription
         ON users (subscription_end, telegram_id)
@@ -92,19 +78,16 @@ async def _apply_additional_indexes(conn):
         AND subscription_end IS NOT NULL
         AND (notified_3d = false OR notified_1d = false OR notified_2h = false)
         """,
-        # Индекс для быстрого поиска pending broadcasts
         """
         CREATE INDEX IF NOT EXISTS ix_broadcast_in_progress
         ON broadcast_progress (status, created_at)
         WHERE status = 'in_progress'
         """,
-        # Индекс для быстрого поиска pending API deletions
         """
         CREATE INDEX IF NOT EXISTS ix_pending_api_deletions_attempts
         ON pending_api_deletions (attempts, created_at)
         WHERE attempts < 10
         """,
-        # Составной индекс для быстрой пагинации пользователей
         """
         CREATE INDEX IF NOT EXISTS ix_users_paginated
         ON users (created_at DESC, id DESC)

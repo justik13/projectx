@@ -15,8 +15,6 @@ Helper функции для работы с временем.
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
-
-# Часовой пояс Москвы для всех отображений
 MSK_TZ = ZoneInfo("Europe/Moscow")
 
 
@@ -59,10 +57,7 @@ def to_msk(dt: Optional[datetime]) -> Optional[datetime]:
     """
     if dt is None:
         return None
-    
-    # Защита от naive datetime (не должно встречаться в новом коде)
     if dt.tzinfo is None:
-        # Предполагаем что naive = UTC (для обратной совместимости)
         dt = dt.replace(tzinfo=timezone.utc)
     
     return dt.astimezone(MSK_TZ)
@@ -140,8 +135,6 @@ def is_expired(dt: Optional[datetime]) -> bool:
     """
     if dt is None:
         return True
-    
-    # Защита от naive datetime
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     

@@ -36,7 +36,6 @@ async def create_tariff(
         sort_order=sort_order,
     )
     session.add(tariff)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     await session.refresh(tariff)
     return tariff
@@ -45,14 +44,12 @@ async def update_tariff(session: AsyncSession, tariff: Tariff, **kwargs) -> Tari
     for key, value in kwargs.items():
         if hasattr(tariff, key):
             setattr(tariff, key, value)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     await session.refresh(tariff)
     return tariff
 
 async def delete_tariff(session: AsyncSession, tariff: Tariff) -> None:
     await session.delete(tariff)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
 
 async def get_tariff_count(session: AsyncSession) -> int:

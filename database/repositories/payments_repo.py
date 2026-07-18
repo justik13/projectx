@@ -13,7 +13,6 @@ async def create_payment(session: AsyncSession, user_id: int, tariff_id: int, am
         currency=currency
     )
     session.add(payment)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     await session.refresh(payment)
     return payment
@@ -21,9 +20,7 @@ async def create_payment(session: AsyncSession, user_id: int, tariff_id: int, am
 
 async def mark_payment_as_paid(session: AsyncSession, payment: Payment) -> Payment:
     payment.status = 'completed'
-    # 🔥 ИЗМЕНЕНО: now_utc() возвращает aware datetime
     payment.paid_at = now_utc()
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     await session.refresh(payment)
     return payment
@@ -63,7 +60,6 @@ async def mark_payment_as_cancelled(session: AsyncSession, payment_id: int) -> b
         .where(Payment.id == payment_id, Payment.status == 'pending')
         .values(status='cancelled')
     )
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     return result.rowcount > 0
 

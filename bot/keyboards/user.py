@@ -13,8 +13,6 @@ def get_profile_keyboard(is_active: bool = False, back_to: str = "back_to_main_m
     builder = InlineKeyboardBuilder()
     builder.button(text="🎁 Пригласить друга", callback_data="referral")
     builder.button(text="🧾 История оплат", callback_data="user_history")
-    
-    # 🔥 Контекстная кнопка назад
     if back_to == "menu_subscription":
         builder.button(text="← К подписке", callback_data="menu_subscription")
     else:

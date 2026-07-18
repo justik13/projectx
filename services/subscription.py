@@ -41,8 +41,6 @@ class SubscriptionService:
         if ref_id is not None and ref_id != telegram_id:
             ref_user = await get_user_by_telegram_id(session, ref_id)
             if ref_user:
-                # 🔥 ИСПРАВЛЕНО: Защита от Circular Referral Chain (до 5 уровней)
-                # Предотвращает фарм бонусов через кольца (A -> B -> C -> A)
                 current_id = ref_id
                 chain_visited = {telegram_id, ref_id}
                 is_circular = False
@@ -80,8 +78,6 @@ class SubscriptionService:
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user:
             return None
-
-        # 🔥 ИСПРАВЛЕНО P0-3: TOCTOU проверка перед изменением лимита
         if new_device_limit is not None:
             profiles_count = await get_user_profiles_count(session, user.id)
             if profiles_count > new_device_limit:

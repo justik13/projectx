@@ -14,26 +14,6 @@ from utils.datetime_helpers import now_utc, is_expired
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════
-# 🔥 ИСПРАВЛЕНО: Полностью переписан подход к бану/разбану
-#
-# Было:
-#   1. Читаем user + profiles (middleware session)
-#   2. await session.commit()  ← ломает контракт middleware!
-#   3. HTTP-запросы 15 сек     ← connection свободен, но хрупко
-#   4. Новая session_scope()   ← UPDATE БД
-#
-# Стало:
-#   1. Читаем user + profiles (middleware session)
-#   2. UPDATE is_banned + is_active (middleware session, flush)
-#   3. Аудит + invalidate cache
-#   4. asyncio.create_task()   ← HTTP в ФОНЕ!
-#   → Middleware session закрывается за ~20ms
-#   → API обновится через 1-2 секунды в фоне
-#   → Self-healing подстрахует если API упадёт
-# ═══════════════════════════════════════════════════════════
-
-
 async def _update_api_status_background(
     tasks_info: list, target_status: str, telegram_id: int
 ):
@@ -97,10 +77,6 @@ class BanService:
             False if new_status
             else (True if has_access else False)
         )
-
-        # ═══════════════════════════════════════════════════════════
-        # ШАГ 1: Немедленный UPDATE в БД (быстрая транзакция, ~20ms)
-        # ═══════════════════════════════════════════════════════════
         await update_user(session, user, is_banned=new_status)
 
         profiles = await get_user_profiles(session, user.id)
@@ -120,10 +96,6 @@ class BanService:
         )
 
         invalidate_user_cache(telegram_id)
-
-        # ═══════════════════════════════════════════════════════════
-        # ШАГ 2: Собираем данные для API (read-only, без HTTP)
-        # ═══════════════════════════════════════════════════════════
         tasks_info = []
         if profiles:
             server_ids = {p.server_id for p in profiles}
@@ -141,13 +113,6 @@ class BanService:
                         'api_key': server.api_key,
                         'peer_id': profile.peer_id
                     })
-
-        # ═══════════════════════════════════════════════════════════
-        # ШАГ 3: HTTP-запросы В ФОНЕ (asyncio.create_task)
-        # Middleware session закроется при выходе из handler,
-        # а фоновая задача обновит API через 1-2 секунды.
-        # Self-healing (traffic_sync_loop) подстрахует если API упадёт.
-        # ═══════════════════════════════════════════════════════════
         if tasks_info:
             asyncio.create_task(
                 _update_api_status_background(

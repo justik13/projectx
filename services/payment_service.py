@@ -15,8 +15,6 @@ from utils.datetime_helpers import now_utc
 import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
-
-# Дедупликация алертов/уведомлений paid-after-cancel
 _alerted_paid_after_cancel: set[int] = set()
 _notified_paid_after_cancel: set[int] = set()
 
@@ -43,10 +41,8 @@ class PaymentService:
         Обрабатывает успешную оплату.
         🔥 ИСПРАВЛЕНО HIGH #7: Double Bonus через Redis Lock.
         """
-        # 🔥 ИСПРАВЛЕНО HIGH #7: Redis Lock для атомарной проверки is_first_payment
         redis = await _get_redis()
         lock_key = f"lock:payment_bonus:user"
-        # Блокируем на уровне пользователя, которому начисляется бонус
         payment_obj = await session.get(Payment, payment_id)
         if not payment_obj:
             return False, "not_found"
@@ -59,7 +55,6 @@ class PaymentService:
                 logger.warning(
                     f"Payment {payment_id}: failed to acquire Redis bonus lock"
                 )
-                # Продолжаем без бонуса — платеж все равно пройдет
                 pass
 
             try:
@@ -205,7 +200,6 @@ class PaymentService:
         """
         try:
             async with session.begin_nested() as savepoint:
-                # 🔥 ИСПРАВЛЕНО MEDIUM #8: WHERE status != 'completed'
                 stmt = (
                     update(Payment)
                     .where(

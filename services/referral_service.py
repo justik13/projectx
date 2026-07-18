@@ -24,11 +24,7 @@ from bot.middlewares.user_context import invalidate_user_cache
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
-
-# Минимальная длительность тарифа для участия в реферальной программе
 MIN_DURATION_FOR_REFERRAL = 30
-
-# Бонусы
 REFERRAL_FIRST_PURCHASE_BONUS = 5   # Реферал при первой покупке (тариф >= 30д)
 REFERRER_FIRST_PURCHASE_BONUS = 3   # Пригласитель при первой покупке
 REFERRER_RENEWAL_BONUS = 1          # Пригласитель при продлении
@@ -57,7 +53,6 @@ class ReferralService:
         Returns:
             None
         """
-        # Правило 1: Тариф < 30 дней — рефералка игнорируется
         if duration_days < MIN_DURATION_FOR_REFERRAL:
             logger.info(
                 f"Referral bonus SKIPPED: tariff {duration_days} days "
@@ -72,8 +67,6 @@ class ReferralService:
                 f"Referral bonus: referrer {referrer_telegram_id} not found in DB"
             )
             return
-
-        # Не начисляем бонус самому себе (edge case)
         if referrer_telegram_id == user_telegram_id:
             logger.warning(
                 f"Referral bonus: self-referral attempt by {user_telegram_id}"
@@ -81,13 +74,6 @@ class ReferralService:
             return
 
         if is_first_payment:
-            # ═══════════════════════════════════════════════════════════
-            # ПЕРВАЯ ПОКУПКА (тариф >= 30 дней)
-            # Реферал: +5 дней
-            # Пригласитель: +3 дня
-            # ═══════════════════════════════════════════════════════════
-
-            # Бонус рефералу (покупателю)
             try:
                 await SubscriptionService.extend_subscription(
                     session, user_telegram_id, REFERRAL_FIRST_PURCHASE_BONUS
@@ -102,8 +88,6 @@ class ReferralService:
                     f"Referral bonus: failed to extend for user "
                     f"{user_telegram_id}: {e}"
                 )
-
-            # Бонус пригласителю
             try:
                 await SubscriptionService.extend_subscription(
                     session, referrer_telegram_id, REFERRER_FIRST_PURCHASE_BONUS
@@ -127,11 +111,6 @@ class ReferralService:
                 )
 
         else:
-            # ═══════════════════════════════════════════════════════════
-            # ПРОДЛЕНИЕ (тариф >= 30 дней)
-            # Пригласитель: +1 день
-            # Реферал: ничего не получает
-            # ═══════════════════════════════════════════════════════════
 
             try:
                 await SubscriptionService.extend_subscription(

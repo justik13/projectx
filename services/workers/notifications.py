@@ -19,12 +19,6 @@ logger = logging.getLogger("BackgroundWorker")
 
 MAX_RETRY_COUNT = 4
 BACKOFF_BASE_INTERVAL = NOTIFICATION_INTERVAL
-
-# ═══════════════════════════════════════════════════════════
-# 🔥 ИСПРАВЛЕНО P0-2: Рекурсия заменена на while True
-# Было: return await self.acquire() — RecursionError при 1000+ юзерах
-# Стало: while True + sleep ВНЕ lock — другие acquire() не блокируются
-# ═══════════════════════════════════════════════════════════
 class NotificationRateLimiter:
     def __init__(self, rate: float = 25.0):
         self.rate = rate
@@ -45,8 +39,6 @@ class NotificationRateLimiter:
                     return
 
                 wait_time = (1.0 - self.tokens) / self.rate
-
-            # Sleep ВНЕ lock — другие acquire() могут проходить
             await asyncio.sleep(wait_time)
 
 
@@ -56,15 +48,6 @@ _notification_limiter = NotificationRateLimiter(rate=25.0)
 def _get_backoff_delay(retry_count: int) -> int:
     capped = min(retry_count, MAX_RETRY_COUNT)
     return BACKOFF_BASE_INTERVAL * (2 ** capped)
-
-
-# ═══════════════════════════════════════════════════════════
-# 🔥 ИСПРАВЛЕНО P1-7: Батчи по 20 вместо одной транзакции на весь цикл
-# Было: одна session_scope() на SELECT всех юзеров + N × send_message + N × UPDATE
-#   → транзакция держит соединение 14-42 секунды при 100-300 юзерах
-# Стало: SELECT отдельно, потом батчи по 20 с отдельными session_scope()
-#   → каждая транзакция ~2-4 секунды, пул не истощается
-# ═══════════════════════════════════════════════════════════
 NOTIFICATION_BATCH_SIZE = 20
 
 
@@ -78,13 +61,7 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                 break
             except asyncio.TimeoutError:
                 pass
-
-            # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
             current_time = now_utc()
-
-            # ═══════════════════════════════════════════════════════════
-            # ШАГ 1: Загружаем юзеров (быстрый SELECT, короткая транзакция)
-            # ═══════════════════════════════════════════════════════════
             users = []
             async with session_scope() as session:
                 stmt = select(User).where(
@@ -106,10 +83,6 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                 continue
 
             logger.info(f"Notifications: found {len(users)} users to notify")
-
-            # ═══════════════════════════════════════════════════════════
-            # ШАГ 2: Обрабатываем батчами по NOTIFICATION_BATCH_SIZE
-            # ═══════════════════════════════════════════════════════════
             all_blocked_user_ids = []
 
             for i in range(0, len(users), NOTIFICATION_BATCH_SIZE):
@@ -159,7 +132,6 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
 
                         if msg:
                             try:
-                                # 🔥 ИСПРАВЛЕНО: Rate limiter перед отправкой
                                 await _notification_limiter.acquire()
 
                                 tariff = await get_tariff_by_id(
@@ -206,8 +178,6 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                                     f"Failed to send notification to "
                                     f"{user.telegram_id}: {e}"
                                 )
-
-                    # Обновляем blocked_user_ids в БД (внутри текущей транзакции батча)
                     if blocked_user_ids:
                         try:
                             for uid in blocked_user_ids:

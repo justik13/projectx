@@ -9,11 +9,6 @@ from bot.constants import AMNEZIA_PROTOCOL, API_TIMEOUT, API_CONCURRENCY_LIMIT, 
 logger = logging.getLogger(__name__)
 
 _http_session: Optional[aiohttp.ClientSession] = None
-
-
-# ============================================================
-# 🔥 CIRCUIT BREAKER
-# ============================================================
 class CircuitBreaker:
     def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0):
         self.failure_threshold = failure_threshold
@@ -86,11 +81,6 @@ def cleanup_server_circuit_breakers(api_url: str) -> None:
     if api_url in _rate_limiters:
         del _rate_limiters[api_url]
         logger.debug(f"Rate limiter cleaned for {api_url}")
-
-
-# ============================================================
-# 🔥 TOKEN BUCKET RATE LIMITER
-# ============================================================
 class TokenBucketRateLimiter:
     def __init__(self, rate: float = 10.0, burst: int = 20):
         self.rate = rate
@@ -123,11 +113,6 @@ def _get_rate_limiter(api_url: str) -> TokenBucketRateLimiter:
     if api_url not in _rate_limiters:
         _rate_limiters[api_url] = TokenBucketRateLimiter(rate=10.0, burst=20)
     return _rate_limiters[api_url]
-
-
-# ============================================================
-# DTO MODELS
-# ============================================================
 class AmneziaClientCreateResponse(BaseModel):
     id: str
     config: str
@@ -169,11 +154,6 @@ class AmneziaServerInfo(BaseModel):
 
     def get_effective_max_peers(self) -> int:
         return self.maxPeers or self.serverMaxPeers or self.SERVER_MAX_PEERS
-
-
-# ============================================================
-# HTTP SESSION
-# ============================================================
 async def get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if _http_session is None:
@@ -192,11 +172,6 @@ async def close_http_session():
     if _http_session:
         await _http_session.close()
         _http_session = None
-
-
-# ============================================================
-# CLIENT
-# ============================================================
 class AmneziaClient:
     def __init__(self, api_url: str, api_key: str):
         self.api_url = api_url.rstrip("/")
@@ -250,7 +225,6 @@ class AmneziaClient:
                                 await asyncio.sleep(backoff)
                                 continue
                         await cb.record_failure()
-                        # 🔥 ИСПРАВЛЕНО MEDIUM #14: Ограничиваем логи
                         try:
                             error_text = await response.text()
                             logger.warning(
@@ -360,9 +334,6 @@ class AmneziaClient:
         all_clients: List[AmneziaClientListItem] = []
         page_size = 100
         page_count = 0
-        
-        # 🔥 ИСПРАВЛЕНО: while True вместо max_pages
-        # Защита от бесконечного цикла — max 100 страниц (10000 клиентов)
         MAX_SAFETY_PAGES = 100
         
         while page_count < MAX_SAFETY_PAGES:

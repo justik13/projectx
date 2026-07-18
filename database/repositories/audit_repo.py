@@ -21,7 +21,6 @@ async def create_audit_log(
         details=details
     )
     session.add(log)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit() для работы внутри begin_nested()
     await session.flush()
     await session.refresh(log)
     return log
@@ -36,12 +35,9 @@ async def get_recent_audit_logs(session: AsyncSession, limit: int = 10) -> List[
 async def clear_audit_logs(session: AsyncSession, older_than_days: int = 30) -> int:
     from datetime import timedelta
     from sqlalchemy import delete
-    
-    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
     threshold = now_utc() - timedelta(days=older_than_days)
     
     stmt = delete(AuditLog).where(AuditLog.created_at < threshold)
     result = await session.execute(stmt)
-    # 🔥 ИСПРАВЛЕНО: flush() вместо commit()
     await session.flush()
     return result.rowcount

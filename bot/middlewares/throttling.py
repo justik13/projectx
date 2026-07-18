@@ -29,10 +29,6 @@ class ThrottlingMiddleware:
         user_id = event.from_user.id if event.from_user else None
         if not user_id:
             return await handler(event, data)
-
-        # ═══════════════════════════════════════════════════════════
-        # 🔥 ИСПРАВЛЕНО #10: РАЗДЕЛЁННЫЕ КЛЮЧИ ДЛЯ MESSAGE И CALLBACK
-        # ═══════════════════════════════════════════════════════════
         if isinstance(event, CallbackQuery):
             global_key = f"global_cb:{user_id}"
         elif isinstance(event, Message):
@@ -46,16 +42,11 @@ class ThrottlingMiddleware:
                     await event.answer(
                         texts.ERROR_TOO_FREQUENT, show_alert=False
                     )
-                # Для Message просто игнорируем (не спамим ответом)
             except Exception:
                 pass
             return
 
         self._global_throttle[global_key] = True
-
-        # ═══════════════════════════════════════════════════════════
-        # ACTION-TYPE THROTTLING (2.0с для повторных нажатий)
-        # ═══════════════════════════════════════════════════════════
         if isinstance(event, CallbackQuery):
             action_data = event.data or ""
             action_type = (

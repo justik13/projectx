@@ -93,7 +93,6 @@ def get_sbp_payment_keyboard(payment_url: str, payment_id: int, tariff_id: int) 
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Открыть страницу оплаты", url=payment_url)
     builder.button(text="✅ Я оплатил (проверить)", callback_data=f"check_payment:{payment_id}")
-    # 🔥 ИСПРАВЛЕНО: Используем cancel_invoice для корректной отмены и возврата
     builder.button(text="❌ Отменить", callback_data=f"cancel_invoice:{payment_id}:{tariff_id}")
     builder.adjust(1, 1, 1)
     return builder.as_markup()

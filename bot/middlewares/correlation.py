@@ -27,10 +27,6 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message
 
 logger = logging.getLogger(__name__)
-
-# Глобальная переменная для хранения ID запроса.
-# contextvars гарантирует, что каждый async-task видит своё значение,
-# даже если в event loop выполняются сотни запросов параллельно.
 request_id_var: ContextVar[str] = ContextVar('request_id', default='system')
 
 
@@ -76,12 +72,8 @@ class CorrelationMiddleware(BaseMiddleware):
     7. ChatActionMiddleware
     """
     async def __call__(self, handler, event, data):
-        # Генерируем короткий 8-символьный hex из UUID
-        # Полный UUID (36 символов) слишком длинный для логов
         request_id = uuid.uuid4().hex[:8]
         request_id_var.set(request_id)
-        
-        # Определяем тип события для логирования
         if isinstance(event, CallbackQuery):
             event_type = "callback"
             event_data = (event.data or "")[:50]
@@ -106,7 +98,6 @@ class CorrelationMiddleware(BaseMiddleware):
         try:
             return await handler(event, data)
         except Exception as e:
-            # Логируем ошибку с request_id для трассировки
             logger.error(
                 "[%s] Unhandled exception in %s: %s: %s",
                 request_id,

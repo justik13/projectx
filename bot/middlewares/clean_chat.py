@@ -9,12 +9,8 @@ from aiogram import BaseMiddleware
 from aiogram.types import Message
 
 logger = logging.getLogger(__name__)
-
-# Глобальная очередь на удаление сообщений
 _delete_queue: asyncio.Queue | None = None
 _delete_worker_task: asyncio.Task | None = None
-
-# Скорость обработки: 10 удалений в секунду
 _DELETE_RATE = 10
 _DELETE_BATCH_SIZE = 5
 
@@ -28,15 +24,12 @@ async def _delete_worker():
     while True:
         try:
             batch = []
-            # Собираем батч до _DELETE_BATCH_SIZE сообщений
             for _ in range(_DELETE_BATCH_SIZE):
                 try:
                     item = await asyncio.wait_for(_delete_queue.get(), timeout=0.1)
                     batch.append(item)
                 except asyncio.TimeoutError:
                     break
-            
-            # Обрабатываем батч
             for bot, chat_id, message_id in batch:
                 try:
                     await bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -44,8 +37,6 @@ async def _delete_worker():
                     logger.debug(
                         f"Failed to delete message {message_id} in {chat_id}: {e}"
                     )
-            
-            # Пауза для соблюдения rate limit
             await asyncio.sleep(1.0 / _DELETE_RATE * _DELETE_BATCH_SIZE)
             
         except asyncio.CancelledError:
@@ -76,11 +67,8 @@ class CleanChatMiddleware(BaseMiddleware):
 
     async def __call__(self, handler, event, data):
         if isinstance(event, Message):
-            # Пропускаем системные сообщения
             if event.successful_payment:
                 return await handler(event, data)
-
-            # Пропускаем service messages
             if any([
                 event.pinned_message,
                 event.new_chat_members,
@@ -95,18 +83,14 @@ class CleanChatMiddleware(BaseMiddleware):
                 event.migrate_from_chat_id,
             ]):
                 return await handler(event, data)
-
-            # Добавляем сообщение в очередь на удаление
             _ensure_worker_started()
             
             try:
-                # non-blocking put с таймаутом
                 await asyncio.wait_for(
                     _delete_queue.put((event.bot, event.chat.id, event.message_id)),
                     timeout=1.0
                 )
             except asyncio.TimeoutError:
-                # Очередь переполнена — пропускаем удаление
                 logger.warning(
                     f"CleanChat queue full, skipping deletion of message "
                     f"{event.message_id} in {event.chat.id}"

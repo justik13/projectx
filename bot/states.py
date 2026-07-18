@@ -1,10 +1,5 @@
 from aiogram.fsm.state import StatesGroup, State
 
-
-# ═══════════════════════════════════════════════════════════
-# 👤 Пользовательские состояния
-# ═══════════════════════════════════════════════════════════
-
 class DeviceCreationStates(StatesGroup):
     choose_server = State()
     enter_device_name = State()
@@ -13,13 +8,7 @@ class DeviceCreationStates(StatesGroup):
 class DeviceManagementStates(StatesGroup):
     rename_device = State()
 
-
-# ═══════════════════════════════════════════════════════════
-# 🛠 Админские состояния
-# ═══════════════════════════════════════════════════════════
-
 class AdminStates(StatesGroup):
-    # ── Оригинал ──
     entering_custom_days = State()
     searching_user = State()
     entering_broadcast_message = State()
@@ -32,8 +21,6 @@ class AdminStates(StatesGroup):
     editing_tariff_device_limit = State()
     editing_tariff_rub = State()
     editing_tariff_stars = State()
-
-    # ── 🔧 НОВОЕ: Управление подпиской ──
     admin_reducing_days = State()
     admin_extending_custom = State()
     admin_grant_custom_days = State()

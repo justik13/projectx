@@ -16,12 +16,7 @@ from config.settings import get_settings
 logger = logging.getLogger("BackgroundWorker")
 
 BATCH_SIZE = 100
-
-# Reverse Self-Healing окно
 REVERSE_HEALING_WINDOW_SECONDS = 300  # 5 минут
-
-# 🔥 ИСПРАВЛЕНО HIGH #8: Fair Usage Policy
-# Лимит трафика 1 ТБ (1024^4 байт). При превышении — алерт админу, НЕ отключаем.
 TRAFFIC_QUOTA_BYTES = 1 * 1024 * 1024 * 1024 * 1024  # 1 TB
 _quota_alerted: set[int] = set()  # profile_id которые уже алертнули
 
@@ -102,8 +97,6 @@ async def _process_server_traffic(server_info, api_clients):
     даже на выключенных серверах.
     """
     server_id = server_info['id']
-    # 🔥 ВАЖНО: server_is_active больше не используется для пропуска логики!
-    # Мы всегда синхронизируем трафик и применяем self-healing.
 
     async with session_scope() as session:
         stmt = (
@@ -160,8 +153,6 @@ async def _process_server_traffic(server_info, api_clients):
                 )
 
                 if local_should_be_disabled and api_is_active:
-                    # 🔥 ИСПРАВЛЕНО MEDIUM #11: Убран `if not server_is_active: continue`
-                    # Теперь отключаем просроченных даже на выключенных серверах
                     reason = (
                         'banned' if is_banned
                         else ('expired' if is_subscription_expired else 'disabled')
@@ -212,8 +203,6 @@ async def _process_server_traffic(server_info, api_clients):
                             f"Reverse healing: no updatedAt for peer {peer_id[:16]}..., "
                             f"cannot assess freshness"
                         )
-
-                # Обновляем трафик
                 if (
                     t_down != new_t_down or t_up != new_t_up
                     or last_conn != new_last_connected
@@ -223,8 +212,6 @@ async def _process_server_traffic(server_info, api_clients):
                         'traffic_up': new_t_up,
                         'last_connected': new_last_connected,
                     }
-
-                    # 🔥 ИСПРАВЛЕНО HIGH #8: Fair Usage Policy
                     total_traffic = (new_t_down or 0) + (new_t_up or 0)
                     if total_traffic > TRAFFIC_QUOTA_BYTES and p_id not in _quota_alerted:
                         _quota_alerted.add(p_id)

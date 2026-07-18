@@ -9,12 +9,7 @@ class Settings(BaseSettings):
     DB_ENCRYPTION_KEY: str = ""
     DEFAULT_DEVICE_LIMIT: int = 2
     
-    # 🔥 MUST FIX #9: УДАЛЕНО REFERRAL_BONUS_DAYS
-    # Логика рефералов теперь динамическая (5/3/1) и описана в texts.py + referral_service.py
-    
     SUPPORT_USERNAME: str = "@support_username"
-
-    # Platega.io (СБП)
     PLATEGA_MERCHANT_ID: str = ""
     PLATEGA_SECRET: str = ""
     PLATEGA_BASE_URL: str = "https://app.platega.io"
@@ -23,8 +18,6 @@ class Settings(BaseSettings):
     PLATEGA_PAYMENT_METHOD: int = 2
     PLATEGA_RETURN_URL: str = "https://t.me/{bot_username}"
     PLATEGA_FAILED_URL: str = "https://t.me/{bot_username}"
-
-    # Redis for FSM Storage
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_KEY_PREFIX: str = "projectx_bot:"
 
