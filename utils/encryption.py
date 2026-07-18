@@ -6,25 +6,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Кэш инстансов Fernet для оптимизации CPU.
-# 🔥 ИСПРАВЛЕНО #4: Комментарий о том, что это не критично.
-# Количество ключей ограничено (обычно 1 DB_ENCRYPTION_KEY).
-# Даже при 10 ключах это 10 Fernet объектов в памяти — пренебрежимо мало.
-# Cleanup не требуется, но для консистентности с другими файлами добавлен maxsize.
 _fernet_cache: dict[str, Fernet] = {}
-_FERNET_CACHE_MAX_SIZE = 10  # Обычно 1 ключ, 10 — с запасом
-
+_FERNET_CACHE_MAX_SIZE = 10
 
 def _get_fernet(key: str) -> Fernet:
     if key not in _fernet_cache:
-        # 🔥 ИСПРАВЛЕНО #4: Защита от бесконечного роста (на случай если ключей > 10)
         if len(_fernet_cache) >= _FERNET_CACHE_MAX_SIZE:
-            # Удаляем самый старый (first-in) ключ
             oldest_key = next(iter(_fernet_cache))
             del _fernet_cache[oldest_key]
             logger.debug(f"Fernet cache full, evicted oldest key")
         _fernet_cache[key] = Fernet(key.encode("utf-8"))
     return _fernet_cache[key]
-
 
 class EncryptedString(TypeDecorator):
     impl = Text
@@ -35,56 +27,64 @@ class EncryptedString(TypeDecorator):
             return None
         settings = get_settings()
         key = settings.DB_ENCRYPTION_KEY
+        
+        # 🔥 ИСПРАВЛЕНО CRITICAL #2: Жесткий Fail-Fast вместо молчаливой записи в plaintext
         if not key:
-            logger.warning("DB_ENCRYPTION_KEY не найден, данные не будут зашифрованы")
-            return value
+            raise RuntimeError(
+                "CRITICAL: DB_ENCRYPTION_KEY is empty! "
+                "Cannot write sensitive data (API keys, configs) in plaintext. "
+                "Fix .env immediately."
+            )
+            
         try:
             f = _get_fernet(key)
             encrypted = f.encrypt(value.encode("utf-8"))
             return encrypted.decode("utf-8")
         except Exception as e:
             logger.error(f"Ошибка шифрования: {e}")
-            return value
+            raise RuntimeError(f"Encryption failed: {e}")
 
     def process_result_value(self, value, dialect):
         if value is None:
             return None
         settings = get_settings()
         key = settings.DB_ENCRYPTION_KEY
+        
         if not key:
-            logger.warning("DB_ENCRYPTION_KEY не найден, данные не будут расшифрованы")
-            return value
+            # Если ключ пропал, мы не можем расшифровать. Возвращаем None.
+            logger.error("DB_ENCRYPTION_KEY not found during decryption. Returning None.")
+            return None
+            
         try:
             f = _get_fernet(key)
             decrypted = f.decrypt(value.encode("utf-8"))
             return decrypted.decode("utf-8")
         except InvalidToken:
-            logger.warning("Ошибка расшифровки: неверный токен")
+            # Возможно, данные были записаны в plaintext (старая уязвимость) или ключ изменился
+            logger.warning("Ошибка расшифровки: неверный токен (возможно, plaintext или смена ключа)")
             return None
         except Exception as e:
             logger.error(f"Ошибка расшифровки: {e}")
             return None
 
-
 def encrypt_value(value: str, key: str) -> str:
     if not key:
-        return value
+        raise RuntimeError("Cannot encrypt without key")
     try:
         f = _get_fernet(key)
         encrypted = f.encrypt(value.encode("utf-8"))
         return encrypted.decode("utf-8")
-    except Exception:
-        return value
-
+    except Exception as e:
+        raise RuntimeError(f"Encryption failed: {e}")
 
 def decrypt_value(value: str, key: str) -> str:
     if not key:
-        return value
+        return None
     try:
         f = _get_fernet(key)
         decrypted = f.decrypt(value.encode("utf-8"))
         return decrypted.decode("utf-8")
     except InvalidToken:
-        return value
+        return None
     except Exception:
-        return value
+        return None

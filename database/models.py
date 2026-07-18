@@ -1,5 +1,5 @@
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, String, Text, ForeignKey, Index
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, backref
 from datetime import datetime, timezone, date
 from utils.encryption import EncryptedString
 
@@ -21,7 +21,7 @@ class User(Base):
     current_tariff_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True
     )
-    referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     referral_days: Mapped[int] = mapped_column(Integer, default=0)
     last_payment_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -45,6 +45,15 @@ class User(Base):
     profiles = relationship("VPNProfile", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
     current_tariff = relationship("Tariff", foreign_keys=[current_tariff_id])
+    
+    # 🔥 ИСПРАВЛЕНО MEDIUM #6: Relationship для рефералов (self-referential)
+    # Позволяет использовать selectinload(User.referrals) вместо отдельного запроса
+    referrals = relationship(
+        "User",
+        backref=backref("referrer", remote_side=[telegram_id]),
+        foreign_keys=[referred_by],
+        primaryjoin="User.telegram_id == User.referred_by",
+    )
 
 
 class VPNProfile(Base):
@@ -111,8 +120,7 @@ class Tariff(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
-    # 🔥 ИСПРАВЛЕНО: Partial Unique Index для идемпотентности платежей
-    # Защищает от double-spend при retry от Platega
+
     __table_args__ = (
         Index(
             'ix_payment_external_completed',
@@ -186,9 +194,6 @@ class BroadcastProgress(Base):
     )
 
 
-# 🔥 НОВОЕ: Таблица для zombie-устройств (pending API deletions)
-# Когда сервер удаляется из БД, но API недоступен — записываем сюда.
-# Воркер cleanup.py будет периодически пытаться удалить пиры.
 class PendingAPIDeletion(Base):
     __tablename__ = "pending_api_deletions"
 

@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 _http_session: Optional[aiohttp.ClientSession] = None
 
-
 # ============================================================
 # 🔥 CIRCUIT BREAKER
 # ============================================================
@@ -64,9 +63,7 @@ class CircuitBreaker:
     def is_open(self) -> bool:
         return self.state == "OPEN"
 
-
 _circuit_breakers: dict[str, CircuitBreaker] = {}
-
 
 def _get_circuit_breaker(api_url: str) -> CircuitBreaker:
     if api_url not in _circuit_breakers:
@@ -75,6 +72,21 @@ def _get_circuit_breaker(api_url: str) -> CircuitBreaker:
             recovery_timeout=60.0,
         )
     return _circuit_breakers[api_url]
+
+
+def cleanup_server_circuit_breakers(api_url: str) -> None:
+    """
+    🔥 ИСПРАВЛЕНО LOW #14: Очищает circuit breakers и rate limiters при удалении сервера.
+    Предотвращает микро-утечку памяти в словарях при частом добавлении/удалении серверов.
+    Вызывается из services/servers_repo.py при delete_server.
+    """
+    api_url = api_url.rstrip("/")
+    if api_url in _circuit_breakers:
+        del _circuit_breakers[api_url]
+        logger.debug(f"Circuit breaker cleaned for {api_url}")
+    if api_url in _rate_limiters:
+        del _rate_limiters[api_url]
+        logger.debug(f"Rate limiter cleaned for {api_url}")
 
 
 # ============================================================
@@ -96,25 +108,20 @@ class TokenBucketRateLimiter:
                 elapsed = now - self.last_refill
                 self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
                 self.last_refill = now
-
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return True
-
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
             await asyncio.sleep(min(1.0 / self.rate, remaining))
 
-
 _rate_limiters: dict[str, TokenBucketRateLimiter] = {}
-
 
 def _get_rate_limiter(api_url: str) -> TokenBucketRateLimiter:
     if api_url not in _rate_limiters:
         _rate_limiters[api_url] = TokenBucketRateLimiter(rate=10.0, burst=20)
     return _rate_limiters[api_url]
-
 
 # ============================================================
 # DTO MODELS
@@ -124,13 +131,11 @@ class AmneziaClientCreateResponse(BaseModel):
     config: str
     protocol: str = AMNEZIA_PROTOCOL
 
-
 class AmneziaClientTraffic(BaseModel):
     totalDownload: int = 0
     totalUpload: int = 0
     received: int = 0
     sent: int = 0
-
 
 class AmneziaClientListItem(BaseModel):
     id: str
@@ -150,7 +155,6 @@ class AmneziaClientListItem(BaseModel):
     def name(self) -> str:
         return self.peer_name
 
-
 class AmneziaServerInfo(BaseModel):
     name: str = ""
     protocols: List[str] = Field(default_factory=list)
@@ -160,7 +164,6 @@ class AmneziaServerInfo(BaseModel):
 
     def get_effective_max_peers(self) -> int:
         return self.maxPeers or self.serverMaxPeers or self.SERVER_MAX_PEERS
-
 
 # ============================================================
 # HTTP SESSION
@@ -177,13 +180,11 @@ async def get_http_session() -> aiohttp.ClientSession:
         )
     return _http_session
 
-
 async def close_http_session():
     global _http_session
     if _http_session:
         await _http_session.close()
         _http_session = None
-
 
 # ============================================================
 # CLIENT
@@ -198,7 +199,6 @@ class AmneziaClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Optional[dict]:
         url = f"{self.api_url}{path}"
-
         cb = _get_circuit_breaker(self.api_url)
         if not await cb.is_available():
             logger.debug(
@@ -207,7 +207,6 @@ class AmneziaClient:
             return None
 
         limiter = _get_rate_limiter(self.api_url)
-
         for attempt in range(API_RETRY_COUNT + 1):
             if not await limiter.acquire(timeout=30.0):
                 logger.warning(
@@ -231,11 +230,7 @@ class AmneziaClient:
                         except aiohttp.ContentTypeError:
                             return None
                     elif 400 <= response.status < 500:
-                        # 🔥 ИСПРАВЛЕНО: 4xx НЕ открывает Circuit Breaker
-                        # 404 Not Found, 400 Bad Request — это клиентские ошибки,
-                        # сервер работает нормально
                         if response.status == 429:
-                            # 429 Too Many Requests — считаем failure
                             if attempt < API_RETRY_COUNT:
                                 backoff = 2 ** attempt
                                 logger.warning(
@@ -247,7 +242,6 @@ class AmneziaClient:
                             await cb.record_failure()
                             return None
                         else:
-                            # 400, 401, 403, 404, 409 — логируем, но НЕ считаем failure
                             error_text = await response.text()
                             logger.warning(
                                 f"API {self.api_url}{path} returned {response.status} "
@@ -255,7 +249,6 @@ class AmneziaClient:
                             )
                             return None
                     else:
-                        # 5xx — серверная ошибка, retry + record_failure
                         if attempt < API_RETRY_COUNT and response.status >= 500:
                             backoff = 2 ** attempt
                             logger.warning(
@@ -266,7 +259,6 @@ class AmneziaClient:
                             continue
                         await cb.record_failure()
                         return None
-
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if attempt < API_RETRY_COUNT:
                     backoff = 2 ** attempt
@@ -289,7 +281,6 @@ class AmneziaClient:
                     f"{type(e).__name__}: {e}"
                 )
                 return None
-
         return None
 
     async def create_user(
@@ -321,10 +312,16 @@ class AmneziaClient:
         expires_at: Optional[int] = None
     ) -> bool:
         data = {"clientId": client_id, "protocol": AMNEZIA_PROTOCOL}
+        
+        # 🔥 ИСПРАВЛЕНО HIGH #4: Race Condition expiresAt
+        if expires_at is not None and status is None:
+            status = "active"
+            
         if status is not None:
             data["status"] = status
         if expires_at is not None:
             data["expiresAt"] = expires_at
+            
         result = await self._request("PATCH", "/clients", json=data)
         return result is not None
 
@@ -404,7 +401,6 @@ class AmneziaClient:
                 peer_id = peer.get("id", "")
                 if not peer_id:
                     continue
-
                 traffic_raw = peer.get("traffic", {})
                 if isinstance(traffic_raw, dict):
                     traffic = AmneziaClientTraffic(
@@ -415,7 +411,6 @@ class AmneziaClient:
                     )
                 else:
                     traffic = AmneziaClientTraffic()
-
                 try:
                     client_item = AmneziaClientListItem(
                         id=peer_id,

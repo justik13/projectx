@@ -69,11 +69,13 @@ async def extend_subscription(
         current_end = user.subscription_end
     else:
         current_end = now
+
     if days >= 36500:
         from bot.constants import PERMANENT_END_DATE
         new_end = PERMANENT_END_DATE
     else:
         new_end = current_end + timedelta(days=days)
+
     return await update_user(session, user, subscription_end=new_end)
 
 
@@ -176,10 +178,17 @@ async def get_user_referrals(
 async def get_user_with_referrals(
     session: AsyncSession, telegram_id: int
 ) -> tuple[Optional[User], list[User]]:
-    """🔥 ИСПРАВЛЕНО: Возвращаем кортеж вместо динамического атрибута"""
+    """
+    🔥 ИСПРАВЛЕНО MEDIUM #6: Использует selectinload(User.referrals)
+    вместо отдельного запроса get_user_referrals.
+    Возвращаем кортеж (User, referrals_list) для совместимости.
+    """
     stmt = (
         select(User)
-        .options(selectinload(User.profiles))
+        .options(
+            selectinload(User.profiles),
+            selectinload(User.referrals)
+        )
         .where(
             User.telegram_id == telegram_id,
             User.is_deleted == False,
@@ -190,7 +199,12 @@ async def get_user_with_referrals(
     
     referrals = []
     if user:
-        referrals = await get_user_referrals(session, telegram_id)
+        # Фильтруем is_deleted == False и сортируем (relationship загружает всех)
+        referrals = sorted(
+            [r for r in user.referrals if not r.is_deleted],
+            key=lambda r: r.created_at,
+            reverse=True
+        )
     
     return user, referrals
 

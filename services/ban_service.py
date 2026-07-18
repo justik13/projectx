@@ -12,7 +12,6 @@ from services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
-
 class BanService:
     @staticmethod
     async def toggle_ban(session: AsyncSession, admin_id: int, telegram_id: int) -> tuple[bool, str]:
@@ -21,8 +20,13 @@ class BanService:
             return False, "Пользователь не найден"
 
         new_status = not user.is_banned
+        
+        # 1. Обновляем БД
         await update_user(session, user, is_banned=new_status)
-
+        
+        # Логируем действие (оно сохранится при commit, даже если API упадет, 
+        # но мы сделаем rollback ниже, если API упадет, поэтому аудит тоже откатится.
+        # Это правильное поведение: действие не завершено -> аудита нет.
         await AuditService.log_action(
             session, admin_id, "BAN" if new_status else "UNBAN", "User", telegram_id
         )
@@ -35,7 +39,7 @@ class BanService:
         profiles = await get_user_profiles(session, user.id)
         server_ids = {p.server_id for p in profiles}
         servers_map = {}
-
+        
         if server_ids:
             stmt = select(Server).where(Server.id.in_(server_ids))
             res = await session.execute(stmt)
@@ -43,7 +47,7 @@ class BanService:
 
         tasks_info = []
         profile_ids_to_update = []
-
+        
         for profile in profiles:
             server = servers_map.get(profile.server_id)
             if server and server.is_active:
@@ -53,9 +57,9 @@ class BanService:
                 profile_ids_to_update.append(profile.id)
 
         network_success = True
+        
         if tasks_info:
             sem = asyncio.Semaphore(20)
-
             async def _update_peer(info, status):
                 async with sem:
                     client = AmneziaClient(info['api_url'], info['api_key'])
@@ -64,20 +68,26 @@ class BanService:
             tasks = [_update_peer(info, target_api_status) for info in tasks_info]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             api_errors = [r for r in results if isinstance(r, Exception) or r is False]
+            
             if api_errors:
                 network_success = False
 
+        # 🔥 ИСПРАВЛЕНО CRITICAL: Rollback БД, если API недоступен
         if not network_success:
-            return False, "Amnezia API недоступен"
+            await session.rollback()
+            invalidate_user_cache(telegram_id)
+            return False, "Amnezia API недоступен (изменения отменены)"
 
+        # 2. Если API отработал успешно - обновляем статус профилей в БД
         if profile_ids_to_update:
             await session.execute(
                 update(VPNProfile)
                 .where(VPNProfile.id.in_(profile_ids_to_update))
                 .values(is_active=target_db_status)
             )
-            # 🔥 ИСПРАВЛЕНО #8: flush() вместо commit() для работы внутри DBSessionMiddleware
             await session.flush()
-            invalidate_user_cache(telegram_id)
+
+        invalidate_user_cache(telegram_id)
+        
         action = "забанен" if new_status else "разбанен"
         return True, action

@@ -4,7 +4,7 @@ import logging
 import asyncio
 from datetime import datetime, timezone, date
 from zoneinfo import ZoneInfo
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from services.amnezia_client import AmneziaClient
@@ -22,23 +22,43 @@ from utils.admin import is_admin
 logger = logging.getLogger(__name__)
 MSK_TZ = ZoneInfo("Europe/Moscow")
 
+# Порог "критической зоны": если свободно меньше этого числа — идём в API для точности
+CRITICAL_SLOTS_THRESHOLD = 5
+
+
 class DeviceCreationError(Exception): pass
 class DailyLimitExceeded(DeviceCreationError): pass
 class DeviceLimitExceeded(DeviceCreationError): pass
 class ServerUnavailable(DeviceCreationError): pass
 class InvalidConfig(DeviceCreationError): pass
 
+
 _user_locks: dict[int, asyncio.Lock] = {}
+
 
 def _get_user_lock(user_id: int) -> asyncio.Lock:
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
     return _user_locks[user_id]
 
+
 def _is_same_day_msk(stored_date: date | None, now_msk: date) -> bool:
     if stored_date is None:
         return False
     return stored_date == now_msk
+
+
+async def _get_server_profiles_count(session: AsyncSession, server_id: int) -> int:
+    """
+    🔥 ИСПРАВЛЕНО CRITICAL #1: O(1) подсчёт профилей на сервере через SQL.
+    Без скачивания всех клиентов с API.
+    """
+    stmt = select(func.count(VPNProfile.id)).where(
+        VPNProfile.server_id == server_id
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one() or 0
+
 
 class DeviceService:
     @staticmethod
@@ -52,19 +72,41 @@ class DeviceService:
             )
             raise ServerUnavailable("Invalid server or protocol")
 
-        # 🔥 СКРЫТАЯ УЯЗВИМОСТЬ #11: force_refresh=True для защиты от race condition
-        # Раньше: force_refresh=False (кэш 5 мин). Если 10 юзеров одновременно нажмут
-        # "Создать устройство" на сервере с 1 свободным слотом, все пройдут проверку.
-        # Теперь: всегда запрашиваем API перед созданием для точности.
-        real_count = await get_real_peer_count(server, force_refresh=True)
+        # 🔥 ИСПРАВЛЕНО CRITICAL #1: Гибридная проверка слотов
+        # Шаг 1: O(1) COUNT из локальной БД (мгновенно, без нагрузки на API)
+        local_count = await _get_server_profiles_count(session, server.id)
+        free_slots = server.max_clients - local_count
 
-        if real_count != -1 and real_count >= server.max_clients:
-            logger.warning(f"create_device: server {server.name} is full")
+        if free_slots <= 0:
+            logger.warning(
+                f"create_device: server {server.name} is full "
+                f"(local_count={local_count}/{server.max_clients})"
+            )
             raise ServerUnavailable("Server is full")
+
+        # Шаг 2: Если свободно менее CRITICAL_SLOTS_THRESHOLD (5) — идём в API
+        # для защиты от race condition и overselling.
+        # Это защищает от случая, когда в API есть "призрачные" пиры,
+        # созданные вне бота (напрямую через админку Amnezia).
+        if free_slots < CRITICAL_SLOTS_THRESHOLD:
+            logger.info(
+                f"create_device: critical zone on {server.name}, "
+                f"checking API for accuracy "
+                f"(local free={free_slots}<{CRITICAL_SLOTS_THRESHOLD})"
+            )
+            real_count = await get_real_peer_count(
+                server, force_refresh=True
+            )
+            if real_count != -1 and real_count >= server.max_clients:
+                logger.warning(
+                    f"create_device: server {server.name} is full "
+                    f"(api_count={real_count}/{server.max_clients})"
+                )
+                raise ServerUnavailable("Server is full")
 
         lock = _get_user_lock(user.id)
         async with lock:
-            # 🔥 ИСПРАВЛЕНО: SELECT FOR UPDATE для защиты от race condition
+            # SELECT FOR UPDATE для защиты от race condition
             result = await session.execute(
                 select(User)
                 .where(User.telegram_id == user.telegram_id)
@@ -101,7 +143,6 @@ class DeviceService:
             clean_device_name = re.sub(r'[^a-zA-Z0-9]', '', device_name)[:10]
             if not clean_device_name:
                 clean_device_name = "Device"
-
             client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
 
             expires_ts = await SubscriptionService.get_expires_timestamp(user)
@@ -110,7 +151,6 @@ class DeviceService:
             result = await client.create_user(
                 client_name=client_name, expires_at=expires_ts
             )
-
             if not result:
                 raise ServerUnavailable("API create_user failed")
 
@@ -132,7 +172,6 @@ class DeviceService:
             try:
                 async with session.begin_nested() as savepoint:
                     profiles_count = await get_user_profiles_count(session, user.id)
-
                     if profiles_count >= user.device_limit:
                         await savepoint.rollback()
                         try:
@@ -152,7 +191,6 @@ class DeviceService:
 
                     if not is_admin(user.telegram_id):
                         user.device_creations_today += 1
-
                     await savepoint.commit()
 
                     try:
@@ -166,7 +204,6 @@ class DeviceService:
                         logger.warning(
                             f"Failed to log DEVICE_CREATED: {audit_error}"
                         )
-
                     return profile
 
             except IntegrityError as e:
@@ -231,6 +268,7 @@ class DeviceService:
                         f"Failed to log DEVICE_DELETED: {audit_error}"
                     )
                 return True
+
         except Exception as e:
             await session.rollback()
             logger.error(f"delete_device: DB error: {e}", exc_info=True)

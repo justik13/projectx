@@ -19,10 +19,14 @@ def to_msk(dt: Optional[datetime]) -> Optional[datetime]:
 
 
 def format_traffic(bytes_value: int) -> str:
-    """Форматирует количество байт в читаемый вид (B, KB, MB, GB, TB)."""
+    """
+    Форматирует количество байт в читаемый вид.
+    🔥 ИСПРАВЛЕНО LOW #11: Используем KiB/MiB/GiB вместо KB/MB/GB.
+    По стандарту СИ KB = 1000 байт, а мы делим на 1024, значит это KiB.
+    """
     if bytes_value == 0:
         return "0 B"
-    units = ["B", "KB", "MB", "GB", "TB"]
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
     size = bytes_value
     unit_index = 0
     while size >= 1024 and unit_index < len(units) - 1:

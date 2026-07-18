@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 class PaymentService:
-
     @staticmethod
     async def handle_successful_payment(
         session: AsyncSession, payment_id: int
@@ -33,8 +32,10 @@ class PaymentService:
                     )
                 )
                 result = await session.execute(stmt)
-
                 if result.rowcount == 0:
+                    # 🔥 ИСПРАВЛЕНО CRITICAL #3: Этот блок больше не вызывается из webhook!
+                    # Сюда попадают только при ручных действиях или редких race conditions.
+                    # Оставляем как защитную сетку, но без спама алертами.
                     await savepoint.commit()
                     await _alert_paid_after_cancel(session, payment_id)
                     return True
@@ -50,7 +51,6 @@ class PaymentService:
                 payment = result.scalar_one()
                 tariff = payment.tariff
                 user = payment.user
-
                 if not tariff or not user:
                     logger.error(
                         f"Payment {payment_id}: missing tariff or user"
@@ -77,7 +77,6 @@ class PaymentService:
                     await savepoint.rollback()
                     return False
 
-                # 🔥 MUST FIX #2: Фильтр по status == 'completed' вместо paid_at
                 payments = await get_user_payments(session, user.id)
                 successful_payments = [
                     p for p in payments if p.status == 'completed'
@@ -102,8 +101,8 @@ class PaymentService:
                 user.last_payment_at = datetime.now(
                     timezone.utc
                 ).replace(tzinfo=None)
-
                 await savepoint.commit()
+
                 invalidate_user_cache(user.telegram_id)
 
                 try:
@@ -140,7 +139,6 @@ class PaymentService:
         amount: float, telegram_id: int, bot_username: str,
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
-
         settings = get_settings()
 
         payment = await create_payment(
@@ -167,9 +165,6 @@ class PaymentService:
         )
 
         if not transaction:
-            # 🔥 СКРЫТАЯ УЯЗВИМОСТЬ #12: Удаляем фантомный платёж из БД
-            # Раньше: payment.status = "failed" оставался в БД навечно
-            # Теперь: удаляем запись, чтобы stale_payments_checker не спамил
             try:
                 await session.execute(
                     delete(Payment).where(Payment.id == payment.id)
@@ -179,7 +174,6 @@ class PaymentService:
                 logger.error(
                     f"Failed to delete phantom payment {payment.id}: {delete_error}"
                 )
-                # Fallback: помечаем как failed
                 payment.status = "failed"
                 try:
                     await session.flush()
@@ -204,7 +198,6 @@ class PaymentService:
         payment.external_id = transaction.get("transactionId")
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get("paymentMethod", "SBPQR")
-
         return payment, None
 
     @staticmethod
@@ -236,6 +229,20 @@ class PaymentService:
         )
 
         if status == "CONFIRMED":
+            # 🔥 ИСПРАВЛЕНО CRITICAL #3: Идемпотентность webhook
+            # Если платёж уже обработан — возвращаем успех БЕЗ вызова
+            # handle_successful_payment и БЕЗ алерта "Оплата после отмены".
+            # Это защищает от:
+            # 1. Ретраев Platega при 500/таймауте (до 3 попыток с интервалом 5 мин)
+            # 2. Злоумышленников, шлющих повторные CONFIRMED
+            # 3. Сетевых сбоев, когда первый ответ не дошёл до Platega
+            if payment.status == "completed":
+                logger.info(
+                    f"Platega callback: payment {payment.id} already completed, "
+                    f"idempotent success for transaction={transaction_id}"
+                )
+                return True, "already_processed"
+
             if (
                 callback_amount is not None
                 and payment.amount != int(callback_amount)
@@ -327,7 +334,6 @@ class PaymentService:
 
             payment.status = "refunded"
             user = payment.user
-
             if user:
                 from database.repositories.profiles_repo import get_user_profiles
                 from database.repositories.servers_repo import get_server_by_id
@@ -337,10 +343,7 @@ class PaymentService:
                 user.subscription_end = now_utc
                 user.current_tariff_id = None
 
-                # 🔥 СКРЫТАЯ УЯЗВИМОСТЬ #13: Мгновенно отключаем ВСЕ профили в БД
                 profiles = await get_user_profiles(session, user.id)
-
-                # Массовое обновление БД — не ждём воркер traffic_sync_loop
                 if profiles:
                     profile_ids = [p.id for p in profiles]
                     await session.execute(
@@ -350,8 +353,7 @@ class PaymentService:
                     )
                     await session.flush()
 
-                tasks_info = []
-                if profiles:
+                    tasks_info = []
                     for profile in profiles:
                         try:
                             server = await get_server_by_id(
@@ -371,45 +373,44 @@ class PaymentService:
                                 profile.id, e,
                             )
 
-                if tasks_info:
-                    sem = asyncio.Semaphore(20)
+                    if tasks_info:
+                        sem = asyncio.Semaphore(20)
 
-                    async def _disable_peer(info):
-                        async with sem:
-                            api = AmneziaClient(
-                                info['api_url'], info['api_key']
-                            )
-                            try:
-                                return await api.update_client(
-                                    client_id=info['peer_id'],
-                                    status="disabled",
+                        async def _disable_peer(info):
+                            async with sem:
+                                api = AmneziaClient(
+                                    info['api_url'], info['api_key']
                                 )
-                            except Exception as e:
-                                logger.warning(
-                                    "Chargeback: failed to disable "
-                                    "profile %s: %s",
-                                    info['profile_id'], e,
-                                )
-                                return False
+                                try:
+                                    return await api.update_client(
+                                        client_id=info['peer_id'],
+                                        status="disabled",
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        "Chargeback: failed to disable "
+                                        "profile %s: %s",
+                                        info['profile_id'], e,
+                                    )
+                                    return False
 
-                    results = await asyncio.gather(
-                        *[_disable_peer(info) for info in tasks_info],
-                        return_exceptions=True,
-                    )
-                    api_errors = [
-                        r for r in results
-                        if isinstance(r, Exception) or r is False
-                    ]
-                    if api_errors:
-                        logger.warning(
-                            "Chargeback: %d/%d API calls failed for "
-                            "user %s",
-                            len(api_errors), len(tasks_info),
-                            user.telegram_id,
+                        results = await asyncio.gather(
+                            *[_disable_peer(info) for info in tasks_info],
+                            return_exceptions=True,
                         )
+                        api_errors = [
+                            r for r in results
+                            if isinstance(r, Exception) or r is False
+                        ]
+                        if api_errors:
+                            logger.warning(
+                                "Chargeback: %d/%d API calls failed for "
+                                "user %s",
+                                len(api_errors), len(tasks_info),
+                                user.telegram_id,
+                            )
 
                 invalidate_user_cache(user.telegram_id)
-
                 logger.warning(
                     "CHARGEBACK processed: user %s, payment %s. "
                     "Access revoked.",
@@ -417,7 +418,6 @@ class PaymentService:
                 )
 
             logger.warning(f"Chargeback for payment {payment.id}")
-
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_CHARGEBACK",
@@ -432,7 +432,6 @@ class PaymentService:
                 logger.error(
                     f"Failed to log chargeback to audit: {e}"
                 )
-
             await _send_chargeback_alert(payment, transaction_id)
             return True, "success"
 
@@ -446,7 +445,6 @@ class PaymentService:
         payment = await get_payment_by_id(session, payment_id)
         if not payment or not payment.external_id:
             return False
-
         if payment.status != "pending":
             return payment.status == "completed"
 
@@ -476,15 +474,18 @@ class PaymentService:
                     f"Failed to log payment cancellation to audit: {e}"
                 )
             return False
-
         return False
 
 
 async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
+    """
+    🔥 ИСПРАВЛЕНО CRITICAL #3:
+    Эта функция больше НЕ вызывается при webhook-ретраях.
+    Оставлена только как защитная сетка для ручных действий или race conditions.
+    """
     from services.workers.heartbeat import get_bot_ref
-
     bot = get_bot_ref()
     if bot is None:
         logger.error(
@@ -515,7 +516,6 @@ async def _alert_paid_after_cancel(
     username = (
         f"@{user.username}" if user and user.username else "—"
     )
-
     alert_msg = (
         f"⚠️ <b>Оплата после отмены!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -549,7 +549,6 @@ async def _send_chargeback_alert(
 ) -> None:
     from services.workers.heartbeat import get_bot_ref
     from aiogram.utils.keyboard import InlineKeyboardBuilder
-
     bot = get_bot_ref()
     if bot is None:
         logger.error(
