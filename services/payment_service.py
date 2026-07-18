@@ -15,14 +15,23 @@ from utils.datetime_helpers import now_utc
 
 logger = logging.getLogger(__name__)
 
+# 🔥 НОВОЕ: Дедупликация алертов/уведомлений paid-after-cancel
+_alerted_paid_after_cancel: set[int] = set()
+_notified_paid_after_cancel: set[int] = set()
+
+
 class PaymentService:
     @staticmethod
     async def handle_successful_payment(
         session: AsyncSession, payment_id: int
-    ) -> bool:
+    ) -> tuple[bool, str]:
+        """
+        Обрабатывает успешную оплату.
+        🔥 ИЗМЕНЕНО: Возвращает (success, result_code) вместо bool.
+        result_code: "success" | "paid_after_cancel" | "error"
+        """
         try:
             async with session.begin_nested() as savepoint:
-                # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
                 stmt = (
                     update(Payment)
                     .where(Payment.id == payment_id, Payment.status == 'pending')
@@ -32,10 +41,13 @@ class PaymentService:
                     )
                 )
                 result = await session.execute(stmt)
+
                 if result.rowcount == 0:
                     await savepoint.commit()
+                    # 🔥 ИСПРАВЛЕНО: возвращаем paid_after_cancel вместо True
                     await _alert_paid_after_cancel(session, payment_id)
-                    return True
+                    await _notify_client_paid_after_cancel(session, payment_id)
+                    return True, "paid_after_cancel"
 
                 result = await session.execute(
                     select(Payment)
@@ -48,16 +60,18 @@ class PaymentService:
                 payment = result.scalar_one()
                 tariff = payment.tariff
                 user = payment.user
+
                 if not tariff or not user:
                     logger.error(
                         f"Payment {payment_id}: missing tariff or user"
                     )
                     await savepoint.rollback()
-                    return False
+                    return False, "error"
 
                 new_device_limit = getattr(
                     tariff, 'device_limit', user.device_limit
                 )
+
                 try:
                     await SubscriptionService.extend_subscription(
                         session, user.telegram_id, tariff.duration_days,
@@ -71,7 +85,7 @@ class PaymentService:
                         exc_info=True,
                     )
                     await savepoint.rollback()
-                    return False
+                    return False, "error"
 
                 payments = await get_user_payments(session, user.id)
                 successful_payments = [
@@ -94,7 +108,6 @@ class PaymentService:
                             f"{payment_id}: {e}"
                         )
 
-                # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
                 user.last_payment_at = now_utc()
                 await savepoint.commit()
                 invalidate_user_cache(user.telegram_id)
@@ -117,14 +130,93 @@ class PaymentService:
                     f"Payment {payment_id} processed successfully "
                     f"for user {user.telegram_id}"
                 )
-                return True
+                return True, "success"
+
         except Exception as e:
             await session.rollback()
             logger.error(
                 f"Failed to process payment {payment_id}: {e}",
                 exc_info=True,
             )
-            return False
+            return False, "error"
+
+    @staticmethod
+    async def force_grant_payment(
+        session: AsyncSession, payment_id: int, admin_id: int
+    ) -> tuple[bool, str]:
+        """
+        🔥 НОВОЕ: Принудительная выдача подписки по cancelled платежу.
+        Используется админом через кнопку "Выдать подписку" в алерте.
+        """
+        try:
+            async with session.begin_nested() as savepoint:
+                stmt = (
+                    update(Payment)
+                    .where(Payment.id == payment_id)
+                    .values(status='completed', paid_at=now_utc())
+                )
+                await session.execute(stmt)
+
+                result = await session.execute(
+                    select(Payment)
+                    .options(
+                        selectinload(Payment.user),
+                        selectinload(Payment.tariff),
+                    )
+                    .where(Payment.id == payment_id)
+                )
+                payment = result.scalar_one_or_none()
+                if not payment:
+                    await savepoint.rollback()
+                    return False, "Платёж не найден"
+
+                tariff = payment.tariff
+                user = payment.user
+                if not tariff or not user:
+                    await savepoint.rollback()
+                    return False, "Нет тарифа или пользователя"
+
+                new_device_limit = getattr(
+                    tariff, 'device_limit', user.device_limit
+                )
+
+                try:
+                    await SubscriptionService.extend_subscription(
+                        session, user.telegram_id, tariff.duration_days,
+                        new_device_limit=new_device_limit,
+                        new_tariff_id=tariff.id,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"force_grant: extend failed for {payment_id}: {e}",
+                        exc_info=True,
+                    )
+                    await savepoint.rollback()
+                    return False, f"Ошибка продления: {e}"
+
+                await savepoint.commit()
+                invalidate_user_cache(user.telegram_id)
+
+                try:
+                    await AuditService.log_action(
+                        session, admin_id=admin_id, action="MANUAL_GRANT",
+                        target_type="Payment", target_id=payment_id,
+                        details=(
+                            f"Admin {admin_id} manually granted cancelled "
+                            f"payment {payment_id} for user {user.telegram_id}"
+                        ),
+                    )
+                except Exception as e:
+                    logger.error(f"force_grant: audit failed: {e}")
+
+                return True, "ok"
+
+        except Exception as e:
+            await session.rollback()
+            logger.error(
+                f"force_grant_payment failed: {e}", exc_info=True
+            )
+            return False, f"Ошибка БД: {e}"
 
     @staticmethod
     async def create_platega_payment(
@@ -133,10 +225,12 @@ class PaymentService:
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
         settings = get_settings()
+
         payment = await create_payment(
             session=session, user_id=user_id, tariff_id=tariff_id,
             amount=int(amount), currency="RUB",
         )
+
         description = (
             f"Оплата подписки. TgId:{telegram_id} UserId:{user_id}"
         )
@@ -148,11 +242,13 @@ class PaymentService:
             bot_username=clean_username
         )
         payload = f"payment_{payment.id}"
+
         client = PlategaClient()
         transaction = await client.create_transaction(
             amount=amount, currency="RUB", description=description,
             return_url=return_url, failed_url=failed_url, payload=payload,
         )
+
         if not transaction:
             try:
                 await session.execute(
@@ -168,6 +264,7 @@ class PaymentService:
                 await session.flush()
             except Exception:
                 pass
+
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_FAILED",
@@ -205,6 +302,7 @@ class PaymentService:
         )
         result = await session.execute(stmt)
         payment = result.scalar_one_or_none()
+
         if not payment:
             logger.warning(
                 f"Platega callback: payment not found for {transaction_id}"
@@ -275,10 +373,11 @@ class PaymentService:
                     pass
                 return False, "payload_mismatch"
 
-            success = await PaymentService.handle_successful_payment(
+            # 🔥 ИЗМЕНЕНО: пробрасываем result_code из handle_successful_payment
+            success, result_code = await PaymentService.handle_successful_payment(
                 session, payment.id
             )
-            return success, "success" if success else "error"
+            return success, result_code
 
         elif status == "CANCELED":
             if payment.status == "cancelled":
@@ -287,6 +386,7 @@ class PaymentService:
                     f"already cancelled"
                 )
                 return True, "already_processed"
+
             payment.status = "cancelled"
             try:
                 await AuditService.log_action(
@@ -318,8 +418,6 @@ class PaymentService:
                 from database.repositories.servers_repo import get_server_by_id
                 from services.amnezia_client import AmneziaClient
 
-                # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
-                # Переименовано в current_time чтобы не конфликтовать с импортом now_utc
                 current_time = now_utc()
                 user.subscription_end = current_time
                 user.current_tariff_id = None
@@ -413,6 +511,7 @@ class PaymentService:
                 logger.error(
                     f"Failed to log chargeback to audit: {e}"
                 )
+
             await _send_chargeback_alert(payment, transaction_id)
             return True, "success"
 
@@ -422,44 +521,74 @@ class PaymentService:
     @staticmethod
     async def check_platega_payment(
         session: AsyncSession, payment_id: int
-    ) -> bool:
+    ) -> tuple[bool, str]:
+        """
+        🔥 ИСПРАВЛЕНО: Возвращает (success, result_code).
+        Для cancelled теперь идёт в Platega API.
+        result_code: "success" | "paid_after_cancel" | "cancelled" | "pending" | "api_error" | "not_found"
+        """
         payment = await get_payment_by_id(session, payment_id)
         if not payment or not payment.external_id:
-            return False
-        if payment.status != "pending":
-            return payment.status == "completed"
+            return False, "not_found"
+
+        # 🔥 ИСПРАВЛЕНО: для completed — сразу успех
+        if payment.status == "completed":
+            return True, "success"
+
+        # 🔥 ИСПРАВЛЕНО: для cancelled тоже идём в API (раньше возвращали False)
+        if payment.status not in ("pending", "cancelled"):
+            return False, "invalid_status"
+
         client = PlategaClient()
         status_data = await client.check_status(payment.external_id)
         if not status_data:
-            return False
+            return False, "api_error"
+
         status = status_data.get("status")
         if status == "CONFIRMED":
-            return await PaymentService.handle_successful_payment(
+            # Вызываем handle_successful_payment — он сам определит
+            # pending (выдаст подписку) или cancelled (уведомит)
+            success, result_code = await PaymentService.handle_successful_payment(
                 session, payment.id
             )
+            return success, result_code
+
         elif status == "CANCELED":
-            payment.status = "cancelled"
-            try:
-                await AuditService.log_action(
-                    session, admin_id=0, action="PAYMENT_CANCELLED",
-                    target_type="Payment", target_id=payment.id,
-                    details=(
-                        f"check_platega_payment: status=CANCELED, "
-                        f"user={payment.user_id}"
-                    ),
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to log payment cancellation to audit: {e}"
-                )
-            return False
-        return False
+            if payment.status != "cancelled":
+                payment.status = "cancelled"
+                try:
+                    await AuditService.log_action(
+                        session, admin_id=0, action="PAYMENT_CANCELLED",
+                        target_type="Payment", target_id=payment.id,
+                        details=(
+                            f"check_platega_payment: status=CANCELED, "
+                            f"user={payment.user_id}"
+                        ),
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to log payment cancellation to audit: {e}"
+                    )
+            return False, "cancelled"
+
+        return False, "pending"
 
 
 async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
+    """🔥 УЛУЧШЕНО: Алерт админам с кнопками быстрого действия + дедупликация"""
+    global _alerted_paid_after_cancel
+
+    # Дедупликация
+    if payment_id in _alerted_paid_after_cancel:
+        return
+    _alerted_paid_after_cancel.add(payment_id)
+
     from services.workers.heartbeat import get_bot_ref
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from utils.tariff_names import get_tariff_display_name
+
     bot = get_bot_ref()
     if bot is None:
         logger.error(
@@ -467,40 +596,77 @@ async def _alert_paid_after_cancel(
             f"Payment {payment_id}"
         )
         return
+
     try:
         result = await session.execute(
             select(Payment)
-            .options(selectinload(Payment.user))
+            .options(selectinload(Payment.user), selectinload(Payment.tariff))
             .where(Payment.id == payment_id)
         )
         payment = result.scalar_one_or_none()
     except Exception:
         payment = None
+
     if not payment:
         return
+
     settings = get_settings()
     admin_ids = settings.ADMIN_IDS
     if not admin_ids:
         return
+
     user = payment.user
+    tariff = payment.tariff
     username = (
         f"@{user.username}" if user and user.username else "—"
     )
+
+    tariff_name = "—"
+    if tariff:
+        tariff_name = get_tariff_display_name(
+            getattr(tariff, 'device_limit', 2)
+        )
+
+    # 🔥 НОВОЕ: Кнопки быстрого действия
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ Выдать подписку",
+        callback_data=f"admin_manual_grant:{payment.id}"
+    )
+    if payment.payment_method == "SBPQR" and payment.external_id:
+        builder.button(
+            text="💸 Вернуть средства (Platega)",
+            url=f"https://app.platega.io/transactions/{payment.external_id}"
+        )
+    builder.button(
+        text="👤 Профиль клиента",
+        callback_data=(
+            f"admin_user_card:{user.telegram_id}" if user else "admin_menu"
+        ),
+    )
+    builder.adjust(1, 1, 1)
+    keyboard = builder.as_markup()
+
     alert_msg = (
         f"⚠️ <b>Оплата после отмены!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💳 <b>Платёж ID:</b> <code>{payment.id}</code>\n"
-        f"👤 <b>Пользователь:</b> "
+        f"👤 <b>Клиент:</b> "
         f"<code>{user.telegram_id if user else '—'}</code> ({username})\n"
-        f"💰 <b>Сумма:</b> <b>{payment.amount} {payment.currency}</b>\n"
+        f"💎 <b>Тариф:</b> {tariff_name}\n"
+        f"💰 <b>Сумма:</b> {payment.amount} {payment.currency}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Деньги списаны, но платёж был ранее отменён пользователем. "
-        f"Проверьте и при необходимости верните средства вручную.</i>"
+        f"<i>Деньги поступили, но платёж был ранее отменён клиентом.\n"
+        f"Клиент уведомлён автоматически.\n"
+        f"Выберите действие:</i>"
     )
+
     for admin_id in admin_ids:
         try:
             await bot.send_message(
-                admin_id, alert_msg, parse_mode="HTML"
+                admin_id, alert_msg,
+                reply_markup=keyboard,
+                parse_mode="HTML"
             )
             logger.info(
                 f"Paid-after-cancel alert sent to admin {admin_id} "
@@ -512,12 +678,143 @@ async def _alert_paid_after_cancel(
                 f"{admin_id}: {e}"
             )
 
+    # Аудит
+    try:
+        await AuditService.log_action(
+            session, admin_id=0, action="PAID_AFTER_CANCEL",
+            target_type="Payment", target_id=payment_id,
+            details=(
+                f"user={user.telegram_id if user else '—'}, "
+                f"amount={payment.amount} {payment.currency}"
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to log PAID_AFTER_CANCEL: {e}")
+
+
+async def _notify_client_paid_after_cancel(
+    session, payment_id: int
+) -> None:
+    """
+    🔥 НОВОЕ: Отправляет клиенту заботливое + техническое уведомление.
+    Текст НЕ обвиняет, содержит ID платежа и сумму, даёт чёткую инструкцию.
+    """
+    global _notified_paid_after_cancel
+
+    # Дедупликация
+    if payment_id in _notified_paid_after_cancel:
+        return
+    _notified_paid_after_cancel.add(payment_id)
+
+    from services.workers.heartbeat import get_bot_ref
+    from aiogram.exceptions import TelegramForbiddenError
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from config.settings import get_settings
+    from utils.tariff_names import get_tariff_display_name
+
+    bot = get_bot_ref()
+    if bot is None:
+        logger.error(
+            f"Client notification SKIPPED: bot_ref is None. "
+            f"Payment {payment_id}"
+        )
+        return
+
+    try:
+        result = await session.execute(
+            select(Payment)
+            .options(selectinload(Payment.user), selectinload(Payment.tariff))
+            .where(Payment.id == payment_id)
+        )
+        payment = result.scalar_one_or_none()
+    except Exception:
+        payment = None
+
+    if not payment or not payment.user:
+        return
+
+    user = payment.user
+    tariff = payment.tariff
+
+    # Не отправляем забаненным
+    if user.is_banned:
+        logger.info(
+            f"Client notification skipped: user {user.telegram_id} is banned"
+        )
+        return
+
+    settings = get_settings()
+    support_username = settings.SUPPORT_USERNAME.lstrip("@")
+
+    tariff_name = "—"
+    if tariff:
+        tariff_name = get_tariff_display_name(
+            getattr(tariff, 'device_limit', 2)
+        )
+
+    # Заботливый + технический текст
+    msg = (
+        f"💳 <b>Мы получили вашу оплату</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Сумма:</b> {payment.amount} {payment.currency}\n"
+        f"💎 <b>Тариф:</b> {tariff_name}\n"
+        f"🆔 <b>Платёж:</b> <code>{payment.id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Ранее в боте была нажата кнопка «Отменить», "
+        f"поэтому доступ не активировался автоматически.\n\n"
+        f"Напишите нам — решим за 2 минуты."
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="💬 Написать в поддержку",
+        url=f"https://t.me/{support_username}"
+    )
+    builder.adjust(1)
+
+    try:
+        await bot.send_message(
+            user.telegram_id, msg,
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        logger.info(
+            f"Paid-after-cancel notification sent to user {user.telegram_id} "
+            f"for payment {payment.id}"
+        )
+    except TelegramForbiddenError:
+        logger.info(
+            f"Paid-after-cancel notification: user {user.telegram_id} "
+            f"blocked the bot"
+        )
+        try:
+            from database.repositories.users_repo import mark_user_bot_blocked
+            await mark_user_bot_blocked(session, user.telegram_id)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(
+            f"Failed to send paid-after-cancel notification to "
+            f"user {user.telegram_id}: {e}"
+        )
+
+    # Аудит
+    try:
+        await AuditService.log_action(
+            session, admin_id=0, action="CLIENT_NOTIFIED_PAID_AFTER_CANCEL",
+            target_type="Payment", target_id=payment_id,
+            details=f"user={user.telegram_id}, support=@{support_username}",
+        )
+    except Exception as e:
+        logger.error(f"Failed to log CLIENT_NOTIFIED: {e}")
+
 
 async def _send_chargeback_alert(
     payment: Payment, transaction_id: str
 ) -> None:
     from services.workers.heartbeat import get_bot_ref
     from aiogram.utils.keyboard import InlineKeyboardBuilder
+
     bot = get_bot_ref()
     if bot is None:
         logger.error(
@@ -526,11 +823,13 @@ async def _send_chargeback_alert(
             f"transaction={transaction_id}"
         )
         return
+
     settings = get_settings()
     admin_ids = settings.ADMIN_IDS
     if not admin_ids:
         logger.warning("Chargeback alert skipped: ADMIN_IDS is empty")
         return
+
     user = payment.user
     tariff = payment.tariff
     username = (
@@ -540,6 +839,7 @@ async def _send_chargeback_alert(
         f"{tariff.duration_days} дн. / {tariff.device_limit} устр."
         if tariff else "—"
     )
+
     builder = InlineKeyboardBuilder()
     builder.button(
         text="👤 Профиль пользователя",
@@ -549,6 +849,7 @@ async def _send_chargeback_alert(
     )
     builder.adjust(1)
     keyboard = builder.as_markup()
+
     alert_msg = (
         f"🚨 <b>CHARGEBACK (Возврат средств)</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -561,6 +862,7 @@ async def _send_chargeback_alert(
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Доступ отозван. Все устройства отключены.</i>"
     )
+
     for admin_id in admin_ids:
         try:
             await bot.send_message(

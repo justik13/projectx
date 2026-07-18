@@ -1,10 +1,7 @@
 """
 Webhook handlers для Platega.io.
-
-🔥 ИСПРАВЛЕНО (Часть 2):
-- Передача amount и payload в handle_platega_callback для сверки
+🔥 ИСПРАВЛЕНО: Обработка result_code "paid_after_cancel"
 """
-
 import logging
 import uuid
 from aiohttp import web
@@ -30,13 +27,13 @@ class PlategaCallbackData(BaseModel):
     currency: Optional[str] = None
     paymentMethod: Optional[int] = None
     createdAt: Optional[str] = None
-    
+
     class Config:
         extra = "allow"
-    
+
     def get_transaction_id(self) -> Optional[str]:
         return self.transactionId or self.id
-    
+
     def normalize_status(self) -> str:
         return self.status.upper()
 
@@ -45,13 +42,14 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
     """Обработчик webhook от Platega.io"""
     request_id = uuid.uuid4().hex[:8]
     set_request_id(request_id)
+
     transaction_id = None
     status = None
-    
+
     try:
         merchant_id = request.headers.get("X-MerchantId", "")
         secret = request.headers.get("X-Secret", "")
-        
+
         client = PlategaClient()
         if not client.validate_callback(merchant_id, secret):
             logger.warning(
@@ -59,7 +57,7 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                 request_id, merchant_id,
             )
             return web.Response(status=401, text="Unauthorized")
-        
+
         try:
             raw_data = await request.json()
         except Exception as e:
@@ -68,7 +66,7 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                 request_id, e,
             )
             return web.Response(status=400, text="Invalid JSON")
-        
+
         try:
             callback_data = PlategaCallbackData(**raw_data)
         except ValidationError as e:
@@ -80,11 +78,11 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                 status=400,
                 text=f"Validation error: {e.errors()}",
             )
-        
+
         transaction_id = callback_data.get_transaction_id()
         status = callback_data.normalize_status()
         payload = callback_data.payload
-        
+
         if not transaction_id:
             logger.warning(
                 "[%s] Platega webhook missing transaction ID. Raw data: %s",
@@ -94,21 +92,21 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                 status=400,
                 text="Missing transaction ID (expected 'id' or 'transactionId')",
             )
-        
+
         valid_statuses = {"CONFIRMED", "CANCELED", "CHARGEBACKED"}
         if status not in valid_statuses:
             logger.warning(
                 "[%s] Platega webhook unknown status: %s (transaction=%s)",
                 request_id, status, transaction_id,
             )
-        
+
         logger.info(
             "[%s] Platega webhook received: transaction=%s, status=%s, "
             "amount=%s, currency=%s",
             request_id, transaction_id, status,
             callback_data.amount, callback_data.currency,
         )
-        
+
         async with session_scope() as session:
             try:
                 await AuditService.log_action(
@@ -127,8 +125,7 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                     "[%s] Failed to log Platega callback to audit: %s",
                     request_id, e,
                 )
-            
-            # 🔥 ИСПРАВЛЕНО: Передаём amount и payload для сверки
+
             success, result_code = await PaymentService.handle_platega_callback(
                 session=session,
                 transaction_id=transaction_id,
@@ -137,7 +134,7 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                 callback_amount=callback_data.amount,
                 callback_payload=callback_data.payload,
             )
-            
+
             if success:
                 if result_code == "not_found":
                     logger.warning(
@@ -151,10 +148,19 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                         request_id, transaction_id, status,
                     )
                     return web.Response(status=200, text="OK")
+                elif result_code == "paid_after_cancel":
+                    # 🔥 ИСПРАВЛЕНО: Platega получает 200 OK (webhook принят),
+                    # но подписка НЕ выдана. Клиент уведомлён, админ получил алерт.
+                    logger.info(
+                        "[%s] Platega callback: paid_after_cancel transaction=%s. "
+                        "Subscription NOT granted, client notified.",
+                        request_id, transaction_id,
+                    )
+                    return web.Response(status=200, text="OK")
                 else:
                     logger.info(
-                        "[%s] Platega callback processed successfully: transaction=%s",
-                        request_id, transaction_id,
+                        "[%s] Platega callback processed successfully: transaction=%s, result=%s",
+                        request_id, transaction_id, result_code,
                     )
                     return web.Response(status=200, text="OK")
             else:
@@ -164,6 +170,18 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                         request_id, transaction_id,
                     )
                     return web.Response(status=404, text="Payment not found")
+                elif result_code == "amount_mismatch":
+                    logger.error(
+                        "[%s] Platega callback: amount mismatch transaction=%s",
+                        request_id, transaction_id,
+                    )
+                    return web.Response(status=200, text="OK")
+                elif result_code == "payload_mismatch":
+                    logger.error(
+                        "[%s] Platega callback: payload mismatch transaction=%s",
+                        request_id, transaction_id,
+                    )
+                    return web.Response(status=200, text="OK")
                 elif result_code == "error":
                     logger.error(
                         "[%s] Platega callback processing failed: transaction=%s, status=%s",
@@ -176,7 +194,7 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                         request_id, result_code, transaction_id,
                     )
                     return web.Response(status=500, text="Unknown error")
-    
+
     except Exception as e:
         logger.error(
             "[%s] Platega webhook error: %s",

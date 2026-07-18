@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from bot.states import AdminStates
 from bot import texts
+from services.payment_service import PaymentService
+from database.repositories.payments_repo import get_payment_by_id
 from utils.tariff_names import get_tariff_display_name, get_tariff_group_name
 from utils.formatters import format_datetime, format_days_left, format_user_card_text
 from utils.telegram import safe, render_hub
@@ -1225,3 +1227,102 @@ async def admin_unban_apply(callback: CallbackQuery, session: AsyncSession):
     user = await _get_user_with_profiles(session, telegram_id)
     if user:
         await _render_user_card(callback, user, session)
+
+# ──────────────────────────────────────────────────────────
+# 🔥 НОВОЕ: Ручная выдача подписки по отменённому платежу
+# ──────────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("admin_manual_grant:"))
+async def admin_manual_grant(callback: CallbackQuery, session: AsyncSession):
+    """
+    Админ нажимает "✅ Выдать подписку" в алерте paid_after_cancel.
+    Принудительно выдаёт подписку по cancelled платежу.
+    """
+    if not is_admin(callback.from_user.id):
+        await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
+        return
+
+    payment_id = int(callback.data.split(":")[1])
+
+    try:
+        success, result = await PaymentService.force_grant_payment(
+            session, payment_id, callback.from_user.id
+        )
+
+        if success:
+            payment = await get_payment_by_id(session, payment_id)
+            user_tg_id = payment.user.telegram_id if payment and payment.user else "—"
+
+            await callback.answer(
+                f"✅ Подписка выдана вручную для {user_tg_id}",
+                show_alert=True
+            )
+
+            # Обновляем сообщение алерта
+            try:
+                await callback.message.edit_text(
+                    f"✅ <b>Подписка выдана вручную</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💳 Платёж ID: <code>{payment_id}</code>\n"
+                    f"👤 Клиент: <code>{user_tg_id}</code>\n"
+                    f"🛠 Админ: <code>{callback.from_user.id}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<i>Клиент получил доступ автоматически.</i>",
+                    parse_mode="HTML"
+                )
+            except TelegramBadRequest:
+                pass
+
+            # Уведомляем клиента
+            try:
+                from services.workers.heartbeat import get_bot_ref
+                from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+                bot = get_bot_ref()
+                if bot and payment and payment.user:
+                    user = payment.user
+                    tariff = payment.tariff
+                    from utils.tariff_names import get_tariff_display_name
+                    tariff_name = get_tariff_display_name(
+                        getattr(tariff, 'device_limit', 2)
+                    ) if tariff else "—"
+                    valid_until = format_datetime(user.subscription_end)
+
+                    client_msg = (
+                        f"✅ <b>Доступ активирован!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"💎 <b>Тариф:</b> {tariff_name}\n"
+                        f"📅 <b>Действует до:</b> {valid_until}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Спасибо за ожидание! Доступ уже активен."
+                    )
+
+                    builder = InlineKeyboardBuilder()
+                    builder.button(
+                        text="🔌 Подключить устройство",
+                        callback_data="menu_connections"
+                    )
+                    builder.button(
+                        text="🏠 В главное меню",
+                        callback_data="back_to_main_menu"
+                    )
+                    builder.adjust(1, 1)
+
+                    await bot.send_message(
+                        user.telegram_id, client_msg,
+                        reply_markup=builder.as_markup(),
+                        parse_mode="HTML"
+                    )
+            except Exception as notify_error:
+                logger.error(
+                    f"Failed to notify client after manual grant: {notify_error}"
+                )
+        else:
+            await callback.answer(
+                f"❌ Ошибка: {result}", show_alert=True
+            )
+
+    except Exception as e:
+        logger.error(
+            f"admin_manual_grant error: {e}", exc_info=True
+        )
+        await callback.answer("❌ Ошибка при выдаче подписки", show_alert=True)
