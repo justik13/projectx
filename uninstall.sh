@@ -1,7 +1,4 @@
 #!/bin/bash
-# ═══════════════════════════════════════════════════════════════
-# 🗑️  ProjectX Bot — Safe Uninstaller (v3.0 Hardened)
-# ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -41,7 +38,6 @@ if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "[not set]" ]]; then
     PROJECT_DIR="/opt/projectx-bot"
 fi
 
-# 🔥 ЗАЩИТА ОТ SYMLINK-АТАКИ: Раскрываем реальный путь
 if [[ -n "$PROJECT_DIR" ]]; then
     PROJECT_DIR=$(readlink -f "$PROJECT_DIR")
 fi
@@ -117,7 +113,6 @@ rm -f /usr/local/bin/projectx-backup.sh /usr/local/bin/projectx-healthcheck.sh
 rm -f /var/log/projectx-*.log 2>/dev/null
 
 if id "projectx" &>/dev/null; then
-    # 🔥 ЗАЩИТА ОТ ЗАВИСШИХ ПРОЦЕССОВ: Убиваем всё перед удалением юзера
     pkill -u projectx 2>/dev/null || true
     sleep 1
     userdel projectx 2>/dev/null || true

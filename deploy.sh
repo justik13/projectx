@@ -1,7 +1,4 @@
 #!/bin/bash
-# ═══════════════════════════════════════════════════════════════
-# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v6.3 Hardened)
-# ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -23,9 +20,6 @@ LOG_FILE="/var/log/projectx-deploy.log"
 SNAPSHOT_DIR="/root/.projectx-snapshots"
 ROLLBACK_LOG="/var/log/projectx-rollback.log"
 
-# ═══════════════════════════════════════════════════════════════
-# LOGGING & UTILITIES
-# ═══════════════════════════════════════════════════════════════
 log()     { echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] [INFO]${NC} $1" | tee -a "$LOG_FILE"; }
 success() { echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] [✓]${NC} $1" | tee -a "$LOG_FILE"; }
 warn()    { echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] [!]${NC} $1" | tee -a "$LOG_FILE"; }
@@ -51,9 +45,6 @@ write_env_var() {
     echo "${key}='${value}'" >> "$PROJECT_DIR/.env"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# ROLLBACK MECHANISM
-# ═══════════════════════════════════════════════════════════════
 rollback() {
     local step="$1"
     local error_msg="$2"
@@ -84,9 +75,6 @@ rollback() {
     error "Deploy failed. Check $ROLLBACK_LOG for details."
 }
 
-# ═══════════════════════════════════════════════════════════════
-# PRE-FLIGHT CHECKS
-# ═══════════════════════════════════════════════════════════════
 preflight_checks() {
     log "Запуск pre-flight проверок..."
     
@@ -118,9 +106,6 @@ preflight_checks() {
     success "Pre-flight проверки пройдены"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# SYSTEM DEPENDENCIES
-# ═══════════════════════════════════════════════════════════════
 install_dependencies() {
     log "Установка системных зависимостей (PostgreSQL + Redis)..."
     apt-get update -qq || error "Не удалось обновить список пакетов"
@@ -144,9 +129,6 @@ install_dependencies() {
     fi
 }
 
-# ═══════════════════════════════════════════════════════════════
-# POSTGRESQL SETUP (С динамическим определением порта)
-# ═══════════════════════════════════════════════════════════════
 setup_postgresql() {
     log "Настройка базы данных PostgreSQL..."
     
@@ -210,9 +192,6 @@ EOF
     chmod 600 /tmp/.pg_pass
 }
 
-# ═══════════════════════════════════════════════════════════════
-# REDIS SETUP
-# ═══════════════════════════════════════════════════════════════
 setup_redis() {
     log "Настройка Redis для FSM Storage..."
     
@@ -263,9 +242,6 @@ setup_redis() {
     success "Redis настроен и запущен"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# INFRASTRUCTURE VERIFICATION
-# ═══════════════════════════════════════════════════════════════
 verify_infrastructure() {
     log "Финальная проверка доступности БД и Redis..."
     
@@ -283,9 +259,6 @@ verify_infrastructure() {
     success "Redis полностью функционален"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# FIREWALL
-# ═══════════════════════════════════════════════════════════════
 setup_firewall() {
     log "Настройка UFW firewall..."
     if ! command -v ufw &>/dev/null; then warn "UFW не установлен, пропуск"; return; fi
@@ -315,10 +288,6 @@ setup_firewall() {
 
     success "UFW настроен безопасно"
 }
-
-# ═══════════════════════════════════════════════════════════════
-# PROJECT SYNC & VENV
-# ═══════════════════════════════════════════════════════════════
 migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
         log "Синхронизация проекта..."
@@ -344,9 +313,6 @@ setup_venv() {
     success "Зависимости Python установлены"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# ENVIRONMENT CONFIG (С динамическим портом)
-# ═══════════════════════════════════════════════════════════════
 setup_env() {
     log "Настройка .env файла..."
     
@@ -397,7 +363,6 @@ setup_env() {
         rm -f /tmp/.pg_pass
     fi
 
-    # 🔥 КРИТИЧЕСКИЙ ФИКС: Получаем реальный порт PG для записи в .env
     local PG_PORT=$(sudo -u postgres psql -tAc "SHOW port;" 2>/dev/null | tr -d '[:space:]')
     if [[ -z "$PG_PORT" ]]; then PG_PORT=5432; fi
 
@@ -423,9 +388,6 @@ setup_env() {
     success ".env защищён (Порт БД: $PG_PORT)"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# PERMISSIONS & DATABASE INIT
-# ═══════════════════════════════════════════════════════════════
 verify_permissions() {
     chown -R projectx:projectx "$PROJECT_DIR"
     find "$PROJECT_DIR" -type d -exec chmod 750 {} \;
@@ -449,9 +411,6 @@ asyncio.run(init_db())
 " > /dev/null 2>&1 || warn "Инициализация отложена (выполнится при старте)"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# SYSTEMD, NGINX, BACKUP
-# ═══════════════════════════════════════════════════════════════
 setup_systemd() {
     log "Настройка systemd сервиса..."
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
@@ -587,9 +546,6 @@ start_bot() {
     rollback "start_bot" "Бот не смог запуститься"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════════
 main() {
     echo -e "${GREEN}🚀 ProjectX Bot Deploy v6.3 (Hardened)${NC}\n"
     mkdir -p /var/log "$SNAPSHOT_DIR"

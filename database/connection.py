@@ -39,7 +39,6 @@ async def init_db():
     return _engine, _sessionmaker
 
 async def _seed_default_tariffs(conn):
-    """Сидирование тарифов по умолчанию"""
     result = await conn.execute(select(func.count(Tariff.id)))
     if result.scalar_one() == 0:
         for t in DEFAULT_TARIFFS:
@@ -49,10 +48,6 @@ async def _seed_default_tariffs(conn):
         logging.info("Default tariffs seeded successfully.")
 
 async def _apply_additional_indexes(conn):
-    """
-    🔥 ИСПРАВЛЕНО: Применение дополнительных индексов,
-    которые не могут быть выражены через SQLAlchemy ORM.
-    """
     indexes_sql = [
         """
         CREATE UNIQUE INDEX IF NOT EXISTS ix_payment_external_completed
@@ -111,9 +106,6 @@ async def get_session() -> AsyncSession:
 
 @asynccontextmanager
 async def session_scope():
-    """
-    Контекстный менеджер для работы с сессией БД.
-    """
     session = await get_session()
     try:
         yield session
