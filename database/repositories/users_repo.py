@@ -6,16 +6,15 @@ from datetime import timedelta
 from typing import Optional, List, TypedDict
 from utils.datetime_helpers import now_utc
 
-
 class UserUpdateFields(TypedDict, total=False):
     username: str | None
     first_name: str | None
-    subscription_end: 'datetime' | None
+    subscription_end: Optional['datetime']  # 🔥 ИСПРАВЛЕНО: было 'datetime' | None
     device_limit: int
     current_tariff_id: int | None
     referred_by: int | None
     referral_days: int
-    last_payment_at: 'datetime' | None
+    last_payment_at: Optional['datetime']   # 🔥 ИСПРАВЛЕНО: было 'datetime' | None
     is_banned: bool
     is_admin: bool
     is_bot_blocked: bool
@@ -23,7 +22,6 @@ class UserUpdateFields(TypedDict, total=False):
     notified_1d: bool
     notified_2h: bool
     tos_accepted: bool
-
 
 async def get_user_by_telegram_id(
     session: AsyncSession, telegram_id: int
@@ -34,7 +32,6 @@ async def get_user_by_telegram_id(
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
-
 
 async def create_user(
     session: AsyncSession, telegram_id: int,
@@ -50,7 +47,6 @@ async def create_user(
     await session.refresh(user)
     return user
 
-
 async def update_user(
     session: AsyncSession, user: User, **kwargs: UserUpdateFields
 ) -> User:
@@ -61,23 +57,22 @@ async def update_user(
     await session.refresh(user)
     return user
 
-
 async def extend_subscription(
     session: AsyncSession, user: User, days: int
 ) -> User:
-    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
     now = now_utc()
     if user.subscription_end and user.subscription_end > now:
         current_end = user.subscription_end
     else:
         current_end = now
+    
     if days >= 36500:
         from bot.constants import PERMANENT_END_DATE
         new_end = PERMANENT_END_DATE
     else:
         new_end = current_end + timedelta(days=days)
+    
     return await update_user(session, user, subscription_end=new_end)
-
 
 async def get_all_users(
     session: AsyncSession, limit: int | None = None, offset: int = 0
@@ -90,15 +85,12 @@ async def get_all_users(
     result = await session.execute(stmt)
     return result.scalars().all()
 
-
 async def get_user_count(session: AsyncSession) -> int:
     stmt = select(func.count(User.id)).where(User.is_deleted == False)
     result = await session.execute(stmt)
     return result.scalar_one()
 
-
 async def get_active_subscriptions_count(session: AsyncSession) -> int:
-    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
     now = now_utc()
     stmt = select(func.count(User.id)).where(
         User.subscription_end > now,
@@ -107,9 +99,7 @@ async def get_active_subscriptions_count(session: AsyncSession) -> int:
     result = await session.execute(stmt)
     return result.scalar_one()
 
-
 async def get_new_users_count_24h(session: AsyncSession) -> int:
-    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
     now = now_utc()
     stmt = select(func.count(User.id)).where(
         User.created_at > now - timedelta(hours=24),
@@ -117,7 +107,6 @@ async def get_new_users_count_24h(session: AsyncSession) -> int:
     )
     result = await session.execute(stmt)
     return result.scalar_one()
-
 
 async def get_users_paginated(
     session: AsyncSession, page: int = 1, per_page: int = 10
@@ -131,7 +120,6 @@ async def get_users_paginated(
         .limit(per_page)
     )
     return result.scalars().all()
-
 
 async def get_users_paginated_with_profiles(
     session: AsyncSession, page: int = 1, per_page: int = 10
@@ -148,9 +136,7 @@ async def get_users_paginated_with_profiles(
     result = await session.execute(stmt)
     return result.scalars().unique().all()
 
-
 async def get_active_users(session: AsyncSession) -> list[User]:
-    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
     now = now_utc()
     result = await session.execute(
         select(User).where(
@@ -161,7 +147,6 @@ async def get_active_users(session: AsyncSession) -> list[User]:
         )
     )
     return result.scalars().all()
-
 
 async def get_user_referrals(
     session: AsyncSession, telegram_id: int
@@ -177,15 +162,9 @@ async def get_user_referrals(
     result = await session.execute(stmt)
     return result.scalars().all()
 
-
 async def get_user_with_referrals(
     session: AsyncSession, telegram_id: int
 ) -> tuple[Optional[User], list[User]]:
-    """
-    🔥 ИСПРАВЛЕНО MEDIUM #6: Использует selectinload(User.referrals)
-    вместо отдельного запроса get_user_referrals.
-    Возвращаем кортеж (User, referrals_list) для совместимости.
-    """
     stmt = (
         select(User)
         .options(
@@ -201,14 +180,12 @@ async def get_user_with_referrals(
     user = result.scalar_one_or_none()
     referrals = []
     if user:
-        # Фильтруем is_deleted == False и сортируем (relationship загружает всех)
         referrals = sorted(
             [r for r in user.referrals if not r.is_deleted],
             key=lambda r: r.created_at,
             reverse=True
         )
     return user, referrals
-
 
 async def mark_user_bot_blocked(
     session: AsyncSession, telegram_id: int
@@ -217,7 +194,6 @@ async def mark_user_bot_blocked(
         update(User).where(User.telegram_id == telegram_id).values(is_bot_blocked=True)
     )
     await session.flush()
-
 
 async def count_users_with_tariff(
     session: AsyncSession, tariff_id: int
