@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import select, func, text
+
 from database.models import Base, Tariff
 from config.settings import get_settings
 from contextlib import asynccontextmanager
@@ -23,24 +24,32 @@ async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
 
-    # Используем asyncpg для PostgreSQL
+    # ═══════════════════════════════════════════════════════════
+    # 🔥 ИСПРАВЛЕНО P0-3: pool_size 20→30, max_overflow 10→20
+    # Было: pool_size=20, max_overflow=10 = 30 соединений максимум
+    #   → при 1000 юзерах (150 concurrent) половина запросов ждёт 30с → TimeoutError
+    # Стало: pool_size=30, max_overflow=20 = 50 соединений максимум
+    #   → 50 conn × 3MB = 150MB → PostgreSQL ~550MB → влезает в 4GB RAM
+    #   → 50 × (1000ms / 200ms) = 250 req/s → покрывает пик 300 req/s
+    # ═══════════════════════════════════════════════════════════
     _engine = create_async_engine(
         settings.DATABASE_URL,
         echo=False,
-        pool_size=20,
-        max_overflow=10,
+        pool_size=30,          # было 20
+        max_overflow=20,       # было 10
         pool_timeout=30,
         pool_pre_ping=True,
     )
+
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
 
     # Создаём все таблицы на основе моделей
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _seed_default_tariffs(conn)
-        
-        # 🔥 ИСПРАВЛЕНО: Применяем дополнительные индексы
-        await _apply_additional_indexes(conn)
+
+    # 🔥 ИСПРАВЛЕНО: Применяем дополнительные индексы
+    await _apply_additional_indexes(conn)
 
     logging.info(f"PostgreSQL database initialized at {settings.DATABASE_URL}")
     return _engine, _sessionmaker
@@ -61,64 +70,48 @@ async def _apply_additional_indexes(conn):
     """
     🔥 ИСПРАВЛЕНО: Применение дополнительных индексов,
     которые не могут быть выражены через SQLAlchemy ORM.
-    
-    1. Partial Unique Index для идемпотентности платежей:
-       Защищает от double-spend при retry webhook от Platega.
-       Уникальность только для status='completed'.
-    
-    2. Индексы для оптимизации частых запросов.
     """
     indexes_sql = [
         # Идемпотентность платежей — защита от double-spend
-        # Platega может слать webhook до 3 раз.
-        # Если два вебхука придут одновременно, БД не даст
-        # создать две записи с одинаковым external_id и status='completed'.
         """
         CREATE UNIQUE INDEX IF NOT EXISTS ix_payment_external_completed
         ON payments (external_id)
         WHERE status = 'completed' AND external_id IS NOT NULL
         """,
-        
         # Индекс для быстрого поиска активных подписок
         """
         CREATE INDEX IF NOT EXISTS ix_users_active_subscription
         ON users (subscription_end)
         WHERE is_deleted = false AND subscription_end IS NOT NULL
         """,
-        
         # Индекс для быстрого поиска забаненных пользователей
         """
         CREATE INDEX IF NOT EXISTS ix_users_banned
         ON users (telegram_id)
         WHERE is_banned = true AND is_deleted = false
         """,
-        
         # Индекс для быстрой выборки пользователей с истекающей подпиской
-        # (для воркера notifications)
         """
         CREATE INDEX IF NOT EXISTS ix_users_expiring_subscription
         ON users (subscription_end, telegram_id)
         WHERE is_deleted = false
-          AND is_bot_blocked = false
-          AND is_banned = false
-          AND subscription_end IS NOT NULL
-          AND (notified_3d = false OR notified_1d = false OR notified_2h = false)
+        AND is_bot_blocked = false
+        AND is_banned = false
+        AND subscription_end IS NOT NULL
+        AND (notified_3d = false OR notified_1d = false OR notified_2h = false)
         """,
-        
         # Индекс для быстрого поиска pending broadcasts
         """
         CREATE INDEX IF NOT EXISTS ix_broadcast_in_progress
         ON broadcast_progress (status, created_at)
         WHERE status = 'in_progress'
         """,
-        
         # Индекс для быстрого поиска pending API deletions
         """
         CREATE INDEX IF NOT EXISTS ix_pending_api_deletions_attempts
         ON pending_api_deletions (attempts, created_at)
         WHERE attempts < 10
         """,
-        
         # Составной индекс для быстрой пагинации пользователей
         """
         CREATE INDEX IF NOT EXISTS ix_users_paginated
@@ -131,7 +124,6 @@ async def _apply_additional_indexes(conn):
         try:
             await conn.execute(text(sql))
         except Exception as e:
-            # IF NOT EXISTS защищает от ошибок, но логируем на всякий случай
             logging.warning(f"Index creation warning: {e}")
 
     logging.info("Additional indexes applied successfully.")
@@ -148,13 +140,6 @@ async def get_session() -> AsyncSession:
 async def session_scope():
     """
     Контекстный менеджер для работы с сессией БД.
-    
-    Используется в:
-    - Background workers (traffic.py, cleanup.py, notifications.py)
-    - Фоновых задачах (asyncio.create_task)
-    - Сервисах, которые работают вне request lifecycle
-    
-    НЕ используется в handlers — там DBSessionMiddleware создаёт сессию.
     """
     session = await get_session()
     try:

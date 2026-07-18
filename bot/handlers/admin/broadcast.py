@@ -1,5 +1,6 @@
 import asyncio
 import logging
+
 from aiogram import Router, F
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
@@ -30,8 +31,11 @@ _broadcast_stop_events: dict[int, asyncio.Event] = {}
 _broadcast_in_progress: set[int] = set()
 
 
-# 🔥 MUST FIX #8: Rate Limiter снижен до 20 msg/s
-# Telegram limit ~30 msg/s. Запас 10 msg/s на фоновые воркеры (notifications).
+# ═══════════════════════════════════════════════════════════
+# 🔥 ИСПРАВЛЕНО P0-1: Рекурсия заменена на while True
+# Было: return await self.acquire() — RecursionError при 1000+ юзерах
+# Стало: while True + sleep ВНЕ lock — другие запросы не блокируются
+# ═══════════════════════════════════════════════════════════
 class BroadcastRateLimiter:
     def __init__(self, rate: float = 20.0):
         self.rate = rate
@@ -40,15 +44,19 @@ class BroadcastRateLimiter:
         self._lock = asyncio.Lock()
 
     async def acquire(self):
-        async with self._lock:
-            now = asyncio.get_event_loop().time()
-            elapsed = now - self.last_refill
-            self.tokens = min(self.rate, self.tokens + elapsed * self.rate)
-            self.last_refill = now
-            if self.tokens < 1.0:
-                await asyncio.sleep(1.0 / self.rate)
-                return await self.acquire()
-            self.tokens -= 1.0
+        while True:
+            async with self._lock:
+                now = asyncio.get_event_loop().time()
+                elapsed = now - self.last_refill
+                self.tokens = min(self.rate, self.tokens + elapsed * self.rate)
+                self.last_refill = now
+
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+
+            # Sleep ВНЕ lock — другие acquire() могут проходить
+            await asyncio.sleep(1.0 / self.rate)
 
 
 _broadcast_limiter = BroadcastRateLimiter(rate=20.0)
@@ -74,6 +82,7 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     await state.clear()
     try:
         await callback.message.edit_text(
@@ -81,6 +90,7 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
         )
     except TelegramBadRequest as e:
         logger.debug(f"start_broadcast edit_text failed: {e}")
+
     await state.set_state(AdminStates.entering_broadcast_message)
 
 
@@ -100,6 +110,7 @@ async def process_broadcast_message(message: Message, state: FSMContext):
 
     media_id = None
     content_type = message.content_type
+
     if message.photo:
         media_id = message.photo[-1].file_id
     elif message.document:
@@ -126,6 +137,7 @@ async def process_broadcast_message(message: Message, state: FSMContext):
                 message.bot, message.chat.id, preview,
                 get_broadcast_confirm_keyboard(), parse_mode="HTML",
             )
+
         await state.update_data(broadcast_text=broadcast_text, media_id=media_id, content_type=content_type)
         await state.set_state(AdminStates.confirming_broadcast)
     except Exception as e:
@@ -173,6 +185,7 @@ async def _get_next_batch(session: AsyncSession, audience: str, last_id: int, li
         User.is_deleted == False,
         User.is_bot_blocked == False
     )
+
     if audience == "active":
         current_time = now_utc()
         stmt = stmt.where(User.subscription_end > current_time, User.is_banned == False)
@@ -200,6 +213,7 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
         progress = await session.get(BroadcastProgress, progress_id)
         if not progress or progress.status != "in_progress":
             return
+
         admin_id = progress.admin_id
         stop_event = _get_stop_event(admin_id)
         stop_event.clear()
@@ -223,8 +237,9 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
 
             async with session_scope() as session:
                 batch = await _get_next_batch(session, target_audience, last_id)
-                if not batch:
-                    break
+
+            if not batch:
+                break
 
             for uid in batch:
                 if stop_event and stop_event.is_set():
@@ -257,7 +272,6 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
                     progress.success_count += local_success
                     progress.fail_count += local_fail
                     await session.commit()
-
             local_success = 0
             local_fail = 0
 
@@ -284,8 +298,9 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
 
         if admin_id:
             _broadcast_in_progress.discard(admin_id)
-            # 🔥 ИСПРАВЛЕНО #10: Удаляем stop_event из словаря
-            _cleanup_stop_event(admin_id)
+
+        # 🔥 ИСПРАВЛЕНО #10: Удаляем stop_event из словаря
+        _cleanup_stop_event(admin_id)
 
         if final_progress and admin_id:
             try:
@@ -337,11 +352,9 @@ async def resume_pending_broadcasts(bot):
                     continue
 
                 logger.info(f"Resuming interrupted broadcast ID {p.id} for admin {p.admin_id}")
-
                 # 🔥 ИСПРАВЛЕНО #7: Добавляем admin_id в set ДО запуска задачи
                 _broadcast_in_progress.add(p.admin_id)
                 asyncio.create_task(_send_broadcast_to_users_with_resume(bot, p.id))
-
     except Exception as e:
         logger.error(f"Failed to resume broadcasts: {e}", exc_info=True)
 
@@ -375,7 +388,6 @@ async def _start_broadcast_process(callback: CallbackQuery, state: FSMContext, s
             User.subscription_end > current_time,
             User.is_banned == False
         )
-
     result = await session.execute(count_stmt)
     total_count = result.scalar_one()
 

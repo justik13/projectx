@@ -44,23 +44,19 @@ class PaymentService:
                 result = await session.execute(stmt)
 
                 if result.rowcount == 0:
-                    # 🔥 ИСПРАВЛЕНО P0-1: Проверяем ТЕКУЩИЙ статус платежа
                     current_payment = await session.get(Payment, payment_id)
                     if current_payment and current_payment.status == 'completed':
-                        # Платёж уже был обработан (идемпотентность)
                         await savepoint.commit()
                         logger.info(
                             f"Payment {payment_id} already completed (idempotent)"
                         )
                         return True, "already_processed"
                     elif current_payment and current_payment.status == 'cancelled':
-                        # Реальный сценарий paid_after_cancel
                         await savepoint.commit()
                         await _alert_paid_after_cancel(session, payment_id)
                         await _notify_client_paid_after_cancel(session, payment_id)
                         return True, "paid_after_cancel"
                     else:
-                        # Неизвестный статус или платёж не найден
                         await savepoint.rollback()
                         return False, "error"
 
@@ -94,7 +90,6 @@ class PaymentService:
                         new_tariff_id=tariff.id,
                     )
                 except ValueError as e:
-                    # 🔥 ИСПРАВЛЕНО P0-3: TOCTOU — превышен лимит устройств
                     logger.error(
                         f"Failed to extend subscription for payment "
                         f"{payment_id}: {e}",
@@ -170,7 +165,6 @@ class PaymentService:
     ) -> tuple[bool, str]:
         """
         🔥 ИСПРАВЛЕНО P0-4: Принудительная выдача подписки по cancelled платежу.
-        Теперь вызывает ReferralService.process_bonus для корректной работы рефералки.
         """
         try:
             async with session.begin_nested() as savepoint:
@@ -190,14 +184,12 @@ class PaymentService:
                     .where(Payment.id == payment_id)
                 )
                 payment = result.scalar_one_or_none()
-
                 if not payment:
                     await savepoint.rollback()
                     return False, "Платёж не найден"
 
                 tariff = payment.tariff
                 user = payment.user
-
                 if not tariff or not user:
                     await savepoint.rollback()
                     return False, "Нет тарифа или пользователя"
@@ -220,7 +212,6 @@ class PaymentService:
                     await savepoint.rollback()
                     return False, f"Ошибка продления: {e}"
 
-                # 🔥 ИСПРАВЛЕНО P0-4: Вызываем реферальную программу
                 payments = await get_user_payments(session, user.id)
                 successful_payments = [
                     p for p in payments if p.status == 'completed'
@@ -273,7 +264,6 @@ class PaymentService:
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
         settings = get_settings()
-
         payment = await create_payment(
             session=session, user_id=user_id, tariff_id=tariff_id,
             amount=int(amount), currency="RUB",
@@ -307,11 +297,12 @@ class PaymentService:
                 logger.error(
                     f"Failed to delete phantom payment {payment.id}: {delete_error}"
                 )
-                payment.status = "failed"
-                try:
-                    await session.flush()
-                except Exception:
-                    pass
+
+            payment.status = "failed"
+            try:
+                await session.flush()
+            except Exception:
+                pass
 
             try:
                 await AuditService.log_action(
@@ -326,12 +317,12 @@ class PaymentService:
                 logger.error(
                     f"Failed to log payment failure to audit: {e}"
                 )
-
             return None, None
 
         payment.external_id = transaction.get("transactionId")
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get("paymentMethod", "SBPQR")
+
         return payment, None
 
     @staticmethod
@@ -465,7 +456,6 @@ class PaymentService:
             if user:
                 from database.repositories.profiles_repo import get_user_profiles
                 from database.repositories.servers_repo import get_server_by_id
-                from services.amnezia_client import AmneziaClient
 
                 current_time = now_utc()
                 user.subscription_end = current_time
@@ -477,33 +467,23 @@ class PaymentService:
                         from database.repositories.users_repo import get_user_by_telegram_id
                         referrer = await get_user_by_telegram_id(session, user.referred_by)
                         if referrer:
-                            # Определяем, был ли это первый платёж
                             payments = await get_user_payments(session, user.id)
                             successful_payments = [
                                 p for p in payments if p.status == 'completed'
                             ]
                             is_first_payment = len(successful_payments) <= 1
-
                             tariff = payment.tariff
                             if tariff and tariff.duration_days >= 30:
                                 if is_first_payment:
-                                    # Откатываем +5 дней у реферала и +3 дня у пригласителя
                                     bonus_referral = 5
                                     bonus_referrer = 3
-
-                                    # Откат у реферала (покупателя)
                                     if user.referral_days and user.referral_days >= bonus_referral:
                                         user.referral_days -= bonus_referral
-
-                                    # Откат у пригласителя
                                     if referrer.referral_days and referrer.referral_days >= bonus_referrer:
                                         referrer.referral_days -= bonus_referrer
-
-                                    # Откат дней подписки у пригласителя
                                     if referrer.subscription_end and referrer.subscription_end > current_time:
                                         from datetime import timedelta
                                         referrer.subscription_end = referrer.subscription_end - timedelta(days=bonus_referrer)
-
                                     logger.info(
                                         f"Chargeback: rolled back referral bonuses "
                                         f"for user {user.telegram_id} and referrer {referrer.telegram_id}"
@@ -515,7 +495,6 @@ class PaymentService:
                         )
 
                 profiles = await get_user_profiles(session, user.id)
-
                 if profiles:
                     profile_ids = [p.id for p in profiles]
                     await session.execute(
@@ -545,50 +524,31 @@ class PaymentService:
                                 profile.id, e,
                             )
 
+                    # ═══════════════════════════════════════════════════════════
+                    # 🔥 ИСПРАВЛЕНО P1-6: HTTP вынесен в asyncio.create_task
+                    # Было:
+                    #   results = await asyncio.gather(*[_disable_peer(...)])  # ← БЛОКИРУЕТ!
+                    # Стало:
+                    #   asyncio.create_task(_disable_peers_background(...))  # ← В ФОНЕ!
+                    #   → Webhook сразу возвращает 200 OK Platega (в пределах 60s timeout)
+                    #   → Устройства отключаются параллельно в фоновой задаче
+                    # ═══════════════════════════════════════════════════════════
                     if tasks_info:
-                        sem = asyncio.Semaphore(20)
-
-                        async def _disable_peer(info):
-                            async with sem:
-                                api = AmneziaClient(
-                                    info['api_url'], info['api_key']
-                                )
-                                try:
-                                    return await api.update_client(
-                                        client_id=info['peer_id'],
-                                        status="disabled",
-                                    )
-                                except Exception as e:
-                                    logger.warning(
-                                        "Chargeback: failed to disable "
-                                        "profile %s: %s",
-                                        info['profile_id'], e,
-                                    )
-                                    return False
-
-                        results = await asyncio.gather(
-                            *[_disable_peer(info) for info in tasks_info],
-                            return_exceptions=True,
-                        )
-                        api_errors = [
-                            r for r in results
-                            if isinstance(r, Exception) or r is False
-                        ]
-                        if api_errors:
-                            logger.warning(
-                                "Chargeback: %d/%d API calls failed for "
-                                "user %s",
-                                len(api_errors), len(tasks_info),
+                        asyncio.create_task(
+                            _disable_peers_background(
+                                tasks_info,
                                 user.telegram_id,
+                                payment.id,
                             )
+                        )
 
-                invalidate_user_cache(user.telegram_id)
-                logger.warning(
-                    "CHARGEBACK processed: user %s, payment %s. "
-                    "Access revoked.",
-                    user.telegram_id, payment.id,
-                )
-
+            invalidate_user_cache(user.telegram_id)
+            logger.warning(
+                "CHARGEBACK processed: user %s, payment %s. "
+                "Access revoked (API disable in background).",
+                user.telegram_id if user else "unknown",
+                payment.id,
+            )
             logger.warning(f"Chargeback for payment {payment.id}")
 
             try:
@@ -618,8 +578,6 @@ class PaymentService:
     ) -> tuple[bool, str]:
         """
         🔥 ИСПРАВЛЕНО: Возвращает (success, result_code).
-        Для cancelled теперь идёт в Platega API.
-        result_code: "success" | "already_processed" | "paid_after_cancel" | "cancelled" | "pending" | "api_error" | "not_found"
         """
         payment = await get_payment_by_id(session, payment_id)
         if not payment or not payment.external_id:
@@ -633,7 +591,6 @@ class PaymentService:
 
         client = PlategaClient()
         status_data = await client.check_status(payment.external_id)
-
         if not status_data:
             return False, "api_error"
 
@@ -665,12 +622,64 @@ class PaymentService:
         return False, "pending"
 
 
+# ═══════════════════════════════════════════════════════════
+# 🔥 ИСПРАВЛЕНО P1-6: Фоновая задача отключения устройств при chargeback
+# Запускается через asyncio.create_task, не блокирует webhook
+# ═══════════════════════════════════════════════════════════
+async def _disable_peers_background(
+    tasks_info: list, telegram_id: int, payment_id: int
+):
+    """
+    Отключает устройства пользователя в Amnezia API (фоновая задача).
+    Используется при chargeback — webhook отвечает сразу, а устройства
+    отключаются асинхронно.
+    """
+    from services.amnezia_client import AmneziaClient
+
+    sem = asyncio.Semaphore(20)
+
+    async def _disable_peer(info):
+        async with sem:
+            api = AmneziaClient(info['api_url'], info['api_key'])
+            try:
+                return await api.update_client(
+                    client_id=info['peer_id'],
+                    status="disabled",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Chargeback background: failed to disable "
+                    "profile %s: %s",
+                    info['profile_id'], e,
+                )
+                return False
+
+    results = await asyncio.gather(
+        *[_disable_peer(info) for info in tasks_info],
+        return_exceptions=True,
+    )
+    api_errors = [
+        r for r in results
+        if isinstance(r, Exception) or r is False
+    ]
+    if api_errors:
+        logger.warning(
+            "Chargeback background: %d/%d API calls failed for user %s",
+            len(api_errors), len(tasks_info), telegram_id,
+        )
+    else:
+        logger.info(
+            "Chargeback background: all %d peers disabled for user %s "
+            "(payment %s)",
+            len(tasks_info), telegram_id, payment_id,
+        )
+
+
 async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
     """🔥 УЛУЧШЕНО: Алерт админам с кнопками быстрого действия + дедупликация"""
     global _alerted_paid_after_cancel
-
     if payment_id in _alerted_paid_after_cancel:
         return
     _alerted_paid_after_cancel.add(payment_id)
@@ -786,7 +795,6 @@ async def _notify_client_paid_after_cancel(
     🔥 НОВОЕ: Отправляет клиенту заботливое + техническое уведомление.
     """
     global _notified_paid_after_cancel
-
     if payment_id in _notified_paid_after_cancel:
         return
     _notified_paid_after_cancel.add(payment_id)
@@ -941,7 +949,7 @@ async def _send_chargeback_alert(
         f"💰 <b>Сумма:</b> <b>{payment.amount} {payment.currency}</b>\n"
         f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Доступ отозван. Все устройства отключены.\n"
+        f"<i>Доступ отозван. Все устройства отключаются в фоне.\n"
         f"Реферальные бонусы откатаны.</i>"
     )
 
