@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# 🗑️  ProjectX Bot — Safe Uninstaller (v2.1 PostgreSQL)
+# 🗑️  ProjectX Bot — Safe Uninstaller (v2.2 Hardened)
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
@@ -50,6 +50,11 @@ if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "[not set]" ]]; then
     warn "Не удалось получить путь из systemd, используется директория по умолчанию: $PROJECT_DIR"
 fi
 
+# 🔥 ИСПРАВЛЕНО: Раскрываем symlink'и в реальный путь для защиты от удаления корня (/)
+if [[ -n "$PROJECT_DIR" && "$PROJECT_DIR" != "[not set]" ]]; then
+    PROJECT_DIR=$(readlink -f "$PROJECT_DIR")
+fi
+
 if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == "/" || "$PROJECT_DIR" == "/opt" || "$PROJECT_DIR" == "/usr" || "$PROJECT_DIR" == "/root" || "$PROJECT_DIR" == "/home" || "$PROJECT_DIR" == "/etc" || "$PROJECT_DIR" == "/var" || "$PROJECT_DIR" == "/tmp" ]]; then
     error "Обнаружен небезопасный путь для удаления: '$PROJECT_DIR'. Прерывание."
 fi
@@ -79,12 +84,16 @@ case $choice in
             success "Деинсталляция отменена пользователем"
             exit 0
         fi
+
+        log "Отключение всех активных сессий PostgreSQL..."
+        # 🔥 ИСПРАВЛЕНО: Принудительно закрываем соединения, иначе DROP DATABASE упадет
+        sudo -u postgres psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='projectx_bot' AND pid <> pg_backend_pid();" > /dev/null 2>&1 || true
         
         log "Удаление базы данных PostgreSQL..."
         sudo -u postgres psql -c "DROP DATABASE IF EXISTS projectx_bot;" > /dev/null 2>&1 || warn "Не удалось удалить БД projectx_bot"
         sudo -u postgres psql -c "DROP USER IF EXISTS projectx;" > /dev/null 2>&1 || warn "Не удалось удалить пользователя projectx"
         success "База данных и пользователь PostgreSQL удалены"
-        
+
         log "Выполняется тотальное удаление данных..."
         if [[ -d "$PROJECT_DIR" ]]; then
             rm -rf "$PROJECT_DIR"
@@ -92,7 +101,7 @@ case $choice in
         else
             warn "Директория проекта не найдена по указанному пути"
         fi
-        
+
         BACKUP_DIR="/root/backups/projectx"
         if [[ -d "$BACKUP_DIR" ]]; then
             rm -rf "$BACKUP_DIR"
@@ -101,21 +110,20 @@ case $choice in
             warn "Директория бэкапов отсутствовала на сервере"
         fi
         ;;
-        
     2)
         log "Выполняется резервное архивирование перед деструктивными действиями..."
         TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
         SAFE_BACKUP_DIR="/root/projectx-backup-$TIMESTAMP"
         mkdir -p "$SAFE_BACKUP_DIR"
         success "Создана папка безопасного сохранения: $SAFE_BACKUP_DIR"
-        
+
         log "Резервное копирование базы данных PostgreSQL..."
         if sudo -u postgres pg_dump -Fc projectx_bot > "$SAFE_BACKUP_DIR/projectx_db.dump"; then
             success "База данных успешно экспортирована в $SAFE_BACKUP_DIR/projectx_db.dump"
         else
             warn "Не удалось сделать дамп БД (возможно, она уже удалена)"
         fi
-        
+
         ENV_FILE="$PROJECT_DIR/.env"
         if [[ -f "$ENV_FILE" ]]; then
             cp "$ENV_FILE" "$SAFE_BACKUP_DIR/"
@@ -123,22 +131,20 @@ case $choice in
         else
             warn "Файл конфигурации .env отсутствовал"
         fi
-        
+
         SOURCE_BACKUP="/root/backups/projectx"
         if [[ -d "$SOURCE_BACKUP" ]]; then
             cp -aP "$SOURCE_BACKUP"/* "$SAFE_BACKUP_DIR/" 2>/dev/null || true
             success "Все накопленные бэкапы перенесены в безопасную зону"
         fi
-        
+
         rm -rf "$PROJECT_DIR"
         success "Рабочая директория $PROJECT_DIR очищена. Данные сохранены в $SAFE_BACKUP_DIR"
         ;;
-        
     3)
         success "Процесс отменен. Никаких изменений не внесено."
         exit 0
         ;;
-        
     *)
         error "Выбран некорректный пункт меню. Выход."
         ;;
@@ -162,7 +168,6 @@ if [[ -f "$SERVICE_FILE" ]]; then
     rm -f "$SERVICE_FILE"
     success "Конфиг службы systemd удален: $SERVICE_FILE"
 fi
-
 systemctl daemon-reload
 success "Конфигурация Systemd успешно обновлена"
 
@@ -196,6 +201,9 @@ rm -f /var/log/projectx-*.log 2>/dev/null
 success "Временные лог-файлы очищены"
 
 if id "projectx" &>/dev/null; then
+    # 🔥 ИСПРАВЛЕНО: Убиваем зависшие процессы пользователя перед удалением
+    pkill -u projectx 2>/dev/null || true
+    sleep 1
     userdel projectx 2>/dev/null || true
     groupdel projectx 2>/dev/null || true
     success "Системный пользователь и группа projectx удалены из ОС"
