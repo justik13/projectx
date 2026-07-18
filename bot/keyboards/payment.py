@@ -2,7 +2,6 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.tariff_names import get_tariff_group_name
 
-
 def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for limit in sorted(grouped_tariffs.keys()):
@@ -11,7 +10,6 @@ def get_tariff_showcase_keyboard(grouped_tariffs: dict) -> InlineKeyboardMarkup:
     builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showcase") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -30,7 +28,6 @@ def get_tariff_duration_keyboard(tariffs: list, *, back_to: str = "payment_showc
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     tariffs_sorted = sorted(tariffs, key=lambda t: t.duration_days)
@@ -44,7 +41,6 @@ def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     builder.button(text="← Назад", callback_data="menu_subscription")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def get_change_tariff_keyboard(
     tariffs: list, current_limit: int, *, is_subscription_active: bool = False,
@@ -69,7 +65,6 @@ def get_change_tariff_keyboard(
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_payment_method_keyboard(tariff_id: int, device_limit: int | None = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⭐ Telegram Stars", callback_data=f"pay_stars:{tariff_id}")
@@ -81,7 +76,6 @@ def get_payment_method_keyboard(tariff_id: int, device_limit: int | None = None)
     builder.adjust(1)
     return builder.as_markup()
 
-
 def get_payment_success_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔌 Подключить устройство", callback_data="menu_connections")
@@ -90,12 +84,16 @@ def get_payment_success_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(1, 1, 1)
     return builder.as_markup()
 
-
-def get_sbp_payment_keyboard(payment_url: str, payment_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура для СБП платежа (без кнопки Назад)"""
+def get_sbp_payment_keyboard(payment_url: str, payment_id: int, tariff_id: int) -> InlineKeyboardMarkup:
+    """
+    Клавиатура для СБП платежа.
+    🔥 ИСПРАВЛЕНО: Кнопка "❌ Отменить" теперь ведёт на cancel_invoice,
+    чтобы корректно отменить платёж в БД и вернуть пользователя к выбору тарифа.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Открыть страницу оплаты", url=payment_url)
     builder.button(text="✅ Я оплатил (проверить)", callback_data=f"check_payment:{payment_id}")
-    builder.button(text="❌ Отменить", callback_data=f"cancel_payment:{payment_id}")
+    # 🔥 ИСПРАВЛЕНО: Используем cancel_invoice для корректной отмены и возврата
+    builder.button(text="❌ Отменить", callback_data=f"cancel_invoice:{payment_id}:{tariff_id}")
     builder.adjust(1, 1, 1)
     return builder.as_markup()

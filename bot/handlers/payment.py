@@ -7,6 +7,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from bot.keyboards import (
     get_back_button, get_payment_method_keyboard, get_tariff_showcase_keyboard,
     get_tariff_duration_keyboard, get_renew_keyboard, get_change_tariff_keyboard,
@@ -325,28 +326,28 @@ async def cancel_invoice(
         if payment.user_id != db_user.id:
             await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
             return
-        await clear_and_delete_hub(callback.bot, callback.message.chat.id)
-        if payment_id:
-            try:
-                await mark_payment_as_cancelled(session, payment_id)
-            except Exception as e:
-                logger.warning(f"Failed to cancel payment {payment_id}: {e}")
-        await state.clear()
-        tariff = await get_tariff_by_id(session, tariff_id)
-        if tariff:
-            device_limit = getattr(tariff, 'device_limit', 2)
-            tariff_name = get_tariff_display_name(device_limit)
-            text = texts.PAYMENT_CHECKOUT_TEXT.format(
-                tariff_name=tariff_name,
-                duration_days=tariff.duration_days,
-                price_rub=tariff.price_rub,
-                price_stars=tariff.price_stars,
-            )
-            await render_hub(
-                callback.bot, callback.message.chat.id,
-                text, get_payment_method_keyboard(tariff.id, device_limit)
-            )
-            return
+    await clear_and_delete_hub(callback.bot, callback.message.chat.id)
+    if payment_id:
+        try:
+            await mark_payment_as_cancelled(session, payment_id)
+        except Exception as e:
+            logger.warning(f"Failed to cancel payment {payment_id}: {e}")
+    await state.clear()
+    tariff = await get_tariff_by_id(session, tariff_id)
+    if tariff:
+        device_limit = getattr(tariff, 'device_limit', 2)
+        tariff_name = get_tariff_display_name(device_limit)
+        text = texts.PAYMENT_CHECKOUT_TEXT.format(
+            tariff_name=tariff_name,
+            duration_days=tariff.duration_days,
+            price_rub=tariff.price_rub,
+            price_stars=tariff.price_stars,
+        )
+        await render_hub(
+            callback.bot, callback.message.chat.id,
+            text, get_payment_method_keyboard(tariff.id, device_limit)
+        )
+        return
     user = await get_user_by_telegram_id(session, callback.from_user.id)
     if user and await _is_subscription_active(user):
         await _show_hub(callback, user, session)
@@ -392,7 +393,8 @@ async def pay_sbp(
         await render_hub(
             callback.bot, callback.message.chat.id,
             text,
-            get_sbp_payment_keyboard(payment.payment_url, payment.id),
+            # 🔥 ИСПРАВЛЕНО: Передаём tariff.id для кнопки "Отменить"
+            get_sbp_payment_keyboard(payment.payment_url, payment.id, tariff.id),
             parse_mode="HTML"
         )
     except Exception as e:
