@@ -1,6 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import select, func, text
-
 from database.models import Base, Tariff
 from config.settings import get_settings
 from contextlib import asynccontextmanager
@@ -19,41 +18,35 @@ DEFAULT_TARIFFS = [
     {"duration_days": 90, "device_limit": 10, "price_rub": 850, "price_stars": 850, "sort_order": 31},
 ]
 
-
 async def init_db():
     global _engine, _sessionmaker
     settings = get_settings()
-
+    
     # ═══════════════════════════════════════════════════════════
     # 🔥 ИСПРАВЛЕНО P0-3: pool_size 20→30, max_overflow 10→20
-    # Было: pool_size=20, max_overflow=10 = 30 соединений максимум
-    #   → при 1000 юзерах (150 concurrent) половина запросов ждёт 30с → TimeoutError
-    # Стало: pool_size=30, max_overflow=20 = 50 соединений максимум
-    #   → 50 conn × 3MB = 150MB → PostgreSQL ~550MB → влезает в 4GB RAM
-    #   → 50 × (1000ms / 200ms) = 250 req/s → покрывает пик 300 req/s
     # ═══════════════════════════════════════════════════════════
     _engine = create_async_engine(
         settings.DATABASE_URL,
         echo=False,
-        pool_size=30,          # было 20
-        max_overflow=20,       # было 10
+        pool_size=30,
+        max_overflow=20,
         pool_timeout=30,
         pool_pre_ping=True,
     )
-
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
 
     # Создаём все таблицы на основе моделей
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _seed_default_tariffs(conn)
-
-    # 🔥 ИСПРАВЛЕНО: Применяем дополнительные индексы
-    await _apply_additional_indexes(conn)
+        
+        # 🔥 ИСПРАВЛЕНО: Применяем дополнительные индексы ВНУТРИ живой транзакции.
+        # Ранее вызов был после выхода из async with, что приводило к InterfaceError
+        # (соединение уже закрыто и возвращено в пул) и тихому провалу из-за try/except.
+        await _apply_additional_indexes(conn)
 
     logging.info(f"PostgreSQL database initialized at {settings.DATABASE_URL}")
     return _engine, _sessionmaker
-
 
 async def _seed_default_tariffs(conn):
     """Сидирование тарифов по умолчанию"""
@@ -64,7 +57,6 @@ async def _seed_default_tariffs(conn):
                 Tariff.__table__.insert().values(**t, is_active=True)
             )
         logging.info("Default tariffs seeded successfully.")
-
 
 async def _apply_additional_indexes(conn):
     """
@@ -119,22 +111,20 @@ async def _apply_additional_indexes(conn):
         WHERE is_deleted = false
         """,
     ]
-
+    
     for sql in indexes_sql:
         try:
             await conn.execute(text(sql))
         except Exception as e:
             logging.warning(f"Index creation warning: {e}")
-
+            
     logging.info("Additional indexes applied successfully.")
-
 
 async def get_session() -> AsyncSession:
     global _sessionmaker
     if _sessionmaker is None:
         await init_db()
     return _sessionmaker()
-
 
 @asynccontextmanager
 async def session_scope():
@@ -150,7 +140,6 @@ async def session_scope():
         raise
     finally:
         await session.close()
-
 
 async def close_db():
     global _engine
