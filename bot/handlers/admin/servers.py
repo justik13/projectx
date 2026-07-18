@@ -3,6 +3,7 @@ import logging
 import math
 import re
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -49,7 +50,6 @@ async def _build_servers_list_text_and_kb(
         f"(стр. {page}/{total_pages}) · Всего: {total}\n"
     )
     builder = InlineKeyboardBuilder()
-
     if not servers:
         rendered += "<i>Серверов пока нет</i>\n"
     else:
@@ -65,7 +65,6 @@ async def _build_servers_list_text_and_kb(
         builder.button(text="⬅️", callback_data=f"admin_servers_page:{page - 1}")
     if page < total_pages:
         builder.button(text="➡️", callback_data=f"admin_servers_page:{page + 1}")
-
     builder.button(text="➕ Добавить сервер", callback_data="admin_server_add")
     builder.button(text="← В админку", callback_data="admin_menu")
     builder.adjust(1)
@@ -83,9 +82,12 @@ async def _show_servers_list(
     rendered, kb = await _build_servers_list_text_and_kb(
         servers, page, total_pages, total_servers,
     )
-    await callback.message.edit_text(
-        rendered, reply_markup=kb.as_markup(), parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            rendered, reply_markup=kb.as_markup(), parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        logger.debug(f"_show_servers_list edit_text failed: {e}")
 
 
 async def _bulk_delete_peers_from_api(
@@ -121,7 +123,6 @@ async def _bulk_delete_peers_from_api(
             f"_bulk_delete_peers_from_api: timeout after 300s "
             f"for {len(profiles_data)} peers"
         )
-
     return success, fail
 
 
@@ -173,8 +174,8 @@ async def _delete_server_background(
 
     try:
         await bot.send_message(admin_id, msg)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to send background message: {e}")
 
 
 @router.callback_query(F.data == "admin_servers")
@@ -298,7 +299,6 @@ async def process_add_server(
                 parse_mode="HTML"
             )
             return
-
         existing = await get_server_by_api_url(session, api_url)
         if existing:
             await render_hub(
@@ -311,7 +311,6 @@ async def process_add_server(
             )
             await state.clear()
             return
-
         await state.update_data(api_url=api_url, step="api_key")
         await render_hub(
             message.bot, message.chat.id,
@@ -328,8 +327,8 @@ async def process_add_server(
                 get_back_button("admin_servers")
             )
             return
-
         await state.update_data(api_key=api_key)
+
         all_data = await state.get_data()
 
         check_msg = await render_hub(
@@ -422,7 +421,6 @@ async def process_add_server(
             get_back_button("admin_servers"),
             parse_mode="HTML"
         )
-
         logger.info(
             f"Admin {message.from_user.id} added server: {server.id}"
         )
@@ -439,13 +437,16 @@ async def _show_server_card(
         status=status, protocol=server.protocol,
         api_url=server.api_url, max_clients=server.max_clients,
     )
-    await callback.message.edit_text(
-        rendered,
-        reply_markup=get_admin_server_card_keyboard(
-            server.id, server.is_active
-        ),
-        parse_mode="HTML",
-    )
+    try:
+        await callback.message.edit_text(
+            rendered,
+            reply_markup=get_admin_server_card_keyboard(
+                server.id, server.is_active
+            ),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as e:
+        logger.debug(f"_show_server_card edit_text failed: {e}")
 
 
 @router.callback_query(F.data.startswith("admin_server_card:"))
@@ -481,19 +482,16 @@ async def toggle_server(
 
     new_status = not server.is_active
     await update_server(session, server, is_active=new_status)
-
     await AuditService.log_action(
         session, callback.from_user.id, "TOGGLE_SERVER", "Server", server_id,
         "enabled" if new_status else "disabled",
     )
-
     status_text = "включен" if new_status else "выключен"
     await callback.answer(f"✅ Сервер {status_text}", show_alert=True)
     logger.info(
         f"Admin {callback.from_user.id} toggled server {server_id} "
         f"to {new_status}"
     )
-
     refreshed = await get_server_by_id(session, server_id)
     await _show_server_card(callback, session, refreshed)
 
@@ -506,7 +504,6 @@ async def request_delete_server(
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
-
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
@@ -518,10 +515,8 @@ async def request_delete_server(
     )
     profiles_count = len(result.all())
     flag = server.country_flag or "🌍"
-
     await state.update_data(delete_server_id=server_id)
     await state.set_state(AdminStates.confirming_server_delete)
-
     await callback.message.edit_text(
         texts.ADMIN_SERVER_DELETE_CONFIRM.format(
             flag=flag, name=safe(server.name), profiles_count=profiles_count,
@@ -566,7 +561,6 @@ async def confirm_delete_server(
 
     deleted_profiles = await delete_profiles_by_server_id(session, server_id)
     await delete_server(session, server)
-
     await AuditService.log_action(
         session, callback.from_user.id, "DELETE_SERVER", "Server", server_id,
         f"{server_name}: {deleted_profiles} profiles deleted",
@@ -580,7 +574,6 @@ async def confirm_delete_server(
         f"Admin {callback.from_user.id} fully deleted server {server_id} "
         f"({server_name}) with {deleted_profiles} profiles"
     )
-
     await _show_servers_list(callback, session, page=1)
 
     if profiles_data:
@@ -681,7 +674,6 @@ async def process_edit_server_flag(
         return
 
     await update_server(session, server, country_flag=new_flag)
-
     await render_hub(
         message.bot, message.chat.id,
         texts.ADMIN_SERVER_FLAG_UPDATED.format(flag=new_flag),
@@ -741,7 +733,6 @@ async def process_edit_server_name(
         return
 
     await update_server(session, server, name=new_name)
-
     await render_hub(
         message.bot, message.chat.id,
         texts.ADMIN_SERVER_RENAMED.format(name=safe(new_name)),

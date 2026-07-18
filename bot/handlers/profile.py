@@ -1,15 +1,12 @@
 import logging
-
 from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.keyboards import get_back_button, get_history_keyboard, get_profile_keyboard, get_referral_keyboard
 from bot import texts
-from config.settings import get_settings
 from database.models import User
 from database.repositories.payments_repo import get_user_payments
 from database.repositories.profiles_repo import get_user_profiles
@@ -22,7 +19,6 @@ from utils.tariff_names import get_tariff_display_name
 
 router = Router()
 logger = logging.getLogger(__name__)
-
 
 async def _render_profile(target, user: User, session: AsyncSession, *, edit: bool, back_to: str = "back_to_main_menu"):
     profiles = await get_user_profiles(session, user.id)
@@ -50,9 +46,7 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
             referrals_count=referrals_count,
             referral_days=user.referral_days,
         )
-
         kb = get_profile_keyboard(is_active=True, back_to=back_to)
-
     else:
         rendered = texts.PROFILE_TEXT_INACTIVE.format(
             name=safe(user.first_name or "Пользователь"),
@@ -61,17 +55,14 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
             referrals_count=referrals_count,
             referral_days=user.referral_days,
         )
-
         builder = InlineKeyboardBuilder()
         builder.button(text="🚀 Купить доступ", callback_data="menu_buy")
         builder.button(text="🎁 Пригласить друга", callback_data="referral")
         builder.button(text="🧾 История оплат", callback_data="user_history")
-
         if back_to == "menu_subscription":
             builder.button(text="← К подписке", callback_data="menu_subscription")
         else:
             builder.button(text="🏠 В главное меню", callback_data="back_to_main_menu")
-
         builder.adjust(1, 1, 1, 1)
         kb = builder.as_markup()
 
@@ -88,7 +79,6 @@ async def _render_profile(target, user: User, session: AsyncSession, *, edit: bo
 async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
@@ -99,7 +89,6 @@ async def hub_menu_profile(callback: CallbackQuery, state: FSMContext, db_user: 
 async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
@@ -110,13 +99,11 @@ async def back_to_profile(callback: CallbackQuery, state: FSMContext, db_user: U
 async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
 
     payments = await get_user_payments(session, db_user.id)
-
     if not payments:
         rendered = texts.HISTORY_HEADER + texts.HISTORY_EMPTY
     else:
@@ -130,11 +117,9 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
                 status = "⚠️"
             else:
                 status = "⏳"
-
             date = format_datetime(p.paid_at or p.created_at)
             currency = "⭐" if p.currency == "stars" else "₽"
             rendered += f"{status} {date} | {p.amount} {currency}\n"
-
         if len(payments) > 10:
             rendered += texts.HISTORY_LIMIT_NOTE.format(count=len(payments))
 
@@ -148,7 +133,6 @@ async def show_history(callback: CallbackQuery, state: FSMContext, db_user: User
 async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
@@ -156,13 +140,13 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
     user_with_refs, referrals = await get_user_with_referrals(session, db_user.telegram_id)
     bot_info = await callback.bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{db_user.telegram_id}"
-
     invited_count = len(referrals)
 
     try:
+        # 🔥 MUST FIX #9: Убрали get_settings().REFERRAL_BONUS_DAYS
+        # Теперь текст в texts.py сам описывает честную логику (5/3/1)
         await callback.message.edit_text(
             texts.REFERRAL_TEXT.format(
-                bonus_days=get_settings().REFERRAL_BONUS_DAYS,
                 referral_link=referral_link,
                 invited_count=invited_count,
                 bonus_total=db_user.referral_days,
@@ -177,13 +161,11 @@ async def show_referral(callback: CallbackQuery, state: FSMContext, db_user: Use
 async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_user: User | None = None, session: AsyncSession = None):
     await callback.answer()
     await state.clear()
-
     if not db_user:
         await callback.answer(texts.ERROR_USER_NOT_FOUND, show_alert=True)
         return
 
     user_with_refs, referrals = await get_user_with_referrals(session, db_user.telegram_id)
-    bonus_days = get_settings().REFERRAL_BONUS_DAYS
 
     if not referrals:
         rendered = texts.REFERRAL_LIST_EMPTY
@@ -191,11 +173,10 @@ async def show_referrals_list(callback: CallbackQuery, state: FSMContext, db_use
         rendered = texts.REFERRAL_LIST_HEADER
         for referral in referrals[:20]:
             safe_user = f"@{safe(referral.username)}" if referral.username else f"ID: {referral.telegram_id}"
-            rendered += f"• {safe_user} — {bonus_days} бонусных дней\n"
-
+            # 🔥 MUST FIX #9: Убрали хардкод "— 3 бонусных дня", так как логика динамическая
+            rendered += f"• {safe_user}\n"
         if len(referrals) > 20:
             rendered += f"\n<i>... и еще {len(referrals) - 20} рефералов</i>"
-
         rendered += texts.REFERRAL_LIST_FOOTER.format(count=len(referrals))
 
     try:

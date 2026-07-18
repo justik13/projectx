@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from datetime import datetime, timezone
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.middlewares.user_context import invalidate_user_cache
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class PaymentService:
+
     @staticmethod
     async def handle_successful_payment(
         session: AsyncSession, payment_id: int
@@ -76,9 +77,10 @@ class PaymentService:
                     await savepoint.rollback()
                     return False
 
+                # 🔥 MUST FIX #2: Фильтр по status == 'completed' вместо paid_at
                 payments = await get_user_payments(session, user.id)
                 successful_payments = [
-                    p for p in payments if p.paid_at is not None
+                    p for p in payments if p.status == 'completed'
                 ]
                 is_first_payment = len(successful_payments) == 1
 
@@ -102,7 +104,6 @@ class PaymentService:
                 ).replace(tzinfo=None)
 
                 await savepoint.commit()
-
                 invalidate_user_cache(user.telegram_id)
 
                 try:
@@ -139,6 +140,7 @@ class PaymentService:
         amount: float, telegram_id: int, bot_username: str,
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
+
         settings = get_settings()
 
         payment = await create_payment(
@@ -165,7 +167,25 @@ class PaymentService:
         )
 
         if not transaction:
-            payment.status = "failed"
+            # 🔥 СКРЫТАЯ УЯЗВИМОСТЬ #12: Удаляем фантомный платёж из БД
+            # Раньше: payment.status = "failed" оставался в БД навечно
+            # Теперь: удаляем запись, чтобы stale_payments_checker не спамил
+            try:
+                await session.execute(
+                    delete(Payment).where(Payment.id == payment.id)
+                )
+                await session.flush()
+            except Exception as delete_error:
+                logger.error(
+                    f"Failed to delete phantom payment {payment.id}: {delete_error}"
+                )
+                # Fallback: помечаем как failed
+                payment.status = "failed"
+                try:
+                    await session.flush()
+                except Exception:
+                    pass
+
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_FAILED",
@@ -179,7 +199,7 @@ class PaymentService:
                 logger.error(
                     f"Failed to log payment failure to audit: {e}"
                 )
-            return payment, None
+            return None, None
 
         payment.external_id = transaction.get("transactionId")
         payment.payment_url = transaction.get("redirect")
@@ -317,13 +337,22 @@ class PaymentService:
                 user.subscription_end = now_utc
                 user.current_tariff_id = None
 
+                # 🔥 СКРЫТАЯ УЯЗВИМОСТЬ #13: Мгновенно отключаем ВСЕ профили в БД
                 profiles = await get_user_profiles(session, user.id)
 
+                # Массовое обновление БД — не ждём воркер traffic_sync_loop
                 if profiles:
-                    # 🔥 ИСПРАВЛЕНО: Параллельное отключение через asyncio.gather
-                    tasks_info = []
+                    profile_ids = [p.id for p in profiles]
+                    await session.execute(
+                        update(VPNProfile)
+                        .where(VPNProfile.id.in_(profile_ids))
+                        .values(is_active=False)
+                    )
+                    await session.flush()
+
+                tasks_info = []
+                if profiles:
                     for profile in profiles:
-                        profile.is_active = False
                         try:
                             server = await get_server_by_id(
                                 session, profile.server_id
@@ -342,42 +371,42 @@ class PaymentService:
                                 profile.id, e,
                             )
 
-                    if tasks_info:
-                        sem = asyncio.Semaphore(20)
+                if tasks_info:
+                    sem = asyncio.Semaphore(20)
 
-                        async def _disable_peer(info):
-                            async with sem:
-                                api = AmneziaClient(
-                                    info['api_url'], info['api_key']
-                                )
-                                try:
-                                    return await api.update_client(
-                                        client_id=info['peer_id'],
-                                        status="disabled",
-                                    )
-                                except Exception as e:
-                                    logger.warning(
-                                        "Chargeback: failed to disable "
-                                        "profile %s: %s",
-                                        info['profile_id'], e,
-                                    )
-                                    return False
-
-                        results = await asyncio.gather(
-                            *[_disable_peer(info) for info in tasks_info],
-                            return_exceptions=True,
-                        )
-                        api_errors = [
-                            r for r in results
-                            if isinstance(r, Exception) or r is False
-                        ]
-                        if api_errors:
-                            logger.warning(
-                                "Chargeback: %d/%d API calls failed for "
-                                "user %s",
-                                len(api_errors), len(tasks_info),
-                                user.telegram_id,
+                    async def _disable_peer(info):
+                        async with sem:
+                            api = AmneziaClient(
+                                info['api_url'], info['api_key']
                             )
+                            try:
+                                return await api.update_client(
+                                    client_id=info['peer_id'],
+                                    status="disabled",
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "Chargeback: failed to disable "
+                                    "profile %s: %s",
+                                    info['profile_id'], e,
+                                )
+                                return False
+
+                    results = await asyncio.gather(
+                        *[_disable_peer(info) for info in tasks_info],
+                        return_exceptions=True,
+                    )
+                    api_errors = [
+                        r for r in results
+                        if isinstance(r, Exception) or r is False
+                    ]
+                    if api_errors:
+                        logger.warning(
+                            "Chargeback: %d/%d API calls failed for "
+                            "user %s",
+                            len(api_errors), len(tasks_info),
+                            user.telegram_id,
+                        )
 
                 invalidate_user_cache(user.telegram_id)
 
@@ -455,6 +484,7 @@ async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
     from services.workers.heartbeat import get_bot_ref
+
     bot = get_bot_ref()
     if bot is None:
         logger.error(

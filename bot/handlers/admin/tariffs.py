@@ -1,11 +1,11 @@
 import logging
 import math
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from bot.keyboards import get_admin_tariff_card_keyboard, get_back_button
 from bot.states import AdminStates
 from bot import texts
@@ -20,7 +20,9 @@ from utils.telegram import render_hub
 
 router = Router()
 logger = logging.getLogger(__name__)
+
 TARIFFS_PER_PAGE = 10
+
 
 async def _build_tariffs_list_text_and_kb(
     tariffs, page: int, total_pages: int, total: int,
@@ -44,6 +46,7 @@ async def _build_tariffs_list_text_and_kb(
                 ),
                 callback_data=f"admin_tariff_card:{tariff.id}",
             )
+
     if page > 1:
         builder.button(text="⬅️", callback_data=f"admin_tariffs_page:{page - 1}")
     if page < total_pages:
@@ -52,6 +55,7 @@ async def _build_tariffs_list_text_and_kb(
     builder.adjust(1)
     return rendered, builder
 
+
 async def _show_tariffs_list(callback: CallbackQuery, session: AsyncSession, page: int = 1):
     total_tariffs = await get_tariff_count(session)
     total_pages = max(1, math.ceil(total_tariffs / TARIFFS_PER_PAGE))
@@ -59,8 +63,10 @@ async def _show_tariffs_list(callback: CallbackQuery, session: AsyncSession, pag
     rendered, kb = await _build_tariffs_list_text_and_kb(tariffs, page, total_pages, total_tariffs)
     try:
         await callback.message.edit_text(rendered, reply_markup=kb.as_markup(), parse_mode="HTML")
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        # 🔥 MUST FIX #6: Логируем вместо pass
+        logger.debug(f"_show_tariffs_list edit_text failed: {e}")
+
 
 @router.callback_query(F.data == "admin_tariffs")
 async def show_tariffs_list(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -71,6 +77,7 @@ async def show_tariffs_list(callback: CallbackQuery, state: FSMContext, session:
     await _show_tariffs_list(callback, session, page=1)
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("admin_tariffs_page:"))
 async def tariffs_pagination(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
@@ -80,6 +87,7 @@ async def tariffs_pagination(callback: CallbackQuery, state: FSMContext, session
     page = int(callback.data.split(":")[1])
     await _show_tariffs_list(callback, session, page=page)
     await callback.answer()
+
 
 async def _show_tariff_card(callback: CallbackQuery, tariff):
     status = "🟢 Активен" if tariff.is_active else "🔴 Отключен"
@@ -95,8 +103,10 @@ async def _show_tariff_card(callback: CallbackQuery, tariff):
             reply_markup=get_admin_tariff_card_keyboard(tariff.id, tariff.is_active),
             parse_mode="HTML",
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        # 🔥 MUST FIX #6: Логируем вместо pass
+        logger.debug(f"_show_tariff_card edit_text failed: {e}")
+
 
 @router.callback_query(F.data.startswith("admin_tariff_card:"))
 async def show_tariff_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -111,6 +121,7 @@ async def show_tariff_card(callback: CallbackQuery, state: FSMContext, session: 
         return
     await _show_tariff_card(callback, tariff)
     await callback.answer()
+
 
 @router.callback_query(F.data.startswith("admin_tariff_toggle:"))
 async def toggle_tariff(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -133,6 +144,7 @@ async def toggle_tariff(callback: CallbackQuery, state: FSMContext, session: Asy
     refreshed = await get_tariff_by_id(session, tariff_id)
     await _show_tariff_card(callback, refreshed)
 
+
 @router.callback_query(F.data.startswith("admin_tariff_delete:"))
 async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not is_admin(callback.from_user.id):
@@ -152,10 +164,12 @@ async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext, sess
                 reply_markup=get_back_button(f"admin_tariff_card:{tariff_id}"),
                 parse_mode="HTML",
             )
-        except Exception:
-            pass
+        except TelegramBadRequest as e:
+            # 🔥 MUST FIX #6: Логируем вместо pass
+            logger.debug(f"delete_tariff_handler edit_text failed: {e}")
         await callback.answer()
         return
+
     device_limit = getattr(tariff, 'device_limit', 2)
     await delete_tariff(session, tariff)
     await AuditService.log_action(
@@ -164,6 +178,7 @@ async def delete_tariff_handler(callback: CallbackQuery, state: FSMContext, sess
     )
     await callback.answer(f"✅ Тариф ({tariff.duration_days} дн., {device_limit} устр.) удалён", show_alert=True)
     await _show_tariffs_list(callback, session, page=1)
+
 
 async def _start_edit_tariff(
     callback: CallbackQuery, state: FSMContext, field_state, prompt_text: str,
@@ -179,9 +194,11 @@ async def _start_edit_tariff(
         await callback.message.edit_text(
             prompt_text, reply_markup=get_back_button("admin_tariffs"),
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        # 🔥 MUST FIX #6: Логируем вместо pass
+        logger.debug(f"_start_edit_tariff edit_text failed: {e}")
     await callback.answer()
+
 
 async def _apply_tariff_int_edit(
     message: Message, state: FSMContext, session: AsyncSession,
@@ -205,7 +222,7 @@ async def _apply_tariff_int_edit(
     except ValueError:
         await render_hub(message.bot, message.chat.id, validator_error, get_back_button("admin_tariffs"))
         return
-    
+
     data = await state.get_data()
     tariff_id = data["tariff_id"]
     tariff = await get_tariff_by_id(session, tariff_id)
@@ -213,7 +230,7 @@ async def _apply_tariff_int_edit(
         await render_hub(message.bot, message.chat.id, texts.ERROR_TARIFF_NOT_FOUND, get_back_button("admin_tariffs"))
         await state.clear()
         return
-    
+
     old_value = getattr(tariff, field_name)
     await update_tariff(session, tariff, **{field_name: new_value})
     await AuditService.log_action(
@@ -224,11 +241,13 @@ async def _apply_tariff_int_edit(
     logger.info(f"Admin {message.from_user.id} updated tariff {tariff_id} {field_name}: {old_value} -> {new_value}")
     await state.clear()
 
+
 @router.callback_query(F.data.startswith("admin_tariff_edit_days:"))
 async def start_edit_tariff_days(callback: CallbackQuery, state: FSMContext):
     await _start_edit_tariff(
         callback, state, AdminStates.editing_tariff_days, texts.ADMIN_TARIFF_EDIT_DAYS_PROMPT,
     )
+
 
 @router.message(AdminStates.editing_tariff_days)
 async def process_edit_tariff_days(message: Message, state: FSMContext, session: AsyncSession):
@@ -239,12 +258,14 @@ async def process_edit_tariff_days(message: Message, state: FSMContext, session:
         audit_detail_fn=lambda old, new: f"days: {old} -> {new}",
     )
 
+
 @router.callback_query(F.data.startswith("admin_tariff_edit_devices:"))
 async def start_edit_tariff_devices(callback: CallbackQuery, state: FSMContext):
     await _start_edit_tariff(
         callback, state, AdminStates.editing_tariff_device_limit,
         texts.ADMIN_TARIFF_EDIT_DEVICES_PROMPT,
     )
+
 
 @router.message(AdminStates.editing_tariff_device_limit)
 async def process_edit_tariff_devices(message: Message, state: FSMContext, session: AsyncSession):
@@ -255,11 +276,13 @@ async def process_edit_tariff_devices(message: Message, state: FSMContext, sessi
         audit_detail_fn=lambda old, new: f"device_limit: {old} -> {new}",
     )
 
+
 @router.callback_query(F.data.startswith("admin_tariff_edit_rub:"))
 async def start_edit_tariff_rub(callback: CallbackQuery, state: FSMContext):
     await _start_edit_tariff(
         callback, state, AdminStates.editing_tariff_rub, texts.ADMIN_TARIFF_EDIT_RUB_PROMPT,
     )
+
 
 @router.message(AdminStates.editing_tariff_rub)
 async def process_edit_tariff_rub(message: Message, state: FSMContext, session: AsyncSession):
@@ -270,11 +293,13 @@ async def process_edit_tariff_rub(message: Message, state: FSMContext, session: 
         audit_detail_fn=lambda old, new: f"RUB: {old} -> {new}",
     )
 
+
 @router.callback_query(F.data.startswith("admin_tariff_edit_stars:"))
 async def start_edit_tariff_stars(callback: CallbackQuery, state: FSMContext):
     await _start_edit_tariff(
         callback, state, AdminStates.editing_tariff_stars, texts.ADMIN_TARIFF_EDIT_STARS_PROMPT,
     )
+
 
 @router.message(AdminStates.editing_tariff_stars)
 async def process_edit_tariff_stars(message: Message, state: FSMContext, session: AsyncSession):

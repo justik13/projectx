@@ -12,9 +12,7 @@ from bot.constants import (
 )
 
 logger = logging.getLogger("BackgroundWorker")
-
 BATCH_SIZE = 100
-
 
 async def traffic_sync_loop(shutdown_event: asyncio.Event):
     while not shutdown_event.is_set():
@@ -68,7 +66,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                 server_id = server_info['id']
                 if server_id not in api_data_by_server:
                     continue
-
                 api_clients = api_data_by_server[server_id]
                 await _process_server_traffic(server_info, api_clients)
 
@@ -86,8 +83,9 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
 
 async def _process_server_traffic(server_info, api_clients):
     """
-    🔥 ИСПРАВЛЕНО: Обрабатывает профили одного сервера батчами через stream().
-    Предотвращает OOM при 50 000+ устройств.
+    🔥 ИСПРАВЛЕНО (MUST FIX #1): Reverse Self-Healing
+    БД — единственный источник истины для is_active.
+    Если в БД is_active=True, а в API disabled — чиним API, а не БД.
     """
     server_id = server_info['id']
     server_is_active = server_info['is_active']
@@ -104,11 +102,11 @@ async def _process_server_traffic(server_info, api_clients):
             .join(User, VPNProfile.user_id == User.id)
             .where(VPNProfile.server_id == server_id)
         )
-
         result = await session.stream(stmt)
 
         updates_data = {}
         healing_tasks = []
+        reverse_healing_tasks = []  # 🔥 НОВОЕ: чиним API когда БД говорит active
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # 🔥 ИСПРАВЛЕНО: Обрабатываем по одной строке, не загружая всё в RAM
@@ -146,7 +144,11 @@ async def _process_server_traffic(server_info, api_clients):
                     (not is_active) or is_banned or is_subscription_expired
                 )
 
-                # Self-healing: отключаем в API если нужно
+                # ═══════════════════════════════════════════════════════════
+                # 🔥 MUST FIX #1: Self-Healing (оба направления)
+                # ═══════════════════════════════════════════════════════════
+
+                # Направление 1: БД говорит "отключить" → API active → отключаем API
                 if local_should_be_disabled and api_is_active:
                     if not server_is_active:
                         # Сервер выключен — только обновляем трафик
@@ -169,22 +171,35 @@ async def _process_server_traffic(server_info, api_clients):
                         'server_name': server_info['name'],
                         'telegram_id': tg_id,
                         'reason': reason,
+                        'target_status': 'disabled',
                     })
 
-                # Обновляем данные
+                # 🔥 НОВОЕ Направление 2: БД говорит "активен" → API disabled → чиним API
+                elif is_active and not local_should_be_disabled and not api_is_active:
+                    reverse_healing_tasks.append({
+                        'api_url': server_info['api_url'],
+                        'api_key': server_info['api_key'],
+                        'peer_id': peer_id,
+                        'server_name': server_info['name'],
+                        'telegram_id': tg_id,
+                        'reason': 'api_desync',
+                        'target_status': 'active',
+                    })
+
+                # Обновляем трафик и last_connected (НО НЕ is_active из API!)
                 if (
                     t_down != new_t_down or t_up != new_t_up
                     or last_conn != new_last_connected
-                    or is_active != api_is_active
                 ):
                     updates_data[p_id] = {
                         'traffic_down': new_t_down,
                         'traffic_up': new_t_up,
                         'last_connected': new_last_connected,
-                        'is_active': api_is_active,
+                        # 🔥 ИСПРАВЛЕНО: УБРАЛИ 'is_active': api_is_active
+                        # БД — источник истины, не перезаписываем из API
                     }
 
-        # Применяем обновления для этого сервера
+        # Применяем обновления трафика для этого сервера
         if updates_data:
             await _batch_update_profiles(updates_data)
             logger.info(
@@ -192,8 +207,13 @@ async def _process_server_traffic(server_info, api_clients):
                 f"на сервере {server_info['name']}"
             )
 
+        # Self-healing: отключаем в API тех, кто должен быть отключён
         if healing_tasks:
-            await _self_heal_disabled_peers(healing_tasks)
+            await _self_heal_peers(healing_tasks)
+
+        # Reverse self-healing: включаем в API тех, кто должен быть активен
+        if reverse_healing_tasks:
+            await _self_heal_peers(reverse_healing_tasks)
 
 
 async def _batch_update_profiles(updates_data: dict):
@@ -202,10 +222,10 @@ async def _batch_update_profiles(updates_data: dict):
         for i in range(0, len(items), BATCH_SIZE):
             batch = items[i:i + BATCH_SIZE]
             batch_ids = [p_id for p_id, _ in batch]
+
             has_traffic_down = any('traffic_down' in data for _, data in batch)
             has_traffic_up = any('traffic_up' in data for _, data in batch)
             has_last_connected = any('last_connected' in data for _, data in batch)
-            has_is_active = any('is_active' in data for _, data in batch)
 
             values = {}
             if has_traffic_down:
@@ -223,11 +243,6 @@ async def _batch_update_profiles(updates_data: dict):
                     *[(VPNProfile.id == p_id, data.get('last_connected', VPNProfile.last_connected)) for p_id, data in batch],
                     else_=VPNProfile.last_connected,
                 )
-            if has_is_active:
-                values['is_active'] = case(
-                    *[(VPNProfile.id == p_id, data.get('is_active', VPNProfile.is_active)) for p_id, data in batch],
-                    else_=VPNProfile.is_active,
-                )
 
             if values:
                 stmt = (
@@ -238,13 +253,20 @@ async def _batch_update_profiles(updates_data: dict):
                 await session.execute(stmt)
 
 
-async def _self_heal_disabled_peers(healing_tasks: list):
+async def _self_heal_peers(healing_tasks: list):
+    """
+    🔥 ИСПРАВЛЕНО: Универсальный self-healing для обоих направлений.
+    Может как отключать (disabled), так и включать (active) пиры в API.
+    """
     if not healing_tasks:
         return
 
     total_count = len(healing_tasks)
     if total_count > SELF_HEALING_MAX_PER_CYCLE:
         healing_tasks = healing_tasks[:SELF_HEALING_MAX_PER_CYCLE]
+
+    disabled_count = sum(1 for t in healing_tasks if t['target_status'] == 'disabled')
+    activated_count = sum(1 for t in healing_tasks if t['target_status'] == 'active')
 
     sem = asyncio.Semaphore(10)
     success_count = 0
@@ -256,10 +278,16 @@ async def _self_heal_disabled_peers(healing_tasks: list):
             client = AmneziaClient(task['api_url'], task['api_key'])
             try:
                 result = await client.update_client(
-                    client_id=task['peer_id'], status="disabled"
+                    client_id=task['peer_id'],
+                    status=task['target_status']
                 )
                 if result:
                     success_count += 1
+                    logger.info(
+                        f"Self-healing: {task['target_status']} peer "
+                        f"{task['peer_id'][:16]}... on {task['server_name']} "
+                        f"(reason: {task['reason']})"
+                    )
                 else:
                     fail_count += 1
             except Exception as e:
@@ -272,5 +300,6 @@ async def _self_heal_disabled_peers(healing_tasks: list):
 
     if success_count > 0 or fail_count > 0:
         logger.info(
-            f"Self-healing completed: {success_count} success, {fail_count} fail"
+            f"Self-healing completed: {success_count} success, {fail_count} fail "
+            f"(disabled={disabled_count}, activated={activated_count})"
         )
