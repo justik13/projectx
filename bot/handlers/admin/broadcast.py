@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from bot.keyboards import get_broadcast_confirm_keyboard, get_back_button
 from bot.keyboards.admin.broadcast import (
     get_broadcast_result_keyboard, get_broadcast_close_keyboard
@@ -24,8 +25,10 @@ from utils.telegram import render_hub, send_hub_photo
 router = Router()
 logger = logging.getLogger(__name__)
 
+# 🔥 ИСПРАВЛЕНО #10: cleanup добавлен в finally
 _broadcast_stop_events: dict[int, asyncio.Event] = {}
 _broadcast_in_progress: set[int] = set()
+
 
 # 🔥 MUST FIX #8: Rate Limiter снижен до 20 msg/s
 # Telegram limit ~30 msg/s. Запас 10 msg/s на фоновые воркеры (notifications).
@@ -47,12 +50,23 @@ class BroadcastRateLimiter:
                 return await self.acquire()
             self.tokens -= 1.0
 
+
 _broadcast_limiter = BroadcastRateLimiter(rate=20.0)
+
 
 def _get_stop_event(admin_id: int) -> asyncio.Event:
     if admin_id not in _broadcast_stop_events:
         _broadcast_stop_events[admin_id] = asyncio.Event()
     return _broadcast_stop_events[admin_id]
+
+
+def _cleanup_stop_event(admin_id: int) -> None:
+    """
+    🔥 ИСПРАВЛЕНО #10: Удаляет stop_event из словаря после завершения рассылки.
+    Предотвращает утечку памяти при 1000+ рассылок.
+    """
+    _broadcast_stop_events.pop(admin_id, None)
+
 
 @router.callback_query(F.data == "admin_broadcast")
 async def start_broadcast(callback: CallbackQuery, state: FSMContext):
@@ -69,11 +83,13 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
         logger.debug(f"start_broadcast edit_text failed: {e}")
     await state.set_state(AdminStates.entering_broadcast_message)
 
+
 @router.message(AdminStates.entering_broadcast_message)
 async def process_broadcast_message(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+
     broadcast_text = message.text or message.caption
     if not broadcast_text:
         await render_hub(
@@ -81,13 +97,16 @@ async def process_broadcast_message(message: Message, state: FSMContext):
             texts.ERROR_TEXT_OR_MEDIA, get_back_button("admin_menu")
         )
         return
+
     media_id = None
     content_type = message.content_type
     if message.photo:
         media_id = message.photo[-1].file_id
     elif message.document:
         media_id = message.document.file_id
+
     preview = texts.BROADCAST_PREVIEW.format(content_type=content_type, text=broadcast_text)
+
     try:
         if media_id and content_type == "photo":
             await send_hub_photo(
@@ -116,6 +135,7 @@ async def process_broadcast_message(message: Message, state: FSMContext):
             get_back_button("admin_menu")
         )
 
+
 async def _send_with_html(bot, uid, text, media_id, content_type, kb):
     if content_type == "photo" and media_id:
         await bot.send_photo(uid, media_id, caption=text, parse_mode="HTML", reply_markup=kb)
@@ -124,6 +144,7 @@ async def _send_with_html(bot, uid, text, media_id, content_type, kb):
     else:
         await bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
 
+
 async def _send_plain(bot, uid, text, media_id, content_type, kb):
     if content_type == "photo" and media_id:
         await bot.send_photo(uid, media_id, caption=text, reply_markup=kb)
@@ -131,6 +152,7 @@ async def _send_plain(bot, uid, text, media_id, content_type, kb):
         await bot.send_document(uid, media_id, caption=text, reply_markup=kb)
     else:
         await bot.send_message(uid, text, reply_markup=kb)
+
 
 async def _dispatch_message(bot, uid, text, media_id, content_type):
     kb = get_broadcast_close_keyboard()
@@ -143,6 +165,7 @@ async def _dispatch_message(bot, uid, text, media_id, content_type):
         else:
             raise
 
+
 async def _get_next_batch(session: AsyncSession, audience: str, last_id: int, limit: int = 50):
     """🔥 ИСПРАВЛЕНО: Получение пачки юзеров курсором из БД вместо JSON-массива"""
     stmt = select(User.telegram_id).where(
@@ -151,17 +174,18 @@ async def _get_next_batch(session: AsyncSession, audience: str, last_id: int, li
         User.is_bot_blocked == False
     )
     if audience == "active":
-        # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
         current_time = now_utc()
         stmt = stmt.where(User.subscription_end > current_time, User.is_banned == False)
+
     stmt = stmt.order_by(User.telegram_id).limit(limit)
     result = await session.execute(stmt)
     return [row[0] for row in result.all()]
 
+
 async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
     """
     🔥 ИСПРАВЛЕНО: Возобновляемая рассылка с прогрессом в БД.
-    Считает успехи и провалы инкрементально.
+    🔥 ИСПРАВЛЕНО #10: Cleanup stop_event в finally.
     """
     stop_event = None
     admin_id = None
@@ -197,11 +221,10 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
             if stop_event and stop_event.is_set():
                 break
 
-            # Получаем пачку юзеров
             async with session_scope() as session:
                 batch = await _get_next_batch(session, target_audience, last_id)
-            if not batch:
-                break
+                if not batch:
+                    break
 
             for uid in batch:
                 if stop_event and stop_event.is_set():
@@ -227,7 +250,6 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
 
                 last_id = uid
 
-            # Сохраняем прогресс в БД после каждой пачки
             async with session_scope() as session:
                 progress = await session.get(BroadcastProgress, progress_id)
                 if progress:
@@ -236,11 +258,11 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
                     progress.fail_count += local_fail
                     await session.commit()
 
-            # Сбрасываем локальные счетчики, так как они сохранены в БД
             local_success = 0
             local_fail = 0
 
     finally:
+        # 🔥 ИСПРАВЛЕНО #10: Всегда очищаем stop_event
         if stop_event:
             stop_event.clear()
 
@@ -262,6 +284,8 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
 
         if admin_id:
             _broadcast_in_progress.discard(admin_id)
+            # 🔥 ИСПРАВЛЕНО #10: Удаляем stop_event из словаря
+            _cleanup_stop_event(admin_id)
 
         if final_progress and admin_id:
             try:
@@ -284,32 +308,53 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
                     session, admin_id, "BROADCAST",
                     details=(
                         f"to {final_progress.label}: {final_progress.success_count} success, "
-                        f"{final_progress.fail_count} fail"
+                        f"{final_progress.fail_count} fail" if final_progress else "no progress"
                     ),
                 )
         except Exception as e:
             logger.error(f"Failed to log broadcast audit: {e}")
 
+
 async def resume_pending_broadcasts(bot):
-    """🔥 ИСПРАВЛЕНО: Функция для восстановления рассылок при старте бота"""
+    """
+    🔥 ИСПРАВЛЕНО #7: Восстанавливает `_broadcast_in_progress` при рестарте.
+    Предотвращает запуск дублирующих рассылок админом.
+    🔥 ИСПРАВЛЕНО #7: Дедупликация — не создаёт задачу, если она уже запущена.
+    """
     try:
         async with session_scope() as session:
             stmt = select(BroadcastProgress).where(BroadcastProgress.status == "in_progress")
             result = await session.execute(stmt)
             pending = result.scalars().all()
+
             for p in pending:
+                # 🔥 ИСПРАВЛЕНО #7: Дедупликация — если задача уже запущена, пропускаем
+                if p.admin_id in _broadcast_in_progress:
+                    logger.info(
+                        f"Broadcast ID {p.id} for admin {p.admin_id} already running, "
+                        f"skipping duplicate resume"
+                    )
+                    continue
+
                 logger.info(f"Resuming interrupted broadcast ID {p.id} for admin {p.admin_id}")
+
+                # 🔥 ИСПРАВЛЕНО #7: Добавляем admin_id в set ДО запуска задачи
+                _broadcast_in_progress.add(p.admin_id)
                 asyncio.create_task(_send_broadcast_to_users_with_resume(bot, p.id))
+
     except Exception as e:
         logger.error(f"Failed to resume broadcasts: {e}", exc_info=True)
 
+
 async def _start_broadcast_process(callback: CallbackQuery, state: FSMContext, session: AsyncSession, audience: str):
     admin_id = callback.from_user.id
+
     if admin_id in _broadcast_in_progress:
         await callback.answer("⏳ Рассылка уже идёт, дождитесь завершения", show_alert=True)
         return
 
     await callback.answer("🚀 Рассылка запущена в фоне")
+
     data = await state.get_data()
     broadcast_text = data.get("broadcast_text")
     if not broadcast_text:
@@ -320,18 +365,17 @@ async def _start_broadcast_process(callback: CallbackQuery, state: FSMContext, s
     media_id = data.get("media_id")
     content_type = data.get("content_type")
 
-    # 🔥 MUST FIX #3: OOM fix — используем func.count() вместо загрузки всех объектов
     count_stmt = select(func.count(User.id)).where(
         User.is_deleted == False,
         User.is_bot_blocked == False
     )
     if audience == "active":
-        # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
         current_time = now_utc()
         count_stmt = count_stmt.where(
             User.subscription_end > current_time,
             User.is_banned == False
         )
+
     result = await session.execute(count_stmt)
     total_count = result.scalar_one()
 
@@ -364,7 +408,9 @@ async def _start_broadcast_process(callback: CallbackQuery, state: FSMContext, s
         )
     except TelegramBadRequest as e:
         logger.debug(f"edit_text failed in _start_broadcast_process: {e}")
+
     await state.clear()
+
 
 @router.callback_query(F.data == "broadcast_send_all", AdminStates.confirming_broadcast)
 async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
@@ -373,12 +419,14 @@ async def broadcast_to_all(callback: CallbackQuery, state: FSMContext, session: 
         return
     await _start_broadcast_process(callback, state, session, "all")
 
+
 @router.callback_query(F.data == "broadcast_send_active", AdminStates.confirming_broadcast)
 async def broadcast_to_active(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await _start_broadcast_process(callback, state, session, "active")
+
 
 @router.callback_query(F.data == "broadcast_stop")
 async def stop_broadcast(callback: CallbackQuery):
@@ -390,6 +438,7 @@ async def stop_broadcast(callback: CallbackQuery):
     stop_event.set()
     await callback.answer("⏹ Рассылка останавливается...", show_alert=True)
 
+
 @router.callback_query(F.data == "broadcast_dismiss")
 async def dismiss_broadcast_result(callback: CallbackQuery):
     await callback.answer()
@@ -397,6 +446,7 @@ async def dismiss_broadcast_result(callback: CallbackQuery):
         await callback.message.delete()
     except TelegramBadRequest:
         pass
+
 
 @router.callback_query(F.data == "dismiss_broadcast")
 async def dismiss_broadcast_message(callback: CallbackQuery):

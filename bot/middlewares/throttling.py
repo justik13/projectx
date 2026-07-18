@@ -1,11 +1,10 @@
 """
 Троттлинг для предотвращения спама.
-
-🔥 ИСПРАВЛЕНО (Часть 1):
-- Global throttle применяется и к Message (не только CallbackQuery)
-- Защита от спама текстовыми сообщениями при вводе имени устройства
+🔥 ИСПРАВЛЕНО #10: Разделены ключи для Message и CallbackQuery.
+Проблема: отправка текста (имя устройства) триггерила global_throttle,
+и мгновенное нажатие кнопки "Назад" (через 0.1с) игнорировалось middleware.
+Решение: отдельные namespaces — global_msg и global_cb.
 """
-
 import logging
 from aiogram.types import CallbackQuery, Message
 from cachetools import TTLCache
@@ -32,22 +31,27 @@ class ThrottlingMiddleware:
             return await handler(event, data)
 
         # ═══════════════════════════════════════════════════════════
-        # 🔥 ИСПРАВЛЕНО: ГЛОБАЛЬНЫЙ PER-USER RATE LIMIT (0.3с)
-        # Применяется и к CallbackQuery, и к Message
+        # 🔥 ИСПРАВЛЕНО #10: РАЗДЕЛЁННЫЕ КЛЮЧИ ДЛЯ MESSAGE И CALLBACK
         # ═══════════════════════════════════════════════════════════
-        if isinstance(event, (CallbackQuery, Message)):
-            global_key = f"global:{user_id}"
-            if global_key in self._global_throttle:
-                try:
-                    if isinstance(event, CallbackQuery):
-                        await event.answer(
-                            texts.ERROR_TOO_FREQUENT, show_alert=False
-                        )
-                    # Для Message просто игнорируем (не спамим ответом)
-                except Exception:
-                    pass
-                return
-            self._global_throttle[global_key] = True
+        if isinstance(event, CallbackQuery):
+            global_key = f"global_cb:{user_id}"
+        elif isinstance(event, Message):
+            global_key = f"global_msg:{user_id}"
+        else:
+            return await handler(event, data)
+
+        if global_key in self._global_throttle:
+            try:
+                if isinstance(event, CallbackQuery):
+                    await event.answer(
+                        texts.ERROR_TOO_FREQUENT, show_alert=False
+                    )
+                # Для Message просто игнорируем (не спамим ответом)
+            except Exception:
+                pass
+            return
+
+        self._global_throttle[global_key] = True
 
         # ═══════════════════════════════════════════════════════════
         # ACTION-TYPE THROTTLING (2.0с для повторных нажатий)

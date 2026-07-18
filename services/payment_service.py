@@ -27,8 +27,9 @@ class PaymentService:
     ) -> tuple[bool, str]:
         """
         Обрабатывает успешную оплату.
-        🔥 ИЗМЕНЕНО: Возвращает (success, result_code) вместо bool.
-        result_code: "success" | "paid_after_cancel" | "error"
+        🔥 ИСПРАВЛЕНО P0-1: Идемпотентность — при rowcount==0 проверяем текущий статус.
+        Возвращает (success, result_code).
+        result_code: "success" | "already_processed" | "paid_after_cancel" | "error"
         """
         try:
             async with session.begin_nested() as savepoint:
@@ -43,11 +44,25 @@ class PaymentService:
                 result = await session.execute(stmt)
 
                 if result.rowcount == 0:
-                    await savepoint.commit()
-                    # 🔥 ИСПРАВЛЕНО: возвращаем paid_after_cancel вместо True
-                    await _alert_paid_after_cancel(session, payment_id)
-                    await _notify_client_paid_after_cancel(session, payment_id)
-                    return True, "paid_after_cancel"
+                    # 🔥 ИСПРАВЛЕНО P0-1: Проверяем ТЕКУЩИЙ статус платежа
+                    current_payment = await session.get(Payment, payment_id)
+                    if current_payment and current_payment.status == 'completed':
+                        # Платёж уже был обработан (идемпотентность)
+                        await savepoint.commit()
+                        logger.info(
+                            f"Payment {payment_id} already completed (idempotent)"
+                        )
+                        return True, "already_processed"
+                    elif current_payment and current_payment.status == 'cancelled':
+                        # Реальный сценарий paid_after_cancel
+                        await savepoint.commit()
+                        await _alert_paid_after_cancel(session, payment_id)
+                        await _notify_client_paid_after_cancel(session, payment_id)
+                        return True, "paid_after_cancel"
+                    else:
+                        # Неизвестный статус или платёж не найден
+                        await savepoint.rollback()
+                        return False, "error"
 
                 result = await session.execute(
                     select(Payment)
@@ -78,6 +93,15 @@ class PaymentService:
                         new_device_limit=new_device_limit,
                         new_tariff_id=tariff.id,
                     )
+                except ValueError as e:
+                    # 🔥 ИСПРАВЛЕНО P0-3: TOCTOU — превышен лимит устройств
+                    logger.error(
+                        f"Failed to extend subscription for payment "
+                        f"{payment_id}: {e}",
+                        exc_info=True,
+                    )
+                    await savepoint.rollback()
+                    return False, "device_limit_exceeded"
                 except Exception as e:
                     logger.error(
                         f"Failed to extend subscription for payment "
@@ -145,8 +169,8 @@ class PaymentService:
         session: AsyncSession, payment_id: int, admin_id: int
     ) -> tuple[bool, str]:
         """
-        🔥 НОВОЕ: Принудительная выдача подписки по cancelled платежу.
-        Используется админом через кнопку "Выдать подписку" в алерте.
+        🔥 ИСПРАВЛЕНО P0-4: Принудительная выдача подписки по cancelled платежу.
+        Теперь вызывает ReferralService.process_bonus для корректной работы рефералки.
         """
         try:
             async with session.begin_nested() as savepoint:
@@ -166,12 +190,14 @@ class PaymentService:
                     .where(Payment.id == payment_id)
                 )
                 payment = result.scalar_one_or_none()
+
                 if not payment:
                     await savepoint.rollback()
                     return False, "Платёж не найден"
 
                 tariff = payment.tariff
                 user = payment.user
+
                 if not tariff or not user:
                     await savepoint.rollback()
                     return False, "Нет тарифа или пользователя"
@@ -193,6 +219,28 @@ class PaymentService:
                     )
                     await savepoint.rollback()
                     return False, f"Ошибка продления: {e}"
+
+                # 🔥 ИСПРАВЛЕНО P0-4: Вызываем реферальную программу
+                payments = await get_user_payments(session, user.id)
+                successful_payments = [
+                    p for p in payments if p.status == 'completed'
+                ]
+                is_first_payment = len(successful_payments) == 1
+
+                if user.referred_by:
+                    try:
+                        await ReferralService.process_bonus(
+                            session,
+                            user.telegram_id,
+                            user.referred_by,
+                            is_first_payment=is_first_payment,
+                            duration_days=tariff.duration_days,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Referral bonus failed for manual grant "
+                            f"{payment_id}: {e}"
+                        )
 
                 await savepoint.commit()
                 invalidate_user_cache(user.telegram_id)
@@ -259,11 +307,11 @@ class PaymentService:
                 logger.error(
                     f"Failed to delete phantom payment {payment.id}: {delete_error}"
                 )
-            payment.status = "failed"
-            try:
-                await session.flush()
-            except Exception:
-                pass
+                payment.status = "failed"
+                try:
+                    await session.flush()
+                except Exception:
+                    pass
 
             try:
                 await AuditService.log_action(
@@ -278,6 +326,7 @@ class PaymentService:
                 logger.error(
                     f"Failed to log payment failure to audit: {e}"
                 )
+
             return None, None
 
         payment.external_id = transaction.get("transactionId")
@@ -373,7 +422,6 @@ class PaymentService:
                     pass
                 return False, "payload_mismatch"
 
-            # 🔥 ИЗМЕНЕНО: пробрасываем result_code из handle_successful_payment
             success, result_code = await PaymentService.handle_successful_payment(
                 session, payment.id
             )
@@ -413,6 +461,7 @@ class PaymentService:
 
             payment.status = "refunded"
             user = payment.user
+
             if user:
                 from database.repositories.profiles_repo import get_user_profiles
                 from database.repositories.servers_repo import get_server_by_id
@@ -422,7 +471,51 @@ class PaymentService:
                 user.subscription_end = current_time
                 user.current_tariff_id = None
 
+                # 🔥 ИСПРАВЛЕНО P0-2: ОТКАТ РЕФЕРАЛЬНЫХ БОНУСОВ
+                if user.referred_by:
+                    try:
+                        from database.repositories.users_repo import get_user_by_telegram_id
+                        referrer = await get_user_by_telegram_id(session, user.referred_by)
+                        if referrer:
+                            # Определяем, был ли это первый платёж
+                            payments = await get_user_payments(session, user.id)
+                            successful_payments = [
+                                p for p in payments if p.status == 'completed'
+                            ]
+                            is_first_payment = len(successful_payments) <= 1
+
+                            tariff = payment.tariff
+                            if tariff and tariff.duration_days >= 30:
+                                if is_first_payment:
+                                    # Откатываем +5 дней у реферала и +3 дня у пригласителя
+                                    bonus_referral = 5
+                                    bonus_referrer = 3
+
+                                    # Откат у реферала (покупателя)
+                                    if user.referral_days and user.referral_days >= bonus_referral:
+                                        user.referral_days -= bonus_referral
+
+                                    # Откат у пригласителя
+                                    if referrer.referral_days and referrer.referral_days >= bonus_referrer:
+                                        referrer.referral_days -= bonus_referrer
+
+                                    # Откат дней подписки у пригласителя
+                                    if referrer.subscription_end and referrer.subscription_end > current_time:
+                                        from datetime import timedelta
+                                        referrer.subscription_end = referrer.subscription_end - timedelta(days=bonus_referrer)
+
+                                    logger.info(
+                                        f"Chargeback: rolled back referral bonuses "
+                                        f"for user {user.telegram_id} and referrer {referrer.telegram_id}"
+                                    )
+                    except Exception as e:
+                        logger.error(
+                            f"Chargeback: failed to rollback referral bonuses: {e}",
+                            exc_info=True,
+                        )
+
                 profiles = await get_user_profiles(session, user.id)
+
                 if profiles:
                     profile_ids = [p.id for p in profiles]
                     await session.execute(
@@ -497,6 +590,7 @@ class PaymentService:
                 )
 
             logger.warning(f"Chargeback for payment {payment.id}")
+
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_CHARGEBACK",
@@ -525,34 +619,31 @@ class PaymentService:
         """
         🔥 ИСПРАВЛЕНО: Возвращает (success, result_code).
         Для cancelled теперь идёт в Platega API.
-        result_code: "success" | "paid_after_cancel" | "cancelled" | "pending" | "api_error" | "not_found"
+        result_code: "success" | "already_processed" | "paid_after_cancel" | "cancelled" | "pending" | "api_error" | "not_found"
         """
         payment = await get_payment_by_id(session, payment_id)
         if not payment or not payment.external_id:
             return False, "not_found"
 
-        # 🔥 ИСПРАВЛЕНО: для completed — сразу успех
         if payment.status == "completed":
             return True, "success"
 
-        # 🔥 ИСПРАВЛЕНО: для cancelled тоже идём в API (раньше возвращали False)
         if payment.status not in ("pending", "cancelled"):
             return False, "invalid_status"
 
         client = PlategaClient()
         status_data = await client.check_status(payment.external_id)
+
         if not status_data:
             return False, "api_error"
 
         status = status_data.get("status")
+
         if status == "CONFIRMED":
-            # Вызываем handle_successful_payment — он сам определит
-            # pending (выдаст подписку) или cancelled (уведомит)
             success, result_code = await PaymentService.handle_successful_payment(
                 session, payment.id
             )
             return success, result_code
-
         elif status == "CANCELED":
             if payment.status != "cancelled":
                 payment.status = "cancelled"
@@ -580,7 +671,6 @@ async def _alert_paid_after_cancel(
     """🔥 УЛУЧШЕНО: Алерт админам с кнопками быстрого действия + дедупликация"""
     global _alerted_paid_after_cancel
 
-    # Дедупликация
     if payment_id in _alerted_paid_after_cancel:
         return
     _alerted_paid_after_cancel.add(payment_id)
@@ -620,14 +710,12 @@ async def _alert_paid_after_cancel(
     username = (
         f"@{user.username}" if user and user.username else "—"
     )
-
     tariff_name = "—"
     if tariff:
         tariff_name = get_tariff_display_name(
             getattr(tariff, 'device_limit', 2)
         )
 
-    # 🔥 НОВОЕ: Кнопки быстрого действия
     builder = InlineKeyboardBuilder()
     builder.button(
         text="✅ Выдать подписку",
@@ -678,7 +766,6 @@ async def _alert_paid_after_cancel(
                 f"{admin_id}: {e}"
             )
 
-    # Аудит
     try:
         await AuditService.log_action(
             session, admin_id=0, action="PAID_AFTER_CANCEL",
@@ -697,11 +784,9 @@ async def _notify_client_paid_after_cancel(
 ) -> None:
     """
     🔥 НОВОЕ: Отправляет клиенту заботливое + техническое уведомление.
-    Текст НЕ обвиняет, содержит ID платежа и сумму, даёт чёткую инструкцию.
     """
     global _notified_paid_after_cancel
 
-    # Дедупликация
     if payment_id in _notified_paid_after_cancel:
         return
     _notified_paid_after_cancel.add(payment_id)
@@ -736,7 +821,6 @@ async def _notify_client_paid_after_cancel(
     user = payment.user
     tariff = payment.tariff
 
-    # Не отправляем забаненным
     if user.is_banned:
         logger.info(
             f"Client notification skipped: user {user.telegram_id} is banned"
@@ -745,14 +829,12 @@ async def _notify_client_paid_after_cancel(
 
     settings = get_settings()
     support_username = settings.SUPPORT_USERNAME.lstrip("@")
-
     tariff_name = "—"
     if tariff:
         tariff_name = get_tariff_display_name(
             getattr(tariff, 'device_limit', 2)
         )
 
-    # Заботливый + технический текст
     msg = (
         f"💳 <b>Мы получили вашу оплату</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -761,7 +843,7 @@ async def _notify_client_paid_after_cancel(
         f"🆔 <b>Платёж:</b> <code>{payment.id}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Ранее в боте была нажата кнопка «Отменить», "
-        f"поэтому доступ не активировался автоматически.\n\n"
+        f"поэтому доступ не активировался автоматически.\n"
         f"Напишите нам — решим за 2 минуты."
     )
 
@@ -798,7 +880,6 @@ async def _notify_client_paid_after_cancel(
             f"user {user.telegram_id}: {e}"
         )
 
-    # Аудит
     try:
         await AuditService.log_action(
             session, admin_id=0, action="CLIENT_NOTIFIED_PAID_AFTER_CANCEL",
@@ -860,7 +941,8 @@ async def _send_chargeback_alert(
         f"💰 <b>Сумма:</b> <b>{payment.amount} {payment.currency}</b>\n"
         f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Доступ отозван. Все устройства отключены.</i>"
+        f"<i>Доступ отозван. Все устройства отключены.\n"
+        f"Реферальные бонусы откатаны.</i>"
     )
 
     for admin_id in admin_ids:

@@ -2,18 +2,18 @@ import asyncio
 import logging
 from aiogram import Bot
 from datetime import timedelta
-from sqlalchemy import select
+from sqlalchemy import select, update
 from database.connection import session_scope
 from database.models import Payment
 from config.settings import get_settings
 from bot.constants import STALE_PAYMENT_THRESHOLD, WORKER_ERROR_SLEEP_INTERVAL
 from services.payment_service import PaymentService
+from services.audit_service import AuditService
 from utils.datetime_helpers import now_utc
 
 logger = logging.getLogger("BackgroundWorker")
 
 # 🔥 ИСПРАВЛЕНО HIGH: Кэш для дедупликации алертов Stale Payments
-# Хранит ID платежей, по которым уже отправлен алерт админам.
 _alerted_stale_payments: set[int] = set()
 
 
@@ -29,7 +29,6 @@ async def stale_payments_checker_loop(bot: Bot, shutdown_event: asyncio.Event):
                 pass
 
             async with session_scope() as session:
-                # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
                 current_time = now_utc()
                 threshold = current_time - timedelta(hours=1)
 
@@ -41,7 +40,7 @@ async def stale_payments_checker_loop(bot: Bot, shutdown_event: asyncio.Event):
                 result = await session.execute(stmt)
                 stale_payments = result.scalars().all()
 
-                # Проверяем статус в Platega для всех зависших (включая старые)
+                # ── Platega SBP платежи (с external_id) ──
                 for payment in stale_payments[:20]:
                     if payment.external_id and payment.payment_method == "SBPQR":
                         try:
@@ -49,20 +48,59 @@ async def stale_payments_checker_loop(bot: Bot, shutdown_event: asyncio.Event):
                         except Exception as e:
                             logger.warning(f"Failed to check Platega payment {payment.id}: {e}")
 
-                # 🔥 ИСПРАВЛЕНО HIGH: Дедупликация алертов
-                current_stale_ids = {p.id for p in stale_payments}
+                    # 🔥 ИСПРАВЛЕНО #7: Stars-платежи без external_id
+                    # Помечаем как failed после 24 часов
+                    elif payment.currency == "stars":
+                        stars_threshold = current_time - timedelta(hours=24)
+                        if payment.created_at < stars_threshold:
+                            try:
+                                await session.execute(
+                                    update(Payment)
+                                    .where(Payment.id == payment.id, Payment.status == 'pending')
+                                    .values(status='failed')
+                                )
+                                await session.flush()
+                                try:
+                                    await AuditService.log_action(
+                                        session, admin_id=0, action="STARS_PAYMENT_EXPIRED",
+                                        target_type="Payment", target_id=payment.id,
+                                        details=f"Stars payment expired after 24h (no payment received), user={payment.user_id}"
+                                    )
+                                except Exception:
+                                    pass
+                                logger.info(
+                                    f"Stars payment {payment.id} marked as failed "
+                                    f"(expired after 24h, user={payment.user_id})"
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to expire Stars payment {payment.id}: {e}")
 
-                # Удаляем из кэша те платежи, которые больше не висят (оплачены/отменены)
+                # ── Алерты админам о новых зависших платежах ──
+                # Перечитываем актуальный список pending
+                fresh_stmt = (
+                    select(Payment)
+                    .where(Payment.status == 'pending', Payment.created_at < threshold)
+                )
+                fresh_result = await session.execute(fresh_stmt)
+                fresh_stale = fresh_result.scalars().all()
+
+                current_stale_ids = {p.id for p in fresh_stale}
+
+                # Удаляем из кэша те, которые уже не pending
                 _alerted_stale_payments.intersection_update(current_stale_ids)
 
-                # Фильтруем только НОВЫЕ зависшие платежи
-                new_stale = [p for p in stale_payments if p.id not in _alerted_stale_payments]
+                # Фильтруем только НОВЫЕ
+                new_stale = [p for p in fresh_stale if p.id not in _alerted_stale_payments]
 
                 if new_stale:
                     msg = f"⚠️ <b>{len(new_stale)} НОВЫХ зависших платежей (pending > 1ч)</b>\n"
                     for p in new_stale[:10]:
                         method = p.payment_method or "Stars"
-                        msg += f"ID: <code>{p.id}</code> · User: <code>{p.user_id}</code> · {p.amount} {p.currency} · {method}\n"
+                        msg += (
+                            f"ID: <code>{p.id}</code> · "
+                            f"User: <code>{p.user_id}</code> · "
+                            f"{p.amount} {p.currency} · {method}\n"
+                        )
                     if len(new_stale) > 10:
                         msg += f"\n<i>... и ещё {len(new_stale) - 10}</i>"
 
@@ -72,7 +110,6 @@ async def stale_payments_checker_loop(bot: Bot, shutdown_event: asyncio.Event):
                         except Exception as e:
                             logger.error(f"Stale alert failed to {admin_id}: {e}")
 
-                    # Добавляем в кэш, чтобы не алертить снова в следующем цикле
                     for p in new_stale:
                         _alerted_stale_payments.add(p.id)
 
