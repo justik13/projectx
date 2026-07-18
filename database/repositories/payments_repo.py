@@ -39,7 +39,6 @@ async def get_last_payment(session: AsyncSession, user_id: int) -> Optional[Paym
 
 
 async def get_payment_by_id(session: AsyncSession, payment_id: int) -> Optional[Payment]:
-    """Получить платёж по ID с загрузкой связей"""
     from sqlalchemy.orm import selectinload
     result = await session.execute(
         select(Payment)
@@ -53,7 +52,6 @@ async def get_payment_by_id(session: AsyncSession, payment_id: int) -> Optional[
 
 
 async def mark_payment_as_cancelled(session: AsyncSession, payment_id: int) -> bool:
-    """Помечает платёж как отменённый"""
     from sqlalchemy import update
     result = await session.execute(
         update(Payment)
@@ -65,7 +63,6 @@ async def mark_payment_as_cancelled(session: AsyncSession, payment_id: int) -> b
 
 
 async def get_payment_by_id_simple(session: AsyncSession, payment_id: int) -> Optional[Payment]:
-    """Получить платёж по ID без загрузки связей (быстрее)"""
     stmt = select(Payment).where(Payment.id == payment_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()

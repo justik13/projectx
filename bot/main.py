@@ -40,12 +40,6 @@ logger = logging.getLogger(__name__)
 
 
 async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
-    """
-    Глобальный обработчик ошибок.
-    🔥 ИСПРАВЛЕНО MEDIUM #13: Утечка стектрейсов в Telegram.
-    Теперь админам отправляется ТОЛЬКО Request ID + краткое описание.
-    Полный стектрейс пишется в journalctl для последующего анализа.
-    """
     from bot.middlewares.correlation import get_current_request_id
     request_id = get_current_request_id()
     logger.critical(
@@ -102,7 +96,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
 
 
 async def setup_bot_commands(bot: Bot):
-    """Устанавливает меню команд"""
     commands = [
         BotCommand(command="start", description="🚀 Запустить бота"),
     ]
@@ -112,7 +105,6 @@ async def setup_bot_commands(bot: Bot):
 
 
 async def setup_bot() -> tuple[Bot, Dispatcher]:
-    """Создаёт и настраивает bot + dispatcher"""
     settings = get_settings()
     bot = Bot(token=settings.BOT_TOKEN)
     storage = RedisStorage.from_url(settings.REDIS_URL)
@@ -168,11 +160,6 @@ async def start_webhook_server(port: int):
 
 
 def _validate_platega_config() -> bool:
-    """
-    Проверка конфигурации Platega при старте.
-    Если Platega включена (есть merchant_id), но secret пустой —
-    webhook будет принимать ЛЮБЫЕ запросы (пустая строка == пустая строка).
-    """
     settings = get_settings()
     has_merchant = bool(settings.PLATEGA_MERCHANT_ID.strip())
     has_secret = bool(settings.PLATEGA_SECRET.strip())
@@ -196,7 +183,6 @@ def _validate_platega_config() -> bool:
 
 
 async def main():
-    """Главная функция запуска"""
     settings = get_settings()
 
     try:

@@ -37,10 +37,6 @@ class PaymentService:
     async def handle_successful_payment(
         session: AsyncSession, payment_id: int
     ) -> tuple[bool, str]:
-        """
-        Обрабатывает успешную оплату.
-        🔥 ИСПРАВЛЕНО HIGH #7: Double Bonus через Redis Lock.
-        """
         redis = await _get_redis()
         lock_key = f"lock:payment_bonus:user"
         payment_obj = await session.get(Payment, payment_id)
@@ -193,11 +189,6 @@ class PaymentService:
     async def force_grant_payment(
         session: AsyncSession, payment_id: int, admin_id: int
     ) -> tuple[bool, str]:
-        """
-        🔥 ИСПРАВЛЕНО MEDIUM #8: Double Admin Grant.
-        Принудительная выдача подписки по cancelled платежу.
-        Теперь проверяет, что платеж еще не completed.
-        """
         try:
             async with session.begin_nested() as savepoint:
                 stmt = (
@@ -617,7 +608,6 @@ class PaymentService:
     async def check_platega_payment(
         session: AsyncSession, payment_id: int
     ) -> tuple[bool, str]:
-        """Возвращает (success, result_code)."""
         payment = await get_payment_by_id(session, payment_id)
 
         if not payment or not payment.external_id:
@@ -667,7 +657,6 @@ class PaymentService:
 async def _disable_peers_background(
     tasks_info: list, telegram_id: int, payment_id: int
 ):
-    """Отключает устройства пользователя в Amnezia API (фоновая задача)."""
     from services.amnezia_client import AmneziaClient
     sem = asyncio.Semaphore(20)
 
@@ -713,7 +702,6 @@ async def _disable_peers_background(
 async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
-    """Алерт админам с кнопками быстрого действия + дедупликация"""
     global _alerted_paid_after_cancel
     if payment_id in _alerted_paid_after_cancel:
         return
@@ -830,7 +818,6 @@ async def _alert_paid_after_cancel(
 async def _notify_client_paid_after_cancel(
     session, payment_id: int
 ) -> None:
-    """Отправляет клиенту заботливое + техническое уведомление."""
     global _notified_paid_after_cancel
     if payment_id in _notified_paid_after_cancel:
         return

@@ -31,10 +31,6 @@ async def create_profile(session: AsyncSession, user_id: int, server_id: int, de
     return profile
 
 async def update_profile(session: AsyncSession, profile: VPNProfile, **kwargs) -> VPNProfile:
-    """
-    🔥 ИСПРАВЛЕНО: Жесткий Whitelist полей.
-    Игнорирует любые попытки обновить user_id, server_id, peer_id, raw_config и т.д.
-    """
     for key, value in kwargs.items():
         if key in ALLOWED_PROFILE_UPDATE_FIELDS:
             setattr(profile, key, value)
@@ -52,6 +48,5 @@ async def get_user_profiles_count(session: AsyncSession, user_id: int) -> int:
     return result.scalar_one()
 
 async def get_all_profiles_count(session: AsyncSession) -> int:
-    """Посчитать общее количество профилей (устройств)"""
     result = await session.execute(select(func.count()).select_from(VPNProfile))
     return result.scalar() or 0

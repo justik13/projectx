@@ -1,19 +1,3 @@
-"""
-ActionLockMiddleware — эксклюзивная блокировка «тяжёлых» действий.
-Предотвращает race conditions при:
-- Одновременном нажатии разных кнопок (оплата Stars + SBP)
-- Double-click на кнопку удаления + скачивания конфига
-- Параллельных админских действиях (toggle server + delete device)
-- Спаме создания устройств (add_device + select_server)
-
-Принцип работы:
-1. Проверяет callback_data на наличие в LOCKED_ACTION_PREFIXES
-2. Если действие «тяжёлое» — пытается захватить per-user asyncio.Lock
-3. Если lock уже занят — отвечает «⏳» и прерывает выполнение
-4. Если lock свободен — захватывает и вызывает handler
-
-Безопасные действия (навигация, рендер) НЕ блокируются.
-"""
 import asyncio
 import logging
 from aiogram import BaseMiddleware
@@ -46,12 +30,6 @@ LOCKED_ACTION_PREFIXES = (
 
 
 def _is_locked_action(callback_data: str) -> bool:
-    """
-    Проверяет, требует ли действие эксклюзивной блокировки.
-    Сравнивает callback_data с каждым префиксом:
-    - startswith(prefix) — для действий с параметрами (pay_stars:123)
-    - == prefix — для действий без параметров (broadcast_send_all)
-    """
     if not callback_data:
         return False
     for prefix in LOCKED_ACTION_PREFIXES:
@@ -61,16 +39,6 @@ def _is_locked_action(callback_data: str) -> bool:
 
 
 class ActionLockMiddleware(BaseMiddleware):
-    """
-    Middleware для предотвращения race conditions.
-    Для «тяжёлых» действий (создание, удаление, оплата, скачивание)
-    захватывает per-user asyncio.Lock. Если lock уже занят другим
-    действием — отвечает «⏳ Выполняется предыдущее действие...»
-    и не вызывает handler.
-
-    Для безопасных действий (навигация, рендер, выбор) — не блокирует.
-    Работает ТОЛЬКО для CallbackQuery (не для Message).
-    """
 
     async def __call__(self, handler, event, data):
         if not isinstance(event, CallbackQuery):

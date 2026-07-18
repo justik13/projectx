@@ -1,8 +1,3 @@
-"""
-Сервис управления подписками.
-🔥 ИСПРАВЛЕНО P0-3: TOCTOU проверка profiles_count в extend_subscription
-🔥 ИСПРАВЛЕНО: Защита от Circular Referral Chain при онбординге.
-"""
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.repositories.users_repo import get_user_by_telegram_id, create_user, update_user
 from database.repositories.profiles_repo import get_user_profiles, get_user_profiles_count
@@ -71,10 +66,6 @@ class SubscriptionService:
         new_device_limit: Optional[int] = None,
         new_tariff_id: Optional[int] = None,
     ) -> Optional[User]:
-        """
-        Продлевает подписку пользователя.
-        🔥 ИСПРАВЛЕНО P0-3: TOCTOU проверка profiles_count при даунгрейде.
-        """
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user:
             return None
@@ -124,10 +115,6 @@ class SubscriptionService:
 
     @staticmethod
     async def _sync_expires_to_servers(user_id: int, expires_ts: Optional[int]):
-        """
-        🔥 ИСПРАВЛЕНО (Часть 2): Открывает СВОЮ сессию внутри фоновой задачи.
-        🔥 ИСПРАВЛЕНО HIGH #4: Передает status="active" при обновлении expiresAt.
-        """
         from database.connection import session_scope
         try:
             async with session_scope() as session:
@@ -169,9 +156,6 @@ class SubscriptionService:
 
     @staticmethod
     async def get_expires_timestamp(user: User) -> Optional[int]:
-        """
-        Возвращает Unix timestamp для expiresAt или None для бессрочного доступа.
-        """
         if not user.subscription_end or user.subscription_end.year >= 2100:
             logger.info(
                 f"get_expires_timestamp: user {user.telegram_id} has permanent subscription, "

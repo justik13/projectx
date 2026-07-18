@@ -60,9 +60,6 @@ def _get_stop_event(admin_id: int) -> asyncio.Event:
     return _broadcast_stop_events[admin_id]
 
 def _cleanup_stop_event(admin_id: int) -> None:
-    """
-    🔥 ИСПРАВЛЕНО #10: Удаляет stop_event из словаря после завершения рассылки.
-    """
     _broadcast_stop_events.pop(admin_id, None)
 
 @router.callback_query(F.data == "admin_broadcast")
@@ -161,7 +158,6 @@ async def _dispatch_message(bot, uid, text, media_id, content_type):
             raise
 
 async def _get_next_batch(session: AsyncSession, audience: str, last_id: int, limit: int = 50):
-    """🔥 ИСПРАВЛЕНО: Получение пачки юзеров курсором из БД вместо JSON-массива"""
     stmt = select(User.telegram_id).where(
         User.telegram_id > last_id,
         User.is_deleted == False,
@@ -176,9 +172,6 @@ async def _get_next_batch(session: AsyncSession, audience: str, last_id: int, li
     return [row[0] for row in result.all()]
 
 async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
-    """
-    🔥 ИСПРАВЛЕНО: Возобновляемая рассылка с прогрессом в БД.
-    """
     stop_event = None
     admin_id = None
     broadcast_text = None
@@ -308,9 +301,6 @@ async def _send_broadcast_to_users_with_resume(bot, progress_id: int):
                 logger.error(f"Failed to log broadcast audit: {e}")
 
 async def resume_pending_broadcasts(bot):
-    """
-    🔥 ИСПРАВЛЕНО #7: Восстанавливает `_broadcast_in_progress` при рестарте.
-    """
     try:
         async with session_scope() as session:
             stmt = select(BroadcastProgress).where(BroadcastProgress.status == "in_progress")

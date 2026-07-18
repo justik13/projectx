@@ -1,13 +1,3 @@
-"""
-UserContextMiddleware — ЛЁГКИЙ middleware.
-Единственная задача: загрузить User из БД и положить в data['db_user'].
-
-НЕ делает:
-  - UPDATE в БД (синхронизация username)
-  - Проверку бана (это BanCheckMiddleware)
-  - Отправку сообщений
-  - Очистку кэша (cachetools делает это автоматически)
-"""
 
 from __future__ import annotations
 
@@ -32,7 +22,6 @@ _SENTINEL = object()
 
 
 def invalidate_user_cache(telegram_id: int) -> None:
-    """Вызывать после UPDATE юзера (бан, продление, смена тарифа)."""
     _user_cache.pop(telegram_id, None)
 
 

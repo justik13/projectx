@@ -58,12 +58,6 @@ USERS_PER_PAGE = 10
 # ──────────────────────────────────────────────────────────
 
 def _validate_positive_int(text: str | None) -> int | None:
-    """
-    Валидирует ввод положительного целого числа.
-    🔥 ИСПРАВЛЕНО LOW #15: DoS через Overflow (Days).
-    Добавлен верхний лимит 36500 дней (100 лет) для защиты от
-    OverflowError при арифметике дат (timedelta + datetime).
-    """
     if not text or not text.strip().isdigit():
         return None
     value = int(text.strip())
@@ -1439,10 +1433,6 @@ async def admin_unban_apply(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("admin_manual_grant:"))
 async def admin_manual_grant(callback: CallbackQuery, session: AsyncSession):
-    """
-    Админ нажимает "✅ Выдать подписку" в алерте paid_after_cancel.
-    Принудительно выдаёт подписку по cancelled платежу.
-    """
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return

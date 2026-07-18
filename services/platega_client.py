@@ -87,12 +87,6 @@ class PlategaClient:
             return None
 
     def validate_callback(self, merchant_id: str, secret: str) -> bool:
-        """
-        Валидирует callback от Platega.io.
-        🔥 ИСПРАВЛЕНО: Использует hmac.compare_digest() для защиты от timing attack.
-        Обычное сравнение через == уязвимо: злоумышленник может подобрать
-        секрет посимвольно, измеряя время ответа.
-        """
         merchant_ok = hmac.compare_digest(
             merchant_id.encode("utf-8"),
             self.merchant_id.encode("utf-8")

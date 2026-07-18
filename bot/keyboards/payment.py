@@ -85,11 +85,6 @@ def get_payment_success_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_sbp_payment_keyboard(payment_url: str, payment_id: int, tariff_id: int) -> InlineKeyboardMarkup:
-    """
-    Клавиатура для СБП платежа.
-    🔥 ИСПРАВЛЕНО: Кнопка "❌ Отменить" теперь ведёт на cancel_invoice,
-    чтобы корректно отменить платёж в БД и вернуть пользователя к выбору тарифа.
-    """
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Открыть страницу оплаты", url=payment_url)
     builder.button(text="✅ Я оплатил (проверить)", callback_data=f"check_payment:{payment_id}")

@@ -17,10 +17,6 @@ logger = logging.getLogger(__name__)
 async def _update_api_status_background(
     tasks_info: list, target_status: str, telegram_id: int
 ):
-    """
-    Фоновая задача: обновляет статус пиров в Amnezia API.
-    Запускается через asyncio.create_task(), не блокирует handler.
-    """
     sem = asyncio.Semaphore(20)
 
     async def _update_peer(info):

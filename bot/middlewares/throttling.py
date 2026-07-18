@@ -1,10 +1,3 @@
-"""
-Троттлинг для предотвращения спама.
-🔥 ИСПРАВЛЕНО #10: Разделены ключи для Message и CallbackQuery.
-Проблема: отправка текста (имя устройства) триггерила global_throttle,
-и мгновенное нажатие кнопки "Назад" (через 0.1с) игнорировалось middleware.
-Решение: отдельные namespaces — global_msg и global_cb.
-"""
 import logging
 from aiogram.types import CallbackQuery, Message
 from cachetools import TTLCache

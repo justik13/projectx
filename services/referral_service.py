@@ -1,20 +1,3 @@
-"""
-Сервис реферальных бонусов.
-
-🔥 ИСПРАВЛЕНО (Часть 3): Новая логика начисления реферальных бонусов.
-
-Правила:
-- Тариф 7 дней: рефералка ПОЛНОСТЬЮ игнорируется (ничего не начисляется)
-- Тариф >= 30 дней, ПЕРВАЯ покупка:
-  - Реферал (тот кто купил): +5 дней
-  - Пригласитель (тот кто пригласил): +3 дня
-- Тариф >= 30 дней, ПРОДЛЕНИЕ:
-  - Пригласитель: +1 день
-  - Реферал: ничего не получает
-
-Антифрод: бонусы начисляются ТОЛЬКО при успешной оплате,
-а не при регистрации по реферальной ссылке.
-"""
 
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,19 +23,6 @@ class ReferralService:
         is_first_payment: bool = False,
         duration_days: int = 0,
     ):
-        """
-        Начисляет реферальные бонусы при успешной оплате.
-        
-        Args:
-            session: SQLAlchemy async session
-            user_telegram_id: Telegram ID покупателя (реферала)
-            referrer_telegram_id: Telegram ID пригласившего
-            is_first_payment: True если это первая успешная оплата пользователя
-            duration_days: Длительность купленного тарифа в днях
-            
-        Returns:
-            None
-        """
         if duration_days < MIN_DURATION_FOR_REFERRAL:
             logger.info(
                 f"Referral bonus SKIPPED: tariff {duration_days} days "

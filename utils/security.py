@@ -4,12 +4,6 @@ import socket
 from urllib.parse import urlparse
 
 async def is_safe_url(url: str) -> bool:
-    """
-    Асинхронная проверка URL на безопасность (защита от SSRF).
-    🔥 ИСПРАВЛЕНО: Жесткое требование HTTPS для внешних сетей.
-    Так как бот и API на разных VPS, HTTP = MITM уязвимость.
-    HTTP разрешен ТОЛЬКО для localhost/127.0.0.1 (для локальных тестов).
-    """
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname

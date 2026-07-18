@@ -1,17 +1,3 @@
-"""
-Helper функции для работы с временем.
-Все временные операции используют aware datetime (с часовым поясом).
-
-Принцип работы:
-- В БД храним ВСЕГДА UTC (aware datetime с tzinfo=timezone.utc)
-- PostgreSQL TIMESTAMP WITH TIME ZONE автоматически конвертирует в UTC
-- При отображении конвертируем в МСК через to_msk()
-
-ЖЁСТКОЕ ПРАВИЛО:
-- НИКОГДА не использовать .replace(tzinfo=None)
-- НИКОГДА не использовать datetime.now() без timezone
-- ВСЕГДА использовать now_utc() или now_msk()
-"""
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -19,42 +5,14 @@ MSK_TZ = ZoneInfo("Europe/Moscow")
 
 
 def now_utc() -> datetime:
-    """
-    Текущее время в UTC (aware datetime).
-    Используется для записи в БД.
-    
-    Returns:
-        datetime: 2026-07-18 11:30:00+00:00
-    """
     return datetime.now(timezone.utc)
 
 
 def now_msk() -> datetime:
-    """
-    Текущее время в МСК (aware datetime).
-    Используется для локальных проверок (например, daily limit).
-    
-    Returns:
-        datetime: 2026-07-18 14:30:00+03:00
-    """
     return datetime.now(MSK_TZ)
 
 
 def to_msk(dt: Optional[datetime]) -> Optional[datetime]:
-    """
-    Конвертирует любой aware datetime в МСК.
-    
-    Args:
-        dt: aware datetime (с tzinfo) или None
-        
-    Returns:
-        datetime в МСК или None
-        
-    Example:
-        >>> dt = datetime(2026, 7, 18, 11, 30, tzinfo=timezone.utc)
-        >>> to_msk(dt)
-        datetime(2026, 7, 18, 14, 30, tzinfo=ZoneInfo("Europe/Moscow"))
-    """
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -64,20 +22,6 @@ def to_msk(dt: Optional[datetime]) -> Optional[datetime]:
 
 
 def format_datetime_msk(dt: Optional[datetime], format_str: str = "%d.%m.%Y %H:%M") -> str:
-    """
-    Форматирует datetime в МСК для отображения.
-    
-    Args:
-        dt: aware datetime или None
-        format_str: строка формата strftime
-        
-    Returns:
-        Отформатированная строка в МСК или "—"
-        
-    Example:
-        >>> format_datetime_msk(datetime.now(timezone.utc))
-        "18.07.2026 14:30"
-    """
     if dt is None:
         return "—"
     
@@ -86,7 +30,6 @@ def format_datetime_msk(dt: Optional[datetime], format_str: str = "%d.%m.%Y %H:%
 
 
 def format_date_msk(dt: Optional[datetime]) -> str:
-    """Короткий формат даты (только день и месяц) в МСК."""
     if dt is None:
         return "—"
     
@@ -95,15 +38,6 @@ def format_date_msk(dt: Optional[datetime]) -> str:
 
 
 def days_left_msk(dt: Optional[datetime]) -> str:
-    """
-    Форматирует оставшееся время до даты в МСК.
-    
-    Args:
-        dt: aware datetime или None
-        
-    Returns:
-        Строка вида "5 дн. 3 ч." или "—"
-    """
     if dt is None:
         return "—"
     
@@ -124,15 +58,6 @@ def days_left_msk(dt: Optional[datetime]) -> str:
 
 
 def is_expired(dt: Optional[datetime]) -> bool:
-    """
-    Проверяет, истёк ли datetime относительно текущего UTC времени.
-    
-    Args:
-        dt: aware datetime или None
-        
-    Returns:
-        True если dt < now_utc() или dt is None
-    """
     if dt is None:
         return True
     if dt.tzinfo is None:

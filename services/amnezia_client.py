@@ -73,7 +73,6 @@ def _get_circuit_breaker(api_url: str) -> CircuitBreaker:
 
 
 def cleanup_server_circuit_breakers(api_url: str) -> None:
-    """Очищает circuit breakers и rate limiters при удалении сервера."""
     api_url = api_url.rstrip("/")
     if api_url in _circuit_breakers:
         del _circuit_breakers[api_url]
@@ -327,10 +326,6 @@ class AmneziaClient:
         return (await self._request("GET", "/healthz")) is not None
 
     async def get_all_clients(self) -> Optional[List[AmneziaClientListItem]]:
-        """
-        🔥 ИСПРАВЛЕНО MEDIUM #12: Убран max_pages = 10
-        Теперь поддерживает серверы с >1000 пиров без зомбификации.
-        """
         all_clients: List[AmneziaClientListItem] = []
         page_size = 100
         page_count = 0

@@ -15,20 +15,6 @@ _LOCK_TTL = 3600.0  # Удалять locks не использовавшиеся
 
 
 async def get_real_peer_count(server: Server, force_refresh: bool = False) -> int:
-    """
-    Возвращает реальное количество пиров на сервере через API.
-    Использует кэш с TTL 5 минут для снижения нагрузки.
-    🔥 ИСПРАВЛЕНО: Добавлен параметр force_refresh для критических операций.
-    
-    Args:
-        server: Объект сервера
-        force_refresh: Если True — игнорирует кэш и всегда запрашивает API.
-                       Используется при создании устройства для точности.
-    
-    Returns:
-        int: Количество пиров.
-        -1: Если API недоступен (ошибка сети/таймаут).
-    """
     global _last_cleanup_time
     
     now = time.monotonic()
@@ -68,10 +54,6 @@ async def get_real_peer_count(server: Server, force_refresh: bool = False) -> in
 
 
 def _cleanup_old_locks(now: float):
-    """
-    Удаляет locks не использовавшиеся > 1 часа и не захваченные в данный момент.
-    🔥 ИСПРАВЛЕНО #4: Предотвращает утечку памяти.
-    """
     old_servers = [
         sid for sid, (lock, last_used) in _locks.items()
         if now - last_used > _LOCK_TTL and not lock.locked()

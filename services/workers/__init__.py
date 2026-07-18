@@ -13,19 +13,6 @@ shutdown_event = asyncio.Event()
 
 
 async def start_background_workers(bot: Bot) -> list[asyncio.Task]:
-    """
-    Запускает все background workers и возвращает список задач.
-
-    🔥 ИСПРАВЛЕНО #7: Передаём bot в heartbeat для алертов CircuitBreaker.
-    🔥 ИСПРАВЛЕНО: Убран soft_delete_cleanup_loop (мёртвый код).
-
-    Workers:
-    1. traffic_sync_loop — синхронизация трафика каждые 15 мин
-    2. cleanup_dangling_peers_loop — очистка призраков раз в 24ч
-    3. stale_payments_checker_loop — проверка зависших платежей каждый час
-    4. subscription_notifications_loop — уведомления о скором истечении каждые 30 мин
-    5. heartbeat_loop — обновление timestamp + мониторинг CB каждые 60с
-    """
     set_bot_ref(bot)
 
     tasks = [

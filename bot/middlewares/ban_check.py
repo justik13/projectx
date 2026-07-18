@@ -1,11 +1,3 @@
-"""
-BanCheckMiddleware — лёгкий middleware, который проверяет бан
-ПОСЛЕ загрузки пользователя (UserContextMiddleware) и ДО хендлера.
-Принцип: middleware не делает UPDATE, не шлёт сообщений в чат,
-а только прерывает цепочку с коротким alert.
-🔥 ИСПРАВЛЕНО: DoS через Flood Control забаненного пользователя.
-Алерты отправляются не чаще 1 раза в 5 минут через TTLCache.
-"""
 from __future__ import annotations
 import logging
 from typing import Any, Awaitable, Callable
@@ -18,10 +10,6 @@ logger = logging.getLogger(__name__)
 _ban_alert_cache: TTLCache[int, bool] = TTLCache(maxsize=10000, ttl=300.0)
 
 class BanCheckMiddleware(BaseMiddleware):
-    """
-    Перехватывает запрос от забаненного пользователя.
-    Работает только если data['db_user'] уже загружен (UserContextMiddleware отработал).
-    """
     async def __call__(
         self,
         handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],

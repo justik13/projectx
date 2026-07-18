@@ -1,8 +1,3 @@
-"""
-Webhook handlers для Плatega.io.
-🔥 ИСПРАВЛЕНО: Обработка result_code "paid_after_cancel"
-🔥 ИСПРАВЛЕНО: Missing return при неизвестном статусе (Логический байпас)
-"""
 import logging
 import uuid
 from aiohttp import web
@@ -18,7 +13,6 @@ from bot.middlewares.correlation import set_request_id
 logger = logging.getLogger(__name__)
 
 class PlategaCallbackData(BaseModel):
-    """Схема webhook callback от Плatega.io."""
     id: Optional[str] = None
     transactionId: Optional[str] = None
     status: str = Field(..., description="CONFIRMED | CANCELED | CHARGEBACKED")
@@ -38,7 +32,6 @@ class PlategaCallbackData(BaseModel):
         return self.status.upper()
 
 async def platega_webhook_handler(request: web.Request) -> web.Response:
-    """Обработчик webhook от Плatega.io"""
     request_id = uuid.uuid4().hex[:8]
     set_request_id(request_id)
     
@@ -204,11 +197,9 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
         return web.Response(status=500, text="Internal server error")
 
 async def healthcheck_handler(request: web.Request) -> web.Response:
-    """Эндпоинт для мониторинга (UptimeRobot, Healthchecks.io)"""
     return web.Response(status=200, text="OK")
 
 def setup_webhook_routes(app: web.Application):
-    """Регистрирует webhook маршруты"""
     app.router.add_post("/webhook/platega", platega_webhook_handler)
     app.router.add_get("/health", healthcheck_handler)
     logger.info("Platega webhook route registered: POST /webhook/platega")

@@ -1,13 +1,3 @@
-"""
-Парсер vpn:// URI от Amnezia API.
-Формат: base64url(4-byte big-endian original_length + zlib_compressed_JSON)
-
-Главные функции:
-- decode_vpn_uri_to_json(uri) -> dict: возвращает весь JSON как словарь
-- build_vpn_file(uri) -> str: возвращает готовый .vpn (JSON с отступами)
-- build_conf_file(uri) -> str: возвращает готовый .conf (WireGuard INI из last_config)
-- is_valid_vpn_uri(uri) -> bool: проверяет protocol_version == "2"
-"""
 
 import base64
 import json
@@ -19,7 +9,6 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 def _decode_base64url(payload: str) -> Optional[bytes]:
-    """Декодирует base64url строку в байты."""
     try:
         b64 = payload.replace("-", "+").replace("_", "/")
         padding_needed = len(b64) % 4
@@ -32,7 +21,6 @@ def _decode_base64url(payload: str) -> Optional[bytes]:
 
 
 def _decompress_amnezia_format(data: bytes) -> Optional[str]:
-    """Декомпрессирует zlib-сжатый JSON с 4-byte header."""
     if len(data) < 4:
         return None
     
@@ -57,15 +45,6 @@ def _decompress_amnezia_format(data: bytes) -> Optional[str]:
 
 
 def decode_vpn_uri_to_json(uri: str) -> Optional[dict]:
-    """
-    Декодирует vpn:// URI в JSON словарь.
-    
-    Args:
-        uri: Строка вида "vpn://..."
-    
-    Returns:
-        dict с распарсенным JSON или None при ошибке
-    """
     if not uri or not isinstance(uri, str):
         return None
     
@@ -96,10 +75,6 @@ def decode_vpn_uri_to_json(uri: str) -> Optional[dict]:
     return data
 
 def build_vpn_file(uri: str) -> Optional[str]:
-    """
-    Создаёт содержимое .vpn файла (для основного клиента Amnezia).
-    Возвращает ВЕСЬ JSON как строку с красивым форматированием (indent=2).
-    """
     data = decode_vpn_uri_to_json(uri)
     if data is None:
         return None
@@ -107,10 +82,6 @@ def build_vpn_file(uri: str) -> Optional[str]:
 
 
 def build_conf_file(uri: str) -> Optional[str]:
-    """
-    Создаёт содержимое .conf файла (для AmneziaWG).
-    Извлекает готовый WireGuard INI из awg.last_config.config.
-    """
     data = decode_vpn_uri_to_json(uri)
     if data is None:
         logger.error("build_conf_file: failed to decode vpn:// URI")
@@ -184,20 +155,6 @@ def build_conf_file(uri: str) -> Optional[str]:
 
 
 def is_valid_vpn_uri(uri: str) -> bool:
-    """
-    Проверяет валидность vpn:// URI.
-    
-    🔥 УПРОЩЕНО в соответствии с Вариантом A:
-    - Принимает ТОЛЬКО amneziawg2 (protocol_version == "2")
-    - Убрана жёсткая валидация параметров AWG 2.0 (S4, S3, Jc, Jmax, H1-H4)
-    - Полное доверие API: "Боту нужно просто отдавать то, что пришло из API"
-    
-    Args:
-        uri: Строка вида "vpn://..."
-    
-    Returns:
-        True если URI валидный и содержит AWG 2.0 конфиг, False иначе
-    """
     data = decode_vpn_uri_to_json(uri)
     if not data or not isinstance(data, dict):
         return False

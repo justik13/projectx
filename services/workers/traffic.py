@@ -91,11 +91,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
 
 
 async def _process_server_traffic(server_info, api_clients):
-    """
-    🔥 ИСПРАВЛЕНО MEDIUM #11: Убрана проверка server_is_active перед отключением.
-    Теперь бот продолжает отключать просроченных/забаненных юзеров
-    даже на выключенных серверах.
-    """
     server_id = server_info['id']
 
     async with session_scope() as session:
@@ -234,7 +229,6 @@ async def _process_server_traffic(server_info, api_clients):
 
 
 async def _send_quota_alert(telegram_id: int, server_name: str, total_bytes: int, profile_id: int):
-    """🔥 НОВОЕ: Fair Usage Policy - алерт админу при превышении 1 ТБ"""
     try:
         from services.workers.heartbeat import get_bot_ref
         bot = get_bot_ref()
@@ -282,7 +276,6 @@ async def _send_quota_alert(telegram_id: int, server_name: str, total_bytes: int
 
 
 async def _batch_update_profiles(updates_data: dict):
-    """Upsert вместо CASE-генерации."""
     async with session_scope() as session:
         items = list(updates_data.items())
         for i in range(0, len(items), BATCH_SIZE):

@@ -14,10 +14,6 @@ _last_cleanup_time: float = 0.0
 _CLEANUP_INTERVAL = 3600.0
 
 async def _safe_delete_batch(bot, chat_id: int, msg_ids: List[int]):
-    """
-    🔥 ИСПРАВЛЕНО (Этап 2): Безопасное удаление с отловом TelegramBadRequest.
-    Больше не проглатывает критические ошибки API.
-    """
     for msg_id in msg_ids:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)

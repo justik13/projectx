@@ -3,13 +3,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot import texts
 
 def get_profile_keyboard(is_active: bool = False, back_to: str = "back_to_main_menu") -> InlineKeyboardMarkup:
-    """
-    Клавиатура профиля.
-    
-    🔥 ИСПРАВЛЕНО: Добавлена контекстная кнопка "← Назад".
-    - Если пришел из подписки: back_to="menu_subscription"
-    - Иначе: back_to="back_to_main_menu"
-    """
     builder = InlineKeyboardBuilder()
     builder.button(text="🎁 Пригласить друга", callback_data="referral")
     builder.button(text="🧾 История оплат", callback_data="user_history")

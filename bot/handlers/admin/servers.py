@@ -131,7 +131,6 @@ async def _delete_server_background(
     profiles_data: list, api_url: str, api_key: str,
     deleted_profiles: int,
 ):
-    """Фоновая задача удаления пиров из API после удаления сервера."""
     failed_peers = []
 
     if profiles_data:

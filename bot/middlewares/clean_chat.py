@@ -1,8 +1,3 @@
-"""
-CleanChatMiddleware — удаляет сообщения пользователя для поддержания чистоты чата (SMH).
-🔥 ИСПРАВЛЕНО LOW #16: Спам стикерами создаёт тысячи фоновых тасок в event loop.
-Теперь используется asyncio.Queue с лимитом 10 удалений/сек для защиты от DoS.
-"""
 import asyncio
 import logging
 from aiogram import BaseMiddleware
@@ -16,10 +11,6 @@ _DELETE_BATCH_SIZE = 5
 
 
 async def _delete_worker():
-    """
-    Фоновый воркер, который обрабатывает очередь удалений.
-    Запускается один раз при первом использовании middleware.
-    """
     global _delete_queue
     while True:
         try:
@@ -47,7 +38,6 @@ async def _delete_worker():
 
 
 def _ensure_worker_started():
-    """Запускает воркер, если он ещё не запущен."""
     global _delete_queue, _delete_worker_task
     if _delete_queue is None:
         _delete_queue = asyncio.Queue(maxsize=1000)
@@ -56,14 +46,6 @@ def _ensure_worker_started():
 
 
 class CleanChatMiddleware(BaseMiddleware):
-    """
-    Удаляет сообщения пользователя для поддержания чистоты чата (SMH).
-    🔥 ИСПРАВЛЕНО: Не удаляет системные сообщения Telegram:
-    - successful_payment (нужно для обработки оплаты)
-    - service messages (pin, group creation и т.д.)
-    🔥 ИСПРАВЛЕНО LOW #16: Использует asyncio.Queue вместо create_task
-    для защиты от DoS через спам стикерами/файлами.
-    """
 
     async def __call__(self, handler, event, data):
         if isinstance(event, Message):

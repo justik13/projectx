@@ -6,11 +6,6 @@ MSK_TZ = ZoneInfo("Europe/Moscow")
 
 
 def format_traffic(bytes_value: int) -> str:
-    """
-    Форматирует количество байт в читаемый вид.
-    🔥 ИСПРАВЛЕНО LOW #11: Используем KiB/MiB/GiB вместо KB/MB/GB.
-    По стандарту СИ KB = 1000 байт, а мы делим на 1024, значит это KiB.
-    """
     if bytes_value == 0:
         return "0 B"
     
@@ -29,29 +24,14 @@ def format_traffic(bytes_value: int) -> str:
 
 
 def format_datetime(dt: Optional[datetime]) -> str:
-    """
-    Форматирует дату и время в МСК. Пример: 15.07.2026 14:30.
-    
-    🔥 ИЗМЕНЕНО: Теперь работает с aware datetime.
-    """
     return format_datetime_msk(dt, "%d.%m.%Y %H:%M")
 
 
 def format_days_left(dt: Optional[datetime]) -> str:
-    """
-    Форматирует оставшееся время до даты в МСК.
-    
-    🔥 ИЗМЕНЕНО: Теперь работает с aware datetime.
-    """
     return days_left_msk(dt)
 
 
 def format_datetime_short(dt: Optional[datetime]) -> str:
-    """
-    Короткий формат даты (только день и месяц) в МСК.
-    
-    🔥 ИЗМЕНЕНО: Теперь работает с aware datetime.
-    """
     return format_datetime_msk(dt, "%d.%m")
 
 def format_user_card_text(
@@ -60,12 +40,6 @@ def format_user_card_text(
     referrals: list,
     now: datetime,
 ) -> str:
-    """
-    Форматирует текст карточки пользователя для админки.
-    Вынесено из bot/handlers/admin/users.py для переиспользования.
-    
-    🔥 ИЗМЕНЕНО: now должен быть aware datetime.
-    """
     from bot import texts
     from utils.telegram import safe
     if now.tzinfo is None:
@@ -95,10 +69,6 @@ def format_connection_device_card(
     server_name: str,
     last_connected_text: str,
 ) -> str:
-    """
-    Форматирует карточку устройства для экрана подключений.
-    Вынесено из bot/handlers/connection.py.
-    """
     from bot import texts
     from utils.telegram import safe
     
