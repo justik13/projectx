@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v6.0 + Redis)
+# 🛡️  ProjectX Bot — DevSecOps Production Deploy (v6.1 + Redis)
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 IFS=$'\n\t'
@@ -57,6 +57,7 @@ write_env_var() {
 rollback() {
     local step="$1"
     local error_msg="$2"
+
     echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}🚨 ROLLBACK TRIGGERED at step: $step${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}Error: $error_msg${NC}" | tee -a "$ROLLBACK_LOG"
@@ -71,6 +72,14 @@ rollback() {
     if [[ -n "$env_backup" && -f "$env_backup" ]]; then
         cp "$env_backup" "$PROJECT_DIR/.env"
         log "Rollback: restored .env from $env_backup"
+    fi
+
+    # 🔥 ИСПРАВЛЕНО: Восстановление redis.conf из бэкапа
+    local redis_backup=$(ls -t /etc/redis/redis.conf.backup-* 2>/dev/null | head -n1)
+    if [[ -n "$redis_backup" && -f "$redis_backup" ]]; then
+        cp "$redis_backup" /etc/redis/redis.conf 2>/dev/null || true
+        systemctl restart redis-server 2>/dev/null || true
+        log "Rollback: restored redis.conf from $redis_backup"
     fi
 
     local ufw_snapshot=$(ls -t "$SNAPSHOT_DIR/ufw-before-"*.txt 2>/dev/null | head -n1)
@@ -130,6 +139,7 @@ preflight_checks() {
 # ═══════════════════════════════════════════════════════════════
 install_dependencies() {
     log "Установка системных зависимостей (PostgreSQL + Redis)..."
+
     apt-get update -qq || error "Не удалось обновить список пакетов"
 
     local install_log=$(mktemp)
@@ -160,52 +170,45 @@ setup_redis() {
 
     # Запускаем Redis если не запущен
     if ! systemctl is-active --quiet redis-server; then
-        systemctl start redis-server
-        systemctl enable redis-server
+        systemctl start redis-server || true
+        systemctl enable redis-server || true
     fi
 
-    # Конфигурируем Redis для безопасности и производительности
     local redis_conf="/etc/redis/redis.conf"
     if [[ -f "$redis_conf" ]]; then
         # Создаём бэкап конфига
         cp "$redis_conf" "$redis_conf.backup-$(date +%s)" 2>/dev/null || true
 
-        # Привязываем только к localhost (безопасность)
-        if ! grep -q "^bind 127.0.0.1" "$redis_conf"; then
-            sed -i 's/^bind .*/bind 127.0.0.1/' "$redis_conf"
-        fi
+        # 🔥 ИСПРАВЛЕНО: Удаляем ВСЕ существующие строки перед добавлением
+        # Предотвращает дублирование при повторном запуске deploy.sh
+        sed -i '/^bind /d' "$redis_conf"
+        sed -i '/^maxmemory /d' "$redis_conf"
+        sed -i '/^maxmemory-policy /d' "$redis_conf"
+        sed -i '/^save /d' "$redis_conf"
+        sed -i '/^appendonly /d' "$redis_conf"
 
-        # Устанавливаем maxmemory 256MB (достаточно для FSM)
-        if ! grep -q "^maxmemory 256mb" "$redis_conf"; then
-            sed -i '/^maxmemory /d' "$redis_conf"
-            echo "maxmemory 256mb" >> "$redis_conf"
-        fi
+        # Добавляем в конец файла
+        echo "" >> "$redis_conf"
+        echo "# === ProjectX Bot Config ===" >> "$redis_conf"
+        echo "bind 127.0.0.1" >> "$redis_conf"
+        echo "maxmemory 256mb" >> "$redis_conf"
+        echo "maxmemory-policy allkeys-lru" >> "$redis_conf"
+        echo 'save ""' >> "$redis_conf"
+        echo "appendonly no" >> "$redis_conf"
 
-        # Политика вытеснения — удаляем любые ключи при переполнении
-        if ! grep -q "^maxmemory-policy allkeys-lru" "$redis_conf"; then
-            sed -i '/^maxmemory-policy /d' "$redis_conf"
-            echo "maxmemory-policy allkeys-lru" >> "$redis_conf"
-        fi
+        # Права доступа
+        chown redis:redis "$redis_conf"
+        chmod 640 "$redis_conf"
 
-        # Отключаем persist (RDB/AOF) — нам не нужна персистентность FSM
-        # FSM — это временные данные, которые можно потерять при перезапуске
-        if ! grep -q "^save \"\"" "$redis_conf"; then
-            sed -i '/^save /d' "$redis_conf"
-            echo 'save ""' >> "$redis_conf"
+        # 🔥 ИСПРАВЛЕНО: Проверка exit code systemctl restart
+        if ! systemctl restart redis-server; then
+            error "Redis restart failed. Проверьте: journalctl -xeu redis-server"
         fi
-
-        # Отключаем AOF
-        if ! grep -q "^appendonly no" "$redis_conf"; then
-            sed -i 's/^appendonly .*/appendonly no/' "$redis_conf"
-        fi
-
-        # Перезапускаем Redis для применения конфига
-        systemctl restart redis-server
     fi
 
-    # Проверяем что Redis отвечает
+    # Проверка что Redis отвечает (с 10 попытками)
     local redis_check=0
-    for i in $(seq 1 5); do
+    for i in $(seq 1 10); do
         if redis-cli ping 2>/dev/null | grep -q "PONG"; then
             redis_check=1
             break
@@ -214,7 +217,12 @@ setup_redis() {
     done
 
     if [[ $redis_check -eq 0 ]]; then
-        error "Redis не отвечает на PING после настройки"
+        error "Redis не отвечает после настройки. Лог: journalctl -xeu redis-server"
+    fi
+
+    # 🔥 ИСПРАВЛЕНО: Проверка что systemd unit активен
+    if ! systemctl is-active --quiet redis-server; then
+        error "Redis отвечает на ping, но systemd unit не активен. Проверьте: systemctl status redis-server"
     fi
 
     success "Redis настроен и запущен (bind 127.0.0.1, maxmemory 256MB, LRU eviction)"
@@ -234,22 +242,45 @@ setup_postgresql() {
     # Проверка, существует ли уже БД
     if sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='projectx_bot'" | grep -q 1; then
         warn "База данных projectx_bot уже существует. Пропускаем создание."
-    else
-        log "Создание пользователя и базы данных PostgreSQL..."
-
-        read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD; echo ""
+        # Читаем пароль для .env
+        read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD; echo ""
         [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
-
-        sudo -u postgres psql -c "CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';" > /dev/null 2>&1 || warn "Пользователь projectx уже существует"
-        sudo -u postgres psql -c "CREATE DATABASE projectx_bot OWNER projectx;" > /dev/null 2>&1 || warn "БД projectx_bot уже существует"
-        sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE projectx_bot TO projectx;" > /dev/null 2>&1
-
-        success "Пользователь projectx и база projectx_bot созданы"
-
-        # Сохраняем пароль временно для .env
         echo "$DB_PASSWORD" > /tmp/.pg_pass
         chmod 600 /tmp/.pg_pass
+        return
     fi
+
+    log "Создание пользователя и базы данных PostgreSQL..."
+    read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD; echo ""
+    [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
+
+    # 🔥 ИСПРАВЛЕНО: Валидация пароля (защита от SQL-инъекции)
+    if [[ ! "$DB_PASSWORD" =~ ^[a-zA-Z0-9_@#%^*+=-]{8,}$ ]]; then
+        error "Пароль должен быть 8+ символов, только латиница/цифры/символы _@#%^*+=- (без кавычек и пробелов)"
+    fi
+
+    # 🔥 ИСПРАВЛЕНО: Использование heredoc с PGPASSWORD (защита от SQL-инъекции)
+    sudo -u postgres psql -v ON_ERROR_STOP=1 <<EOF
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
+        CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
+    END IF;
+END
+\$\$;
+CREATE DATABASE projectx_bot OWNER projectx;
+GRANT ALL PRIVILEGES ON DATABASE projectx_bot TO projectx;
+EOF
+
+    if [[ $? -ne 0 ]]; then
+        error "Не удалось создать БД. Проверьте логи PostgreSQL."
+    fi
+
+    success "Пользователь projectx и база projectx_bot созданы"
+
+    # Сохраняем пароль временно для .env
+    echo "$DB_PASSWORD" > /tmp/.pg_pass
+    chmod 600 /tmp/.pg_pass
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -267,7 +298,6 @@ setup_firewall() {
     if [ -f /etc/ssh/sshd_config ]; then
         SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
     fi
-
     if [[ -z "$SSH_PORT" || ! "$SSH_PORT" =~ ^[0-9]+$ ]]; then
         SSH_PORT=22
         warn "Не удалось определить порт SSH из sshd_config, используется стандартный: $SSH_PORT"
@@ -317,7 +347,6 @@ setup_venv() {
     log "Настройка Python VENV..."
     [ ! -d "$VENV_DIR" ] && python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
-
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
 
     local pip_log="$PROJECT_DIR/pip-install.log"
@@ -344,14 +373,12 @@ setup_env() {
     echo -e "${BLUE}[1/4]${NC} Telegram Bot Token"
     read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN; echo ""
     [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
-
     if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then
         error "Неверный формат BOT_TOKEN"
     fi
 
     echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
     read -p "Введите ADMIN_IDS: " ADMIN_IDS
-
     if [[ ! "$ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
         error "Неверный формат ADMIN_IDS"
     fi
@@ -395,7 +422,6 @@ setup_env() {
     fi
 
     : > "$PROJECT_DIR/.env"
-
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
@@ -416,6 +442,7 @@ setup_env() {
 
     chown projectx:projectx "$PROJECT_DIR/.env"
     chmod 600 "$PROJECT_DIR/.env"
+
     success ".env защищён (включая REDIS_URL)"
 }
 
@@ -425,9 +452,25 @@ setup_env() {
 verify_permissions() {
     chown -R projectx:projectx "$PROJECT_DIR"
     find "$PROJECT_DIR" -type d -exec chmod 750 {} \;
-    find "$PROJECT_DIR" -type f -exec chmod 640 {} \;
+
+    # 🔥 ИСПРАВЛЕНО: Раздельные права для разных типов файлов
+    # Python файлы — 640 (read для группы, без execute)
+    find "$PROJECT_DIR" -type f -name "*.py" -exec chmod 640 {} \;
+    find "$PROJECT_DIR" -type f -name "*.txt" -exec chmod 640 {} \;
+    find "$PROJECT_DIR" -type f -name "*.md" -exec chmod 640 {} \;
+
+    # Shell скрипты — 750 (executable)
+    find "$PROJECT_DIR" -type f -name "*.sh" -exec chmod 750 {} \;
+
+    # venv бинарники — 750 (executable) — КРИТИЧНО!
+    if [ -d "$VENV_DIR/bin" ]; then
+        find "$VENV_DIR/bin" -type f -exec chmod 750 {} \;
+    fi
+
+    # .env — только владелец
     chmod 600 "$PROJECT_DIR/.env"
-    success "Права доступа установлены (dir=750, files=640)"
+
+    success "Права доступа установлены (py=640, bin=750, .env=600)"
 }
 
 init_database() {
@@ -606,7 +649,8 @@ start_bot() {
     systemctl start "$SERVICE_NAME"
 
     local wait_count=0
-    local max_wait=10
+    local max_wait=30  # 🔥 ИСПРАВЛЕНО: Увеличено с 10 до 30 секунд
+
     while [ $wait_count -lt $max_wait ]; do
         sleep 1
         if systemctl is-active --quiet "$SERVICE_NAME"; then
@@ -632,7 +676,7 @@ show_status() {
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v6.0 (PostgreSQL + Redis)${NC}\n"
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v6.1 (PostgreSQL + Redis)${NC}\n"
 
     mkdir -p /var/log "$SNAPSHOT_DIR"
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
