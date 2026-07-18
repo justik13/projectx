@@ -16,5 +16,5 @@ cryptography>=45.0.0,<47.0.0
 cachetools>=5.5.0,<6.0.0
 
 # FSM Storage (Redis)
+# В Aiogram 3.x RedisStorage встроен, нужен только базовый клиент redis
 redis>=5.0.0,<6.0.0
-aiogram-redis>=2.0.0,<3.0.0
