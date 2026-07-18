@@ -4,13 +4,14 @@ import time
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 from sqlalchemy import select, or_
 from database.connection import session_scope
 from database.repositories.tariffs_repo import get_tariff_by_id
 from database.repositories.users_repo import mark_user_bot_blocked
 from database.models import User
 from bot.constants import NOTIFICATION_INTERVAL, WORKER_ERROR_SLEEP_INTERVAL
+from utils.datetime_helpers import now_utc
 
 logger = logging.getLogger("BackgroundWorker")
 
@@ -34,14 +35,11 @@ class NotificationRateLimiter:
             elapsed = now - self.last_refill
             self.tokens = min(self.rate, self.tokens + elapsed * self.rate)
             self.last_refill = now
-
             if self.tokens < 1.0:
                 wait_time = (1.0 - self.tokens) / self.rate
                 await asyncio.sleep(wait_time)
                 return await self.acquire()
-
             self.tokens -= 1.0
-
 
 _notification_limiter = NotificationRateLimiter(rate=25.0)
 
@@ -62,13 +60,14 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
             except asyncio.TimeoutError:
                 pass
 
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+            current_time = now_utc()
             blocked_user_ids = []
 
             async with session_scope() as session:
                 stmt = select(User).where(
-                    User.subscription_end > now,
-                    User.subscription_end <= now + timedelta(days=3),
+                    User.subscription_end > current_time,
+                    User.subscription_end <= current_time + timedelta(days=3),
                     User.is_banned == False,
                     User.is_bot_blocked == False,
                     User.is_deleted == False,
@@ -84,7 +83,7 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                     continue
 
                 for user in users:
-                    time_left = user.subscription_end - now
+                    time_left = user.subscription_end - current_time
                     msg = None
                     notification_type = None
                     retry_count = user.notification_retry_count or 0
@@ -96,7 +95,7 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                     if retry_count > 0 and user.last_notification_attempt:
                         backoff_delay = _get_backoff_delay(retry_count - 1)
                         time_since_last = (
-                            now - user.last_notification_attempt
+                            current_time - user.last_notification_attempt
                         ).total_seconds()
                         if time_since_last < backoff_delay:
                             continue
@@ -131,6 +130,7 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                             tariff = await get_tariff_by_id(
                                 session, user.current_tariff_id
                             ) if user.current_tariff_id else None
+
                             kb = InlineKeyboardBuilder()
                             if tariff:
                                 kb.button(
@@ -150,7 +150,7 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                             )
 
                             user.notification_retry_count = 0
-                            user.last_notification_attempt = now
+                            user.last_notification_attempt = current_time
 
                             if notification_type == "2h":
                                 user.notified_2h = True
@@ -166,7 +166,7 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                             blocked_user_ids.append(user.telegram_id)
                         except Exception as e:
                             user.notification_retry_count = retry_count + 1
-                            user.last_notification_attempt = now
+                            user.last_notification_attempt = current_time
                             logger.warning(
                                 f"Failed to send notification to "
                                 f"{user.telegram_id}: {e}"

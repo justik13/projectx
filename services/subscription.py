@@ -3,17 +3,19 @@
 🔥 ИСПРАВЛЕНО (Часть 2):
 - #6: Своя сессия в _sync_expires_to_servers
 - HIGH #4: Явная передача status="active" при продлении
+- TZ-1: Использование aware datetime (now_utc)
 """
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.repositories.users_repo import get_user_by_telegram_id, create_user, update_user
 from database.repositories.profiles_repo import get_user_profiles
 from database.repositories.servers_repo import get_server_by_id
 from database.models import User
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Optional
 from bot.constants import PERMANENT_SUBSCRIPTION_DAYS, PERMANENT_END_DATE
 from bot.middlewares.user_context import invalidate_user_cache
 from services.amnezia_client import AmneziaClient
+from utils.datetime_helpers import now_utc, is_expired
 import asyncio
 import logging
 
@@ -26,9 +28,9 @@ class SubscriptionService:
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user or user.is_banned or not user.subscription_end:
             return False
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        return user.subscription_end > now
-
+        # 🔥 ИЗМЕНЕНО: is_expired() вместо ручного сравнения
+        return not is_expired(user.subscription_end)
+    
     @staticmethod
     async def process_onboarding(
         session: AsyncSession, telegram_id: int,
@@ -45,7 +47,7 @@ class SubscriptionService:
                 referred_by = ref_id
                 logger.info(f"New user {telegram_id} referred by {ref_id}")
         return await create_user(session, telegram_id, username, first_name, referred_by)
-
+    
     @staticmethod
     async def extend_subscription(
         session: AsyncSession, telegram_id: int, days: int,
@@ -56,18 +58,20 @@ class SubscriptionService:
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user:
             return None
-
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+        now = now_utc()
         current_end = user.subscription_end if (
             user.subscription_end and user.subscription_end > now
         ) else now
+        
         new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else current_end + timedelta(days=days)
-
+        
         user.subscription_end = new_end
         user.notified_3d = False
         user.notified_1d = False
         user.notified_2h = False
-
+        
         if new_device_limit is not None:
             old_device_limit = user.device_limit
             user.device_limit = new_device_limit
@@ -79,21 +83,20 @@ class SubscriptionService:
                     f"{old_device_limit} to {new_device_limit} devices. "
                     f"Daily creations counter reset to 0."
                 )
-
+        
         if new_tariff_id is not None:
             user.current_tariff_id = new_tariff_id
-
+        
         await session.flush()
-
         invalidate_user_cache(telegram_id)
-
+        
         expires_ts = await SubscriptionService.get_expires_timestamp(user)
         asyncio.create_task(
             SubscriptionService._sync_expires_to_servers(user.id, expires_ts)
         )
-
+        
         return user
-
+    
     @staticmethod
     async def _sync_expires_to_servers(user_id: int, expires_ts: Optional[int]):
         """
@@ -106,14 +109,14 @@ class SubscriptionService:
                 profiles = await get_user_profiles(session, user_id)
                 if not profiles:
                     return
-
+                
                 server_ids = {p.server_id for p in profiles}
                 servers_map = {}
                 for sid in server_ids:
                     s = await get_server_by_id(session, sid)
                     if s:
                         servers_map[sid] = s
-
+                
                 tasks = []
                 for profile in profiles:
                     server = servers_map.get(profile.server_id)
@@ -126,7 +129,7 @@ class SubscriptionService:
                                 status="active"  # 🔥 ИСПРАВЛЕНО HIGH #4: Принудительно активируем
                             )
                         )
-
+                
                 if tasks:
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     success = sum(1 for r in results if r is True)
@@ -139,15 +142,24 @@ class SubscriptionService:
                 f"expiresAt sync failed for user_id={user_id}: {e}",
                 exc_info=True
             )
-
+    
     @staticmethod
     async def get_expires_timestamp(user: User) -> Optional[int]:
-        """Возвращает Unix timestamp для expiresAt или None для бессрочного доступа."""
+        """
+        Возвращает Unix timestamp для expiresAt или None для бессрочного доступа.
+        
+        🔥 ИЗМЕНЕНО: теперь user.subscription_end это aware datetime (UTC),
+        поэтому .timestamp() автоматически учитывает часовой пояс.
+        """
         if not user.subscription_end or user.subscription_end.year >= 2100:
             logger.info(
                 f"get_expires_timestamp: user {user.telegram_id} has permanent subscription, "
                 f"sending expiresAt=null to API"
             )
             return None
-        expires_ts = int(user.subscription_end.replace(tzinfo=timezone.utc).timestamp())
+        
+        # 🔥 ИЗМЕНЕНО: .timestamp() работает напрямую с aware datetime
+        # Старый код: user.subscription_end.replace(tzinfo=timezone.utc).timestamp()
+        # Новый код: user.subscription_end.timestamp() (уже aware в UTC)
+        expires_ts = int(user.subscription_end.timestamp())
         return expires_ts

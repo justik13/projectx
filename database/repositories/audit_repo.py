@@ -2,6 +2,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import AuditLog
 from typing import List, Optional
+from utils.datetime_helpers import now_utc
+
 
 async def create_audit_log(
     session: AsyncSession,
@@ -24,15 +26,20 @@ async def create_audit_log(
     await session.refresh(log)
     return log
 
+
 async def get_recent_audit_logs(session: AsyncSession, limit: int = 10) -> List[AuditLog]:
     stmt = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
     result = await session.execute(stmt)
     return result.scalars().all()
 
+
 async def clear_audit_logs(session: AsyncSession, older_than_days: int = 30) -> int:
-    from datetime import datetime, timedelta, timezone
-    threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=older_than_days)
+    from datetime import timedelta
     from sqlalchemy import delete
+    
+    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+    threshold = now_utc() - timedelta(days=older_than_days)
+    
     stmt = delete(AuditLog).where(AuditLog.created_at < threshold)
     result = await session.execute(stmt)
     # 🔥 ИСПРАВЛЕНО: flush() вместо commit()

@@ -10,8 +10,10 @@ from bot.constants import (
     TRAFFIC_SYNC_INTERVAL, WORKER_ERROR_SLEEP_INTERVAL,
     SELF_HEALING_MAX_PER_CYCLE,
 )
+from utils.datetime_helpers import now_utc
 
 logger = logging.getLogger("BackgroundWorker")
+
 BATCH_SIZE = 100
 
 # 🔥 ИСПРАВЛЕНО MEDIUM #7: Окно для Reverse Self-Healing
@@ -42,35 +44,34 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                     for row in result.all()
                 ]
 
-            if not servers:
-                continue
-
-            async def _fetch_server_traffic(server_info):
-                client = AmneziaClient(server_info['api_url'], server_info['api_key'])
-                try:
-                    api_clients_list = await client.get_all_clients()
-                    if api_clients_list is None:
-                        return server_info['id'], None
-                    return server_info['id'], {c.id: c for c in api_clients_list}
-                except Exception as e:
-                    logger.error(f"Ошибка трафика с {server_info['name']}: {e}")
-                    return server_info['id'], None
-
-            tasks = [_fetch_server_traffic(s) for s in servers]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            api_data_by_server = {
-                r[0]: r[1]
-                for r in results
-                if not isinstance(r, Exception) and r is not None and r[1] is not None
-            }
-
-            for server_info in servers:
-                server_id = server_info['id']
-                if server_id not in api_data_by_server:
+                if not servers:
                     continue
-                api_clients = api_data_by_server[server_id]
-                await _process_server_traffic(server_info, api_clients)
+
+                async def _fetch_server_traffic(server_info):
+                    client = AmneziaClient(server_info['api_url'], server_info['api_key'])
+                    try:
+                        api_clients_list = await client.get_all_clients()
+                        if api_clients_list is None:
+                            return server_info['id'], None
+                        return server_info['id'], {c.id: c for c in api_clients_list}
+                    except Exception as e:
+                        logger.error(f"Ошибка трафика с {server_info['name']}: {e}")
+                        return server_info['id'], None
+
+                tasks = [_fetch_server_traffic(s) for s in servers]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                api_data_by_server = {
+                    r[0]: r[1]
+                    for r in results
+                    if not isinstance(r, Exception) and r is not None and r[1] is not None
+                }
+
+                for server_info in servers:
+                    server_id = server_info['id']
+                    if server_id not in api_data_by_server:
+                        continue
+                    api_clients = api_data_by_server[server_id]
+                    await _process_server_traffic(server_info, api_clients)
 
         except asyncio.CancelledError:
             logger.info("Traffic sync worker cancelled")
@@ -109,7 +110,9 @@ async def _process_server_traffic(server_info, api_clients):
         healing_tasks = []
         reverse_healing_tasks = []
 
-        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+        # Переименовано в current_time чтобы не конфликтовать с импортом now_utc
+        current_time = now_utc()
 
         async for row in result.partitions(size=BATCH_SIZE):
             for (
@@ -128,19 +131,21 @@ async def _process_server_traffic(server_info, api_clients):
 
                 last_conn_raw = api_data.lastHandshake or api_data.lastSeen or api_data.updatedAt
                 new_last_connected = last_conn
+
                 if last_conn_raw:
                     try:
                         ts = int(float(str(last_conn_raw)))
                         if ts > 1e12:
                             ts = ts // 1000
-                        new_last_connected = datetime.fromtimestamp(
-                            ts, tz=timezone.utc
-                        ).replace(tzinfo=None)
+                        # 🔥 ИЗМЕНЕНО: aware datetime (убрано .replace(tzinfo=None))
+                        new_last_connected = datetime.fromtimestamp(ts, tz=timezone.utc)
                     except (ValueError, TypeError, OverflowError):
                         pass
 
                 api_is_active = (api_data.status == "active")
-                is_subscription_expired = sub_end and sub_end < now_utc
+
+                is_subscription_expired = sub_end and sub_end < current_time
+
                 local_should_be_disabled = (
                     (not is_active) or is_banned or is_subscription_expired
                 )
@@ -171,21 +176,16 @@ async def _process_server_traffic(server_info, api_clients):
 
                 elif is_active and not local_should_be_disabled and not api_is_active:
                     # 🔥 ИСПРАВЛЕНО MEDIUM #7: Умный Reverse Self-Healing
-                    # Проверяем updatedAt — если пир перешёл в disabled недавно
-                    # (< 5 минут), возможно это сбой API (включаем обратно).
-                    # Если updatedAt старый (> 5 мин), вероятно это ручное
-                    # действие админа через стороннюю панель Amnezia — НЕ трогаем.
                     api_updated = api_data.updatedAt
                     if api_updated:
                         try:
                             ts = int(float(str(api_updated)))
                             if ts > 1e12:
                                 ts = ts // 1000
-                            updated_dt = datetime.fromtimestamp(
-                                ts, tz=timezone.utc
-                            ).replace(tzinfo=None)
-                            time_since_update = (now_utc - updated_dt).total_seconds()
-                            
+                            # 🔥 ИЗМЕНЕНО: aware datetime (убрано .replace(tzinfo=None))
+                            updated_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                            time_since_update = (current_time - updated_dt).total_seconds()
+
                             if time_since_update < REVERSE_HEALING_WINDOW_SECONDS:
                                 reverse_healing_tasks.append({
                                     'api_url': server_info['api_url'],
@@ -247,7 +247,6 @@ async def _batch_update_profiles(updates_data: dict):
         items = list(updates_data.items())
         for i in range(0, len(items), BATCH_SIZE):
             batch = items[i:i + BATCH_SIZE]
-            
             batch_values = []
             for p_id, data in batch:
                 row = {'id': p_id}
@@ -258,26 +257,27 @@ async def _batch_update_profiles(updates_data: dict):
                 if 'last_connected' in data:
                     row['last_connected'] = data['last_connected']
                 batch_values.append(row)
-            
+
             if not batch_values:
                 continue
 
             stmt = insert(VPNProfile).values(batch_values)
-            
             update_dict = {}
+
             if any('traffic_down' in data for _, data in batch):
                 update_dict['traffic_down'] = stmt.excluded.traffic_down
             if any('traffic_up' in data for _, data in batch):
                 update_dict['traffic_up'] = stmt.excluded.traffic_up
             if any('last_connected' in data for _, data in batch):
                 update_dict['last_connected'] = stmt.excluded.last_connected
-                
+
             if update_dict:
                 stmt = stmt.on_conflict_do_update(
                     index_elements=['id'],
                     set_=update_dict
                 )
-                await session.execute(stmt)
+
+            await session.execute(stmt)
 
 
 async def _self_heal_peers(healing_tasks: list):

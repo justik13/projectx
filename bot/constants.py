@@ -1,11 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Subscription
 PERMANENT_SUBSCRIPTION_DAYS = 36500
-# 🔥 ИСПРАВЛЕНО P2-10: Унификация вечной даты
-# Было: datetime(2100, 1, 1) здесь, но datetime(2099, 12, 31) в admin/users.py
-# Стало: везде datetime(2100, 1, 1)
-PERMANENT_END_DATE = datetime(2100, 1, 1)
+
+# 🔥 ИСПРАВЛЕНО P2-10 + TZ-1: Унификация вечной даты + aware datetime
+# Было: datetime(2100, 1, 1) (naive)
+# Стало: datetime(2100, 1, 1, tzinfo=timezone.utc) (aware)
+PERMANENT_END_DATE = datetime(2100, 1, 1, tzinfo=timezone.utc)
 
 # Telegram limits
 TELEGRAM_MESSAGE_LIMIT = 4096

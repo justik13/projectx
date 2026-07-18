@@ -2,19 +2,20 @@ from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from database.models import User
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Optional, List, TypedDict
+from utils.datetime_helpers import now_utc
 
 
 class UserUpdateFields(TypedDict, total=False):
     username: str | None
     first_name: str | None
-    subscription_end: datetime | None
+    subscription_end: 'datetime' | None
     device_limit: int
     current_tariff_id: int | None
     referred_by: int | None
     referral_days: int
-    last_payment_at: datetime | None
+    last_payment_at: 'datetime' | None
     is_banned: bool
     is_admin: bool
     is_bot_blocked: bool
@@ -64,18 +65,17 @@ async def update_user(
 async def extend_subscription(
     session: AsyncSession, user: User, days: int
 ) -> User:
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+    now = now_utc()
     if user.subscription_end and user.subscription_end > now:
         current_end = user.subscription_end
     else:
         current_end = now
-
     if days >= 36500:
         from bot.constants import PERMANENT_END_DATE
         new_end = PERMANENT_END_DATE
     else:
         new_end = current_end + timedelta(days=days)
-
     return await update_user(session, user, subscription_end=new_end)
 
 
@@ -98,9 +98,10 @@ async def get_user_count(session: AsyncSession) -> int:
 
 
 async def get_active_subscriptions_count(session: AsyncSession) -> int:
-    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+    now = now_utc()
     stmt = select(func.count(User.id)).where(
-        User.subscription_end > now_naive,
+        User.subscription_end > now,
         User.is_deleted == False,
     )
     result = await session.execute(stmt)
@@ -108,9 +109,10 @@ async def get_active_subscriptions_count(session: AsyncSession) -> int:
 
 
 async def get_new_users_count_24h(session: AsyncSession) -> int:
-    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+    now = now_utc()
     stmt = select(func.count(User.id)).where(
-        User.created_at > now_naive - timedelta(hours=24),
+        User.created_at > now - timedelta(hours=24),
         User.is_deleted == False,
     )
     result = await session.execute(stmt)
@@ -148,10 +150,11 @@ async def get_users_paginated_with_profiles(
 
 
 async def get_active_users(session: AsyncSession) -> list[User]:
-    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+    now = now_utc()
     result = await session.execute(
         select(User).where(
-            User.subscription_end > now_naive,
+            User.subscription_end > now,
             User.is_banned == False,
             User.is_bot_blocked == False,
             User.is_deleted == False,
@@ -196,7 +199,6 @@ async def get_user_with_referrals(
     )
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
-    
     referrals = []
     if user:
         # Фильтруем is_deleted == False и сортируем (relationship загружает всех)
@@ -205,7 +207,6 @@ async def get_user_with_referrals(
             key=lambda r: r.created_at,
             reverse=True
         )
-    
     return user, referrals
 
 

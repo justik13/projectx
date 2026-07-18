@@ -1,20 +1,19 @@
 import logging
 import asyncio
-from datetime import datetime, timezone
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.middlewares.user_context import invalidate_user_cache
 from database.repositories.payments_repo import get_user_payments, get_payment_by_id
-from database.models import Payment
+from database.models import Payment, VPNProfile
 from services.subscription import SubscriptionService
 from services.referral_service import ReferralService
 from services.platega_client import PlategaClient
 from services.audit_service import AuditService
 from config.settings import get_settings
+from utils.datetime_helpers import now_utc
 
 logger = logging.getLogger(__name__)
-
 
 class PaymentService:
     @staticmethod
@@ -23,19 +22,17 @@ class PaymentService:
     ) -> bool:
         try:
             async with session.begin_nested() as savepoint:
+                # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
                 stmt = (
                     update(Payment)
                     .where(Payment.id == payment_id, Payment.status == 'pending')
                     .values(
                         status='completed',
-                        paid_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        paid_at=now_utc(),
                     )
                 )
                 result = await session.execute(stmt)
                 if result.rowcount == 0:
-                    # 🔥 ИСПРАВЛЕНО CRITICAL #3: Этот блок больше не вызывается из webhook!
-                    # Сюда попадают только при ручных действиях или редких race conditions.
-                    # Оставляем как защитную сетку, но без спама алертами.
                     await savepoint.commit()
                     await _alert_paid_after_cancel(session, payment_id)
                     return True
@@ -61,7 +58,6 @@ class PaymentService:
                 new_device_limit = getattr(
                     tariff, 'device_limit', user.device_limit
                 )
-
                 try:
                     await SubscriptionService.extend_subscription(
                         session, user.telegram_id, tariff.duration_days,
@@ -98,11 +94,9 @@ class PaymentService:
                             f"{payment_id}: {e}"
                         )
 
-                user.last_payment_at = datetime.now(
-                    timezone.utc
-                ).replace(tzinfo=None)
+                # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+                user.last_payment_at = now_utc()
                 await savepoint.commit()
-
                 invalidate_user_cache(user.telegram_id)
 
                 try:
@@ -124,7 +118,6 @@ class PaymentService:
                     f"for user {user.telegram_id}"
                 )
                 return True
-
         except Exception as e:
             await session.rollback()
             logger.error(
@@ -140,12 +133,10 @@ class PaymentService:
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
         settings = get_settings()
-
         payment = await create_payment(
             session=session, user_id=user_id, tariff_id=tariff_id,
             amount=int(amount), currency="RUB",
         )
-
         description = (
             f"Оплата подписки. TgId:{telegram_id} UserId:{user_id}"
         )
@@ -157,13 +148,11 @@ class PaymentService:
             bot_username=clean_username
         )
         payload = f"payment_{payment.id}"
-
         client = PlategaClient()
         transaction = await client.create_transaction(
             amount=amount, currency="RUB", description=description,
             return_url=return_url, failed_url=failed_url, payload=payload,
         )
-
         if not transaction:
             try:
                 await session.execute(
@@ -174,12 +163,11 @@ class PaymentService:
                 logger.error(
                     f"Failed to delete phantom payment {payment.id}: {delete_error}"
                 )
-                payment.status = "failed"
-                try:
-                    await session.flush()
-                except Exception:
-                    pass
-
+            payment.status = "failed"
+            try:
+                await session.flush()
+            except Exception:
+                pass
             try:
                 await AuditService.log_action(
                     session, admin_id=0, action="PAYMENT_FAILED",
@@ -217,7 +205,6 @@ class PaymentService:
         )
         result = await session.execute(stmt)
         payment = result.scalar_one_or_none()
-
         if not payment:
             logger.warning(
                 f"Platega callback: payment not found for {transaction_id}"
@@ -229,13 +216,6 @@ class PaymentService:
         )
 
         if status == "CONFIRMED":
-            # 🔥 ИСПРАВЛЕНО CRITICAL #3: Идемпотентность webhook
-            # Если платёж уже обработан — возвращаем успех БЕЗ вызова
-            # handle_successful_payment и БЕЗ алерта "Оплата после отмены".
-            # Это защищает от:
-            # 1. Ретраев Platega при 500/таймауте (до 3 попыток с интервалом 5 мин)
-            # 2. Злоумышленников, шлющих повторные CONFIRMED
-            # 3. Сетевых сбоев, когда первый ответ не дошёл до Platega
             if payment.status == "completed":
                 logger.info(
                     f"Platega callback: payment {payment.id} already completed, "
@@ -307,7 +287,6 @@ class PaymentService:
                     f"already cancelled"
                 )
                 return True, "already_processed"
-
             payment.status = "cancelled"
             try:
                 await AuditService.log_action(
@@ -339,8 +318,10 @@ class PaymentService:
                 from database.repositories.servers_repo import get_server_by_id
                 from services.amnezia_client import AmneziaClient
 
-                now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-                user.subscription_end = now_utc
+                # 🔥 ИЗМЕНЕНО: now_utc() вместо datetime.now(timezone.utc).replace(tzinfo=None)
+                # Переименовано в current_time чтобы не конфликтовать с импортом now_utc
+                current_time = now_utc()
+                user.subscription_end = current_time
                 user.current_tariff_id = None
 
                 profiles = await get_user_profiles(session, user.id)
@@ -447,12 +428,10 @@ class PaymentService:
             return False
         if payment.status != "pending":
             return payment.status == "completed"
-
         client = PlategaClient()
         status_data = await client.check_status(payment.external_id)
         if not status_data:
             return False
-
         status = status_data.get("status")
         if status == "CONFIRMED":
             return await PaymentService.handle_successful_payment(
@@ -480,11 +459,6 @@ class PaymentService:
 async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
-    """
-    🔥 ИСПРАВЛЕНО CRITICAL #3:
-    Эта функция больше НЕ вызывается при webhook-ретраях.
-    Оставлена только как защитная сетка для ручных действий или race conditions.
-    """
     from services.workers.heartbeat import get_bot_ref
     bot = get_bot_ref()
     if bot is None:
@@ -493,7 +467,6 @@ async def _alert_paid_after_cancel(
             f"Payment {payment_id}"
         )
         return
-
     try:
         result = await session.execute(
             select(Payment)
@@ -503,15 +476,12 @@ async def _alert_paid_after_cancel(
         payment = result.scalar_one_or_none()
     except Exception:
         payment = None
-
     if not payment:
         return
-
     settings = get_settings()
     admin_ids = settings.ADMIN_IDS
     if not admin_ids:
         return
-
     user = payment.user
     username = (
         f"@{user.username}" if user and user.username else "—"
@@ -527,7 +497,6 @@ async def _alert_paid_after_cancel(
         f"<i>Деньги списаны, но платёж был ранее отменён пользователем. "
         f"Проверьте и при необходимости верните средства вручную.</i>"
     )
-
     for admin_id in admin_ids:
         try:
             await bot.send_message(
@@ -557,13 +526,11 @@ async def _send_chargeback_alert(
             f"transaction={transaction_id}"
         )
         return
-
     settings = get_settings()
     admin_ids = settings.ADMIN_IDS
     if not admin_ids:
         logger.warning("Chargeback alert skipped: ADMIN_IDS is empty")
         return
-
     user = payment.user
     tariff = payment.tariff
     username = (
@@ -573,7 +540,6 @@ async def _send_chargeback_alert(
         f"{tariff.duration_days} дн. / {tariff.device_limit} устр."
         if tariff else "—"
     )
-
     builder = InlineKeyboardBuilder()
     builder.button(
         text="👤 Профиль пользователя",
@@ -583,7 +549,6 @@ async def _send_chargeback_alert(
     )
     builder.adjust(1)
     keyboard = builder.as_markup()
-
     alert_msg = (
         f"🚨 <b>CHARGEBACK (Возврат средств)</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -596,7 +561,6 @@ async def _send_chargeback_alert(
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Доступ отозван. Все устройства отключены.</i>"
     )
-
     for admin_id in admin_ids:
         try:
             await bot.send_message(

@@ -2,8 +2,7 @@ import uuid
 import re
 import logging
 import asyncio
-from datetime import datetime, timezone, date
-from zoneinfo import ZoneInfo
+from datetime import date
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,9 +17,10 @@ from database.models import User, VPNProfile
 from bot.constants import AMNEZIA_PROTOCOL, DEVICE_DAILY_LIMIT
 from utils.vpn_parser import is_valid_vpn_uri
 from utils.admin import is_admin
+from utils.datetime_helpers import now_msk
 
 logger = logging.getLogger(__name__)
-MSK_TZ = ZoneInfo("Europe/Moscow")
+
 
 # Порог "критической зоны": если свободно меньше этого числа — идём в API для точности
 CRITICAL_SLOTS_THRESHOLD = 5
@@ -35,17 +35,16 @@ class InvalidConfig(DeviceCreationError): pass
 
 _user_locks: dict[int, asyncio.Lock] = {}
 
-
 def _get_user_lock(user_id: int) -> asyncio.Lock:
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
     return _user_locks[user_id]
 
 
-def _is_same_day_msk(stored_date: date | None, now_msk: date) -> bool:
+def _is_same_day_msk(stored_date: date | None, now_msk_date: date) -> bool:
     if stored_date is None:
         return False
-    return stored_date == now_msk
+    return stored_date == now_msk_date
 
 
 async def _get_server_profiles_count(session: AsyncSession, server_id: int) -> int:
@@ -71,19 +70,19 @@ class DeviceService:
                 f"create_device: invalid server {server_id} or protocol mismatch"
             )
             raise ServerUnavailable("Invalid server or protocol")
-
+        
         # 🔥 ИСПРАВЛЕНО CRITICAL #1: Гибридная проверка слотов
         # Шаг 1: O(1) COUNT из локальной БД (мгновенно, без нагрузки на API)
         local_count = await _get_server_profiles_count(session, server.id)
         free_slots = server.max_clients - local_count
-
+        
         if free_slots <= 0:
             logger.warning(
                 f"create_device: server {server.name} is full "
                 f"(local_count={local_count}/{server.max_clients})"
             )
             raise ServerUnavailable("Server is full")
-
+        
         # Шаг 2: Если свободно менее CRITICAL_SLOTS_THRESHOLD (5) — идём в API
         # для защиты от race condition и overselling.
         # Это защищает от случая, когда в API есть "призрачные" пиры,
@@ -103,7 +102,7 @@ class DeviceService:
                     f"(api_count={real_count}/{server.max_clients})"
                 )
                 raise ServerUnavailable("Server is full")
-
+        
         lock = _get_user_lock(user.id)
         async with lock:
             # SELECT FOR UPDATE для защиты от race condition
@@ -115,14 +114,16 @@ class DeviceService:
             user = result.scalar_one_or_none()
             if not user:
                 raise ServerUnavailable("User disappeared")
-
+            
             if not is_admin(user.telegram_id):
-                now_msk = datetime.now(MSK_TZ).date()
-                if not _is_same_day_msk(user.last_creation_date, now_msk):
+                # 🔥 ИЗМЕНЕНО: now_msk() вместо datetime.now(MSK_TZ)
+                now_msk_date = now_msk().date()
+                
+                if not _is_same_day_msk(user.last_creation_date, now_msk_date):
                     user.device_creations_today = 0
-                    user.last_creation_date = now_msk
+                    user.last_creation_date = now_msk_date
                     await session.flush()
-
+                
                 if user.device_creations_today >= DEVICE_DAILY_LIMIT:
                     logger.warning(
                         f"create_device: user {user.telegram_id} exceeded daily limit"
@@ -138,25 +139,26 @@ class DeviceService:
                             f"Failed to log DEVICE_CREATE_BLOCKED: {audit_error}"
                         )
                     raise DailyLimitExceeded("Daily limit exceeded")
-
+            
             short_hash = uuid.uuid4().hex[:4]
             clean_device_name = re.sub(r'[^a-zA-Z0-9]', '', device_name)[:10]
             if not clean_device_name:
                 clean_device_name = "Device"
+            
             client_name = f"tg_{user.telegram_id}_{clean_device_name}_{short_hash}"
-
+            
             expires_ts = await SubscriptionService.get_expires_timestamp(user)
-
+            
             client = AmneziaClient(server.api_url, server.api_key)
             result = await client.create_user(
                 client_name=client_name, expires_at=expires_ts
             )
             if not result:
                 raise ServerUnavailable("API create_user failed")
-
+            
             peer_id = result.id
             raw_config = result.config
-
+            
             if not is_valid_vpn_uri(raw_config):
                 logger.error(
                     f"create_device: API returned invalid vpn:// URI. Rolling back."
@@ -168,10 +170,11 @@ class DeviceService:
                         f"Failed to rollback invalid config: {rollback_error}"
                     )
                 raise InvalidConfig("Invalid vpn:// URI")
-
+            
             try:
                 async with session.begin_nested() as savepoint:
                     profiles_count = await get_user_profiles_count(session, user.id)
+                    
                     if profiles_count >= user.device_limit:
                         await savepoint.rollback()
                         try:
@@ -182,17 +185,18 @@ class DeviceService:
                                 f"{rollback_error}"
                             )
                         raise DeviceLimitExceeded("Device limit reached")
-
+                    
                     profile = await create_profile(
                         session, user_id=user.id, server_id=server.id,
                         device_name=device_name, peer_id=peer_id,
                         raw_config=raw_config
                     )
-
+                    
                     if not is_admin(user.telegram_id):
                         user.device_creations_today += 1
+                    
                     await savepoint.commit()
-
+                    
                     try:
                         await AuditService.log_action(
                             session, admin_id=user.telegram_id,
@@ -204,8 +208,9 @@ class DeviceService:
                         logger.warning(
                             f"Failed to log DEVICE_CREATED: {audit_error}"
                         )
+                    
                     return profile
-
+                    
             except IntegrityError as e:
                 await session.rollback()
                 logger.error(f"create_device: IntegrityError: {e}")
@@ -228,33 +233,35 @@ class DeviceService:
                         f"Failed to rollback after DB error: {rollback_error}"
                     )
                 raise ServerUnavailable(f"DB error: {e}")
-
+    
     @staticmethod
     async def delete_device(
         session: AsyncSession, profile: VPNProfile
     ) -> bool:
         from database.repositories.profiles_repo import delete_profile
+        
         server = await get_server_by_id(session, profile.server_id)
         if not server:
             logger.error(
                 f"delete_device: server {profile.server_id} not found"
             )
             return False
-
+        
         client = AmneziaClient(server.api_url, server.api_key)
         deleted = await client.delete_user(client_id=profile.peer_id)
+        
         if not deleted:
             logger.error(
                 f"delete_device: API delete_user failed for "
                 f"peer_id={profile.peer_id[:16]}..."
             )
             return False
-
+        
         try:
             async with session.begin_nested() as savepoint:
                 await delete_profile(session, profile)
                 await savepoint.commit()
-
+                
                 try:
                     await AuditService.log_action(
                         session,
@@ -267,8 +274,9 @@ class DeviceService:
                     logger.warning(
                         f"Failed to log DEVICE_DELETED: {audit_error}"
                     )
+                
                 return True
-
+                
         except Exception as e:
             await session.rollback()
             logger.error(f"delete_device: DB error: {e}", exc_info=True)
