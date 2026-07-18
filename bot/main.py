@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import signal
-
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuButtonCommands
@@ -47,7 +46,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     """Глобальный обработчик ошибок с алертом админам"""
     import traceback
     from bot.middlewares.correlation import get_current_request_id
-    
+
     request_id = get_current_request_id()
     logger.critical(
         "[%s] Unhandled exception: %s",
@@ -55,14 +54,14 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         event.exception,
         exc_info=event.exception,
     )
-    
+
     state = kwargs.get("state")
     if state:
         try:
             await state.clear()
         except Exception:
             pass
-    
+
     try:
         settings = get_settings()
         error_traceback = traceback.format_exc(limit=15)
@@ -71,7 +70,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             f"🔍 <b>Request ID:</b> <code>{request_id}</code>\n"
             f"<pre><code>{error_traceback[:3200]}</code></pre>"
         )
-        
         for admin_id in settings.ADMIN_IDS:
             try:
                 await event.bot.send_message(admin_id, error_msg, parse_mode="HTML")
@@ -79,7 +77,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
                 pass
     except Exception as e:
         logger.error("[%s] Failed to send error alert: %s", request_id, e)
-    
+
     try:
         if event.update.callback_query:
             await event.update.callback_query.answer(
@@ -91,7 +89,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             )
     except Exception:
         pass
-    
+
     return True
 
 
@@ -110,13 +108,11 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     settings = get_settings()
     bot = Bot(token=settings.BOT_TOKEN)
     
-    # 🔥 ИСПРАВЛЕНО: RedisStorage вместо MemoryStorage
-    storage = RedisStorage.from_url(
-        settings.REDIS_URL,
-        key_prefix=settings.REDIS_KEY_PREFIX,
-    )
-    dp = Dispatcher(storage=storage)
+    # 🔥 ИСПРАВЛЕНО: Убран неподдерживаемый в aiogram 3.x параметр key_prefix
+    storage = RedisStorage.from_url(settings.REDIS_URL)
     
+    dp = Dispatcher(storage=storage)
+
     # ── Порядок middleware КРИТИЧЕН ──
     # 🔥 ИСПРАВЛЕНО #10: CorrelationMiddleware ПЕРВЫМ
     dp.message.middleware(CorrelationMiddleware())
@@ -146,7 +142,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     
     # 7. ChatAction — показывает "typing..." / "uploading..."
     dp.message.middleware(ChatActionMiddleware())
-    
+
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
     from bot.handlers.admin.dashboard import router as admin_dashboard_router
     from bot.handlers.admin.servers import router as admin_servers_router
@@ -158,7 +154,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     from bot.handlers.profile import router as profile_router
     from bot.handlers.start import router as start_router
     from bot.handlers.support import router as support_router
-    
+
     for r in [
         start_router, profile_router, connection_router, support_router,
         payment_router, admin_dashboard_router, admin_users_router,
@@ -166,11 +162,10 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
         fallback_router,
     ]:
         dp.include_router(r)
-    
+
     dp.errors.register(global_error_handler)
-    
     await setup_bot_commands(bot)
-    
+
     return bot, dp
 
 
@@ -179,7 +174,6 @@ async def start_webhook_server(port: int):
     setup_webhook_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
-    
     # 🔥 ИСПРАВЛЕНО: Слушаем только localhost, Nginx проксирует сюда
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
@@ -205,36 +199,36 @@ def _validate_platega_config() -> bool:
             "Укажите PLATEGA_SECRET в .env или удалите PLATEGA_MERCHANT_ID."
         )
         return False
-    
+        
     if has_secret and not has_merchant:
         logger.critical(
             "❌ PLATEGA_SECRET задан, но PLATEGA_MERCHANT_ID пуст! "
             "Укажите оба параметра или удалите оба."
         )
         return False
-    
+        
     return True
 
 
 async def main():
     """Главная функция запуска"""
     settings = get_settings()
-    
+
     try:
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
-        
+
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
             logger.critical("❌ DB_ENCRYPTION_KEY невалиден: %s", e)
             return
-        
+
         # 🔥 ИСПРАВЛЕНО #14: Проверка конфигурации Platega ДО запуска
         if not _validate_platega_config():
             return
-        
+
         logger.info("Инициализация БД...")
         await init_db()
         
@@ -248,38 +242,36 @@ async def main():
         webhook_runner = None
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
             webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
-        
+
         # 🔥 ИСПРАВЛЕНО: Возобновляем прерванные рассылки после рестарта
         await resume_pending_broadcasts(bot)
         logger.info("Pending broadcasts resumed (if any)")
-        
+
         # 🔥 ИСПРАВЛЕНО #5: Graceful shutdown
         loop = asyncio.get_running_loop()
-        
         def _signal_handler():
             logger.info("Received shutdown signal (SIGTERM/SIGINT)")
             shutdown_event.set()
-        
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(sig, _signal_handler)
             except NotImplementedError:
                 pass
-        
+
         # Запускаем background workers
         worker_tasks = await start_background_workers(bot)
         
         logger.info("Запуск polling...")
         polling_task = asyncio.create_task(dp.start_polling(bot))
-        
+
         # 🔥 ИСПРАВЛЕНО #5: Ждём либо shutdown signal, либо завершение polling
         shutdown_task = asyncio.create_task(shutdown_event.wait())
-        
         done, pending = await asyncio.wait(
             [polling_task, shutdown_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-        
+
         # Если shutdown был запрошен — останавливаем polling
         if shutdown_event.is_set():
             logger.info("Shutdown requested, stopping polling...")
@@ -289,13 +281,11 @@ async def main():
                 await polling_task
             except asyncio.CancelledError:
                 pass
-    
+
     except Exception as e:
         logger.error("Критическая ошибка: %s", e, exc_info=True)
-    
     finally:
         logger.info("Waiting for background workers to finish...")
-        
         if 'worker_tasks' in locals():
             done, pending = await asyncio.wait(
                 worker_tasks,
@@ -308,15 +298,13 @@ async def main():
                     await task
                 except asyncio.CancelledError:
                     pass
-        
+
         logger.info("Cleaning up resources...")
-        
         if 'webhook_runner' in locals() and webhook_runner:
             await webhook_runner.cleanup()
-        
+            
         await close_http_session()
         await close_db()
-        
         logger.info("Работа бота завершена")
 
 
