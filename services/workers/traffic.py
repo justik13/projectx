@@ -11,29 +11,21 @@ from bot.constants import (
     SELF_HEALING_MAX_PER_CYCLE,
 )
 from utils.datetime_helpers import now_utc
+from config.settings import get_settings
 
 logger = logging.getLogger("BackgroundWorker")
+
 BATCH_SIZE = 100
 
-# 🔥 ИСПРАВЛЕНО MEDIUM #7: Окно для Reverse Self-Healing
-# Если пир перешёл в disabled менее 5 минут назад — возможно сбой API (включаем обратно).
-# Если более 5 минут назад — вероятно ручное действие админа (НЕ трогаем).
+# Reverse Self-Healing окно
 REVERSE_HEALING_WINDOW_SECONDS = 300  # 5 минут
 
+# 🔥 ИСПРАВЛЕНО HIGH #8: Fair Usage Policy
+# Лимит трафика 1 ТБ (1024^4 байт). При превышении — алерт админу, НЕ отключаем.
+TRAFFIC_QUOTA_BYTES = 1 * 1024 * 1024 * 1024 * 1024  # 1 TB
+_quota_alerted: set[int] = set()  # profile_id которые уже алертнули
 
-# ═══════════════════════════════════════════════════════════
-# 🔥 ИСПРАВЛЕНО P1-1: HTTP-запросы вынесены за пределы session_scope()
-# Было:
-#   async with session_scope() as session:          # ← ОТКРЫТА ТРАНЗАКЦИЯ
-#       servers = ...
-#       tasks = [_fetch_server_traffic(s) for s in servers]  # ← HTTP!
-#       results = await asyncio.gather(*tasks)      # ← 10 серверов × 15s
-#       # ТРАНЗАКЦИЯ ДЕРЖИТ СОЕДИНЕНИЕ 15 СЕКУНД!
-# Стало:
-#   ШАГ 1: SELECT серверов (быстрая транзакция, ~10ms)
-#   ШАГ 2: HTTP-запросы БЕЗ транзакции (освобождаем соединение из пула)
-#   ШАГ 3: UPDATE в БД (отдельные транзакции на каждый сервер)
-# ═══════════════════════════════════════════════════════════
+
 async def traffic_sync_loop(shutdown_event: asyncio.Event):
     while not shutdown_event.is_set():
         try:
@@ -45,9 +37,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
             except asyncio.TimeoutError:
                 pass
 
-            # ═══════════════════════════════════════════════════════════
-            # ШАГ 1: Загружаем серверы (быстрый SELECT, ~10ms)
-            # ═══════════════════════════════════════════════════════════
             servers = []
             async with session_scope() as session:
                 stmt = select(
@@ -66,10 +55,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
             if not servers:
                 continue
 
-            # ═══════════════════════════════════════════════════════════
-            # ШАГ 2: HTTP-запросы БЕЗ транзакции (concurrent)
-            # Транзакция из шага 1 уже закрыта → соединение из пула свободно
-            # ═══════════════════════════════════════════════════════════
             async def _fetch_server_traffic(server_info):
                 client = AmneziaClient(server_info['api_url'], server_info['api_key'])
                 try:
@@ -83,20 +68,18 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
 
             tasks = [_fetch_server_traffic(s) for s in servers]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+
             api_data_by_server = {
                 r[0]: r[1]
                 for r in results
                 if not isinstance(r, Exception) and r is not None and r[1] is not None
             }
 
-            # ═══════════════════════════════════════════════════════════
-            # ШАГ 3: UPDATE в БД (отдельные session_scope() на каждый сервер)
-            # Каждая транзакция ~50-200ms → пул не истощается
-            # ═══════════════════════════════════════════════════════════
             for server_info in servers:
                 server_id = server_info['id']
                 if server_id not in api_data_by_server:
                     continue
+
                 api_clients = api_data_by_server[server_id]
                 await _process_server_traffic(server_info, api_clients)
 
@@ -114,11 +97,13 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
 
 async def _process_server_traffic(server_info, api_clients):
     """
-    🔥 ИСПРАВЛЕНО (MUST FIX #1): Reverse Self-Healing
-    БД — единственный источник истины для is_active.
+    🔥 ИСПРАВЛЕНО MEDIUM #11: Убрана проверка server_is_active перед отключением.
+    Теперь бот продолжает отключать просроченных/забаненных юзеров
+    даже на выключенных серверах.
     """
     server_id = server_info['id']
-    server_is_active = server_info['is_active']
+    # 🔥 ВАЖНО: server_is_active больше не используется для пропуска логики!
+    # Мы всегда синхронизируем трафик и применяем self-healing.
 
     async with session_scope() as session:
         stmt = (
@@ -131,13 +116,12 @@ async def _process_server_traffic(server_info, api_clients):
             .join(User, VPNProfile.user_id == User.id)
             .where(VPNProfile.server_id == server_id)
         )
-        # 🔥 ИСПРАВЛЕНО P1-5 (из Части 1): yield_per для server-side cursor
+
         result = await session.stream(stmt, yield_per=BATCH_SIZE)
 
         updates_data = {}
         healing_tasks = []
         reverse_healing_tasks = []
-
         current_time = now_utc()
 
         async for row in result.partitions(size=BATCH_SIZE):
@@ -149,12 +133,16 @@ async def _process_server_traffic(server_info, api_clients):
                     continue
 
                 api_data = api_clients[peer_id]
+
                 api_t_down = api_data.traffics.totalDownload
                 api_t_up = api_data.traffics.totalUpload
+
                 new_t_down = api_t_down if api_t_down is not None else t_down
                 new_t_up = api_t_up if api_t_up is not None else t_up
+
                 last_conn_raw = api_data.lastHandshake or api_data.lastSeen or api_data.updatedAt
                 new_last_connected = last_conn
+
                 if last_conn_raw:
                     try:
                         ts = int(float(str(last_conn_raw)))
@@ -166,20 +154,14 @@ async def _process_server_traffic(server_info, api_clients):
 
                 api_is_active = (api_data.status == "active")
                 is_subscription_expired = sub_end and sub_end < current_time
+
                 local_should_be_disabled = (
                     (not is_active) or is_banned or is_subscription_expired
                 )
 
                 if local_should_be_disabled and api_is_active:
-                    if not server_is_active:
-                        if (t_down != new_t_down or t_up != new_t_up or last_conn != new_last_connected):
-                            updates_data[p_id] = {
-                                'traffic_down': new_t_down,
-                                'traffic_up': new_t_up,
-                                'last_connected': new_last_connected,
-                            }
-                        continue
-
+                    # 🔥 ИСПРАВЛЕНО MEDIUM #11: Убран `if not server_is_active: continue`
+                    # Теперь отключаем просроченных даже на выключенных серверах
                     reason = (
                         'banned' if is_banned
                         else ('expired' if is_subscription_expired else 'disabled')
@@ -203,6 +185,7 @@ async def _process_server_traffic(server_info, api_clients):
                                 ts = ts // 1000
                             updated_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                             time_since_update = (current_time - updated_dt).total_seconds()
+
                             if time_since_update < REVERSE_HEALING_WINDOW_SECONDS:
                                 reverse_healing_tasks.append({
                                     'api_url': server_info['api_url'],
@@ -230,6 +213,7 @@ async def _process_server_traffic(server_info, api_clients):
                             f"cannot assess freshness"
                         )
 
+                # Обновляем трафик
                 if (
                     t_down != new_t_down or t_up != new_t_up
                     or last_conn != new_last_connected
@@ -240,28 +224,78 @@ async def _process_server_traffic(server_info, api_clients):
                         'last_connected': new_last_connected,
                     }
 
-    # 🔥 ИСПРАВЛЕНО: Выполняем UPDATE/Healing ВНЕ исходной транзакции
-    # _batch_update_profiles и _self_heal_peers сами открывают свои session_scope()
-    if updates_data:
-        await _batch_update_profiles(updates_data)
-        logger.info(
-            f"Трафик синхронизирован для {len(updates_data)} устройств "
-            f"на сервере {server_info['name']}"
+                    # 🔥 ИСПРАВЛЕНО HIGH #8: Fair Usage Policy
+                    total_traffic = (new_t_down or 0) + (new_t_up or 0)
+                    if total_traffic > TRAFFIC_QUOTA_BYTES and p_id not in _quota_alerted:
+                        _quota_alerted.add(p_id)
+                        asyncio.create_task(
+                            _send_quota_alert(tg_id, server_info['name'], total_traffic, p_id)
+                        )
+
+        if updates_data:
+            await _batch_update_profiles(updates_data)
+            logger.info(
+                f"Трафик синхронизирован для {len(updates_data)} устройств "
+                f"на сервере {server_info['name']}"
+            )
+
+        if healing_tasks:
+            await _self_heal_peers(healing_tasks)
+
+        if reverse_healing_tasks:
+            await _self_heal_peers(reverse_healing_tasks)
+
+
+async def _send_quota_alert(telegram_id: int, server_name: str, total_bytes: int, profile_id: int):
+    """🔥 НОВОЕ: Fair Usage Policy - алерт админу при превышении 1 ТБ"""
+    try:
+        from services.workers.heartbeat import get_bot_ref
+        bot = get_bot_ref()
+        if not bot:
+            return
+
+        settings = get_settings()
+        admin_ids = settings.ADMIN_IDS
+        if not admin_ids:
+            return
+
+        tb = total_bytes / (1024 ** 4)
+        msg = (
+            f"⚠️ <b>Fair Usage Policy: Превышение квоты трафика!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Пользователь:</b> <code>{telegram_id}</code>\n"
+            f"🌍 <b>Сервер:</b> {server_name}\n"
+            f"📊 <b>Использовано:</b> <b>{tb:.2f} TB</b>\n"
+            f"🆔 <b>Profile ID:</b> <code>{profile_id}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Пользователь скачал более 1 TB трафика.\n"
+            f"Рекомендуется связаться с ним или принять меры.\n"
+            f"Доступ НЕ отключен автоматически (Fair Usage Policy).</i>"
         )
 
-    if healing_tasks:
-        await _self_heal_peers(healing_tasks)
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text="👤 Профиль пользователя",
+            callback_data=f"admin_user_card:{telegram_id}"
+        )
+        builder.adjust(1)
 
-    if reverse_healing_tasks:
-        await _self_heal_peers(reverse_healing_tasks)
+        for admin_id in admin_ids:
+            try:
+                await bot.send_message(
+                    admin_id, msg,
+                    reply_markup=builder.as_markup(),
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send quota alert to {admin_id}: {e}")
+    except Exception as e:
+        logger.error(f"Failed to send quota alert: {e}")
 
 
 async def _batch_update_profiles(updates_data: dict):
-    """
-    🔥 ИСПРАВЛЕНО HIGH #5: Upsert вместо CASE-генерации.
-    Использует INSERT ... ON CONFLICT (id) DO UPDATE SET ...
-    Это один предкомпилированный план выполнения для PostgreSQL.
-    """
+    """Upsert вместо CASE-генерации."""
     async with session_scope() as session:
         items = list(updates_data.items())
         for i in range(0, len(items), BATCH_SIZE):

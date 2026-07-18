@@ -1,6 +1,7 @@
 """
-Webhook handlers для Platega.io.
+Webhook handlers для Плatega.io.
 🔥 ИСПРАВЛЕНО: Обработка result_code "paid_after_cancel"
+🔥 ИСПРАВЛЕНО: Missing return при неизвестном статусе (Логический байпас)
 """
 import logging
 import uuid
@@ -16,9 +17,8 @@ from bot.middlewares.correlation import set_request_id
 
 logger = logging.getLogger(__name__)
 
-
 class PlategaCallbackData(BaseModel):
-    """Схема webhook callback от Platega.io."""
+    """Схема webhook callback от Плatega.io."""
     id: Optional[str] = None
     transactionId: Optional[str] = None
     status: str = Field(..., description="CONFIRMED | CANCELED | CHARGEBACKED")
@@ -37,19 +37,18 @@ class PlategaCallbackData(BaseModel):
     def normalize_status(self) -> str:
         return self.status.upper()
 
-
 async def platega_webhook_handler(request: web.Request) -> web.Response:
-    """Обработчик webhook от Platega.io"""
+    """Обработчик webhook от Плatega.io"""
     request_id = uuid.uuid4().hex[:8]
     set_request_id(request_id)
-
+    
     transaction_id = None
     status = None
 
     try:
         merchant_id = request.headers.get("X-MerchantId", "")
         secret = request.headers.get("X-Secret", "")
-
+        
         client = PlategaClient()
         if not client.validate_callback(merchant_id, secret):
             logger.warning(
@@ -99,6 +98,8 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
                 "[%s] Platega webhook unknown status: %s (transaction=%s)",
                 request_id, status, transaction_id,
             )
+            # 🔥 КРИТИЧЕСКИЙ ФИКС: Обрываем выполнение при невалидном статусе
+            return web.Response(status=400, text="Invalid webhook status")
 
         logger.info(
             "[%s] Platega webhook received: transaction=%s, status=%s, "
@@ -202,11 +203,9 @@ async def platega_webhook_handler(request: web.Request) -> web.Response:
         )
         return web.Response(status=500, text="Internal server error")
 
-
 async def healthcheck_handler(request: web.Request) -> web.Response:
     """Эндпоинт для мониторинга (UptimeRobot, Healthchecks.io)"""
     return web.Response(status=200, text="OK")
-
 
 def setup_webhook_routes(app: web.Application):
     """Регистрирует webhook маршруты"""

@@ -1,6 +1,7 @@
 """
 Сервис управления подписками.
 🔥 ИСПРАВЛЕНО P0-3: TOCTOU проверка profiles_count в extend_subscription
+🔥 ИСПРАВЛЕНО: Защита от Circular Referral Chain при онбординге.
 """
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.repositories.users_repo import get_user_by_telegram_id, create_user, update_user
@@ -17,7 +18,6 @@ import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
-
 
 class SubscriptionService:
     @staticmethod
@@ -41,8 +41,29 @@ class SubscriptionService:
         if ref_id is not None and ref_id != telegram_id:
             ref_user = await get_user_by_telegram_id(session, ref_id)
             if ref_user:
-                referred_by = ref_id
-                logger.info(f"New user {telegram_id} referred by {ref_id}")
+                # 🔥 ИСПРАВЛЕНО: Защита от Circular Referral Chain (до 5 уровней)
+                # Предотвращает фарм бонусов через кольца (A -> B -> C -> A)
+                current_id = ref_id
+                chain_visited = {telegram_id, ref_id}
+                is_circular = False
+                
+                for _ in range(5):
+                    if not current_id:
+                        break
+                    current_user = await get_user_by_telegram_id(session, current_id)
+                    if not current_user or not current_user.referred_by:
+                        break
+                    if current_user.referred_by in chain_visited:
+                        is_circular = True
+                        break
+                    chain_visited.add(current_user.referred_by)
+                    current_id = current_user.referred_by
+                    
+                if not is_circular:
+                    referred_by = ref_id
+                    logger.info(f"New user {telegram_id} referred by {ref_id}")
+                else:
+                    logger.warning(f"Circular referral chain detected for user {telegram_id}, ref_id {ref_id}")
 
         return await create_user(session, telegram_id, username, first_name, referred_by)
 
@@ -74,12 +95,12 @@ class SubscriptionService:
             user.subscription_end and user.subscription_end > now
         ) else now
         new_end = PERMANENT_END_DATE if days >= PERMANENT_SUBSCRIPTION_DAYS else current_end + timedelta(days=days)
-
+        
         user.subscription_end = new_end
         user.notified_3d = False
         user.notified_1d = False
         user.notified_2h = False
-
+        
         if new_device_limit is not None:
             old_device_limit = user.device_limit
             user.device_limit = new_device_limit
@@ -91,18 +112,18 @@ class SubscriptionService:
                     f"{old_device_limit} to {new_device_limit} devices. "
                     f"Daily creations counter reset to 0."
                 )
-
+                
         if new_tariff_id is not None:
             user.current_tariff_id = new_tariff_id
 
         await session.flush()
         invalidate_user_cache(telegram_id)
-
+        
         expires_ts = await SubscriptionService.get_expires_timestamp(user)
         asyncio.create_task(
             SubscriptionService._sync_expires_to_servers(user.id, expires_ts)
         )
-
+        
         return user
 
     @staticmethod
@@ -117,14 +138,14 @@ class SubscriptionService:
                 profiles = await get_user_profiles(session, user_id)
                 if not profiles:
                     return
-
+                    
                 server_ids = {p.server_id for p in profiles}
                 servers_map = {}
                 for sid in server_ids:
                     s = await get_server_by_id(session, sid)
                     if s:
                         servers_map[sid] = s
-
+                        
                 tasks = []
                 for profile in profiles:
                     server = servers_map.get(profile.server_id)
@@ -137,7 +158,6 @@ class SubscriptionService:
                                 status="active"
                             )
                         )
-
                 if tasks:
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     success = sum(1 for r in results if r is True)
@@ -162,6 +182,5 @@ class SubscriptionService:
                 f"sending expiresAt=null to API"
             )
             return None
-
         expires_ts = int(user.subscription_end.timestamp())
         return expires_ts

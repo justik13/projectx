@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 _http_session: Optional[aiohttp.ClientSession] = None
 
+
 # ============================================================
 # 🔥 CIRCUIT BREAKER
 # ============================================================
@@ -63,7 +64,9 @@ class CircuitBreaker:
     def is_open(self) -> bool:
         return self.state == "OPEN"
 
+
 _circuit_breakers: dict[str, CircuitBreaker] = {}
+
 
 def _get_circuit_breaker(api_url: str) -> CircuitBreaker:
     if api_url not in _circuit_breakers:
@@ -75,11 +78,7 @@ def _get_circuit_breaker(api_url: str) -> CircuitBreaker:
 
 
 def cleanup_server_circuit_breakers(api_url: str) -> None:
-    """
-    🔥 ИСПРАВЛЕНО LOW #14: Очищает circuit breakers и rate limiters при удалении сервера.
-    Предотвращает микро-утечку памяти в словарях при частом добавлении/удалении серверов.
-    Вызывается из services/servers_repo.py при delete_server.
-    """
+    """Очищает circuit breakers и rate limiters при удалении сервера."""
     api_url = api_url.rstrip("/")
     if api_url in _circuit_breakers:
         del _circuit_breakers[api_url]
@@ -116,12 +115,15 @@ class TokenBucketRateLimiter:
                 return False
             await asyncio.sleep(min(1.0 / self.rate, remaining))
 
+
 _rate_limiters: dict[str, TokenBucketRateLimiter] = {}
+
 
 def _get_rate_limiter(api_url: str) -> TokenBucketRateLimiter:
     if api_url not in _rate_limiters:
         _rate_limiters[api_url] = TokenBucketRateLimiter(rate=10.0, burst=20)
     return _rate_limiters[api_url]
+
 
 # ============================================================
 # DTO MODELS
@@ -131,11 +133,13 @@ class AmneziaClientCreateResponse(BaseModel):
     config: str
     protocol: str = AMNEZIA_PROTOCOL
 
+
 class AmneziaClientTraffic(BaseModel):
     totalDownload: int = 0
     totalUpload: int = 0
     received: int = 0
     sent: int = 0
+
 
 class AmneziaClientListItem(BaseModel):
     id: str
@@ -155,6 +159,7 @@ class AmneziaClientListItem(BaseModel):
     def name(self) -> str:
         return self.peer_name
 
+
 class AmneziaServerInfo(BaseModel):
     name: str = ""
     protocols: List[str] = Field(default_factory=list)
@@ -164,6 +169,7 @@ class AmneziaServerInfo(BaseModel):
 
     def get_effective_max_peers(self) -> int:
         return self.maxPeers or self.serverMaxPeers or self.SERVER_MAX_PEERS
+
 
 # ============================================================
 # HTTP SESSION
@@ -180,11 +186,13 @@ async def get_http_session() -> aiohttp.ClientSession:
         )
     return _http_session
 
+
 async def close_http_session():
     global _http_session
     if _http_session:
         await _http_session.close()
         _http_session = None
+
 
 # ============================================================
 # CLIENT
@@ -200,6 +208,7 @@ class AmneziaClient:
     async def _request(self, method: str, path: str, **kwargs) -> Optional[dict]:
         url = f"{self.api_url}{path}"
         cb = _get_circuit_breaker(self.api_url)
+
         if not await cb.is_available():
             logger.debug(
                 f"Circuit breaker OPEN for {self.api_url}{path}, skipping request"
@@ -207,6 +216,7 @@ class AmneziaClient:
             return None
 
         limiter = _get_rate_limiter(self.api_url)
+
         for attempt in range(API_RETRY_COUNT + 1):
             if not await limiter.acquire(timeout=30.0):
                 logger.warning(
@@ -239,15 +249,17 @@ class AmneziaClient:
                                 )
                                 await asyncio.sleep(backoff)
                                 continue
-                            await cb.record_failure()
-                            return None
-                        else:
+                        await cb.record_failure()
+                        # 🔥 ИСПРАВЛЕНО MEDIUM #14: Ограничиваем логи
+                        try:
                             error_text = await response.text()
                             logger.warning(
                                 f"API {self.api_url}{path} returned {response.status} "
-                                f"(client error, not counting as failure): {error_text[:200]}"
+                                f"(client error): {error_text[:100]}"
                             )
-                            return None
+                        except Exception:
+                            pass
+                        return None
                     else:
                         if attempt < API_RETRY_COUNT and response.status >= 500:
                             backoff = 2 ** attempt
@@ -259,6 +271,7 @@ class AmneziaClient:
                             continue
                         await cb.record_failure()
                         return None
+
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if attempt < API_RETRY_COUNT:
                     backoff = 2 ** attempt
@@ -281,6 +294,7 @@ class AmneziaClient:
                     f"{type(e).__name__}: {e}"
                 )
                 return None
+
         return None
 
     async def create_user(
@@ -312,16 +326,13 @@ class AmneziaClient:
         expires_at: Optional[int] = None
     ) -> bool:
         data = {"clientId": client_id, "protocol": AMNEZIA_PROTOCOL}
-        
-        # 🔥 ИСПРАВЛЕНО HIGH #4: Race Condition expiresAt
         if expires_at is not None and status is None:
             status = "active"
-            
         if status is not None:
             data["status"] = status
         if expires_at is not None:
             data["expiresAt"] = expires_at
-            
+
         result = await self._request("PATCH", "/clients", json=data)
         return result is not None
 
@@ -342,16 +353,24 @@ class AmneziaClient:
         return (await self._request("GET", "/healthz")) is not None
 
     async def get_all_clients(self) -> Optional[List[AmneziaClientListItem]]:
+        """
+        🔥 ИСПРАВЛЕНО MEDIUM #12: Убран max_pages = 10
+        Теперь поддерживает серверы с >1000 пиров без зомбификации.
+        """
         all_clients: List[AmneziaClientListItem] = []
         page_size = 100
-        max_pages = 10
         page_count = 0
-
-        while page_count < max_pages:
+        
+        # 🔥 ИСПРАВЛЕНО: while True вместо max_pages
+        # Защита от бесконечного цикла — max 100 страниц (10000 клиентов)
+        MAX_SAFETY_PAGES = 100
+        
+        while page_count < MAX_SAFETY_PAGES:
             result = await self._request(
                 "GET", "/clients",
                 params={"skip": page_count * page_size, "limit": page_size}
             )
+
             if result is None:
                 if page_count == 0:
                     return None
@@ -373,10 +392,11 @@ class AmneziaClient:
 
             page_count += 1
 
-        if page_count >= max_pages:
+        if page_count >= MAX_SAFETY_PAGES:
             logger.warning(
                 f"get_all_clients: reached safety limit "
-                f"({max_pages * page_size} clients)."
+                f"({MAX_SAFETY_PAGES * page_size} clients). "
+                f"Server has more clients than can be fetched."
             )
 
         logger.info(
@@ -391,16 +411,20 @@ class AmneziaClient:
         for item in items_raw:
             if not isinstance(item, dict):
                 continue
+
             username = item.get("username", "")
             peers = item.get("peers", [])
             if not isinstance(peers, list):
                 continue
+
             for peer in peers:
                 if not isinstance(peer, dict):
                     continue
+
                 peer_id = peer.get("id", "")
                 if not peer_id:
                     continue
+
                 traffic_raw = peer.get("traffic", {})
                 if isinstance(traffic_raw, dict):
                     traffic = AmneziaClientTraffic(
@@ -411,6 +435,7 @@ class AmneziaClient:
                     )
                 else:
                     traffic = AmneziaClientTraffic()
+
                 try:
                     client_item = AmneziaClientListItem(
                         id=peer_id,
@@ -428,6 +453,7 @@ class AmneziaClient:
                         f"Failed to parse peer item: {e}, peer={peer}"
                     )
                     continue
+
         return clients
 
     async def delete_client(self, client_id: str) -> bool:

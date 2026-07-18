@@ -26,14 +26,13 @@ from services.workers import start_background_workers, shutdown_event
 from bot.handlers.webhook import setup_webhook_routes
 from bot.handlers.admin.broadcast import resume_pending_broadcasts
 
-# 🔥 ИСПРАВЛЕНО #10: Формат логов с request_id
+# Формат логов с request_id
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - [%(request_id)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# 🔥 ИСПРАВЛЕНО #10: Добавляем CorrelationFilter в корневой logger
 root_logger = logging.getLogger()
 root_logger.addFilter(CorrelationFilter())
 for handler in root_logger.handlers:
@@ -43,11 +42,16 @@ logger = logging.getLogger(__name__)
 
 
 async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
-    """Глобальный обработчик ошибок с алертом админам"""
-    import traceback
+    """
+    Глобальный обработчик ошибок.
+    🔥 ИСПРАВЛЕНО MEDIUM #13: Утечка стектрейсов в Telegram.
+    Теперь админам отправляется ТОЛЬКО Request ID + краткое описание.
+    Полный стектрейс пишется в journalctl для последующего анализа.
+    """
     from bot.middlewares.correlation import get_current_request_id
-
     request_id = get_current_request_id()
+
+    # 🔥 Полная ошибка с traceback идет ТОЛЬКО в логи (journalctl)
     logger.critical(
         "[%s] Unhandled exception: %s",
         request_id,
@@ -64,12 +68,23 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
 
     try:
         settings = get_settings()
-        error_traceback = traceback.format_exc(limit=15)
+        
+        # 🔥 ИСПРАВЛЕНО MEDIUM #13: В Telegram — только Request ID и тип ошибки
+        # БЕЗ traceback, БЕЗ кусков кода, БЕЗ путей файлов
+        error_type = type(event.exception).__name__
+        error_short = str(event.exception)[:200]
+        
         error_msg = (
             f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА БОТА</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🔍 <b>Request ID:</b> <code>{request_id}</code>\n"
-            f"<pre><code>{error_traceback[:3200]}</code></pre>"
+            f"⚠️ <b>Тип:</b> <code>{error_type}</code>\n"
+            f"📝 <b>Описание:</b> <i>{error_short}</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Полный лог доступен через:\n"
+            f"<code>journalctl -u projectx-bot | grep {request_id}</code></i>"
         )
+
         for admin_id in settings.ADMIN_IDS:
             try:
                 await event.bot.send_message(admin_id, error_msg, parse_mode="HTML")
@@ -107,40 +122,39 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     """Создаёт и настраивает bot + dispatcher"""
     settings = get_settings()
     bot = Bot(token=settings.BOT_TOKEN)
-    
-    # 🔥 ИСПРАВЛЕНО: Убран неподдерживаемый в aiogram 3.x параметр key_prefix
+
+    # Убран неподдерживаемый в aiogram 3.x параметр key_prefix
     storage = RedisStorage.from_url(settings.REDIS_URL)
-    
     dp = Dispatcher(storage=storage)
 
     # ── Порядок middleware КРИТИЧЕН ──
-    # 🔥 ИСПРАВЛЕНО #10: CorrelationMiddleware ПЕРВЫМ
+    # 1. CorrelationMiddleware ПЕРВЫМ — генерирует ID
     dp.message.middleware(CorrelationMiddleware())
     dp.callback_query.middleware(CorrelationMiddleware())
-    
-    # 1. DBSession — нужен всем (создаёт сессию БД)
+
+    # 2. DBSession — нужен всем (создаёт сессию БД)
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
-    
-    # 2. CleanChat — удаляет сообщения пользователя (SMH)
+
+    # 3. CleanChat — удаляет сообщения пользователя (SMH)
     dp.message.middleware(CleanChatMiddleware())
-    
-    # 3. UserContext — загружает User из БД в data["db_user"]
+
+    # 4. UserContext — загружает User из БД в data["db_user"]
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
-    
-    # 🔥 НОВОЕ: 4. BanCheck — проверяет бан ПОСЛЕ загрузки юзера
+
+    # 5. BanCheck — проверяет бан ПОСЛЕ загрузки юзера
     dp.message.middleware(BanCheckMiddleware())
     dp.callback_query.middleware(BanCheckMiddleware())
-    
-    # 5. Throttling — глобальный rate limit 0.3с + action_type 2.0с
+
+    # 6. Throttling — глобальный rate limit 0.3с + action_type 2.0с
     dp.message.middleware(ThrottlingMiddleware(limit=0.3))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
-    
-    # 6. ActionLock — эксклюзивная блокировка тяжёлых действий
+
+    # 7. ActionLock — эксклюзивная блокировка тяжёлых действий
     dp.callback_query.middleware(ActionLockMiddleware())
-    
-    # 7. ChatAction — показывает "typing..." / "uploading..."
+
+    # 8. ChatAction — показывает "typing..." / "uploading..."
     dp.message.middleware(ChatActionMiddleware())
 
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
@@ -165,7 +179,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
     dp.errors.register(global_error_handler)
     await setup_bot_commands(bot)
-
     return bot, dp
 
 
@@ -174,7 +187,7 @@ async def start_webhook_server(port: int):
     setup_webhook_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
-    # 🔥 ИСПРАВЛЕНО: Слушаем только localhost, Nginx проксирует сюда
+    # Слушаем только localhost, Nginx проксирует сюда
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
     logger.info("Webhook server started on 127.0.0.1:%d", port)
@@ -183,15 +196,14 @@ async def start_webhook_server(port: int):
 
 def _validate_platega_config() -> bool:
     """
-    🔥 ИСПРАВЛЕНО #14: Проверка конфигурации Platega при старте.
+    Проверка конфигурации Platega при старте.
     Если Platega включена (есть merchant_id), но secret пустой —
     webhook будет принимать ЛЮБЫЕ запросы (пустая строка == пустая строка).
-    Это критическая уязвимость — бот не должен запускаться.
     """
     settings = get_settings()
     has_merchant = bool(settings.PLATEGA_MERCHANT_ID.strip())
     has_secret = bool(settings.PLATEGA_SECRET.strip())
-    
+
     if has_merchant and not has_secret:
         logger.critical(
             "❌ PLATEGA_MERCHANT_ID задан, но PLATEGA_SECRET пуст! "
@@ -199,14 +211,14 @@ def _validate_platega_config() -> bool:
             "Укажите PLATEGA_SECRET в .env или удалите PLATEGA_MERCHANT_ID."
         )
         return False
-        
+
     if has_secret and not has_merchant:
         logger.critical(
             "❌ PLATEGA_SECRET задан, но PLATEGA_MERCHANT_ID пуст! "
             "Укажите оба параметра или удалите оба."
         )
         return False
-        
+
     return True
 
 
@@ -225,30 +237,30 @@ async def main():
             logger.critical("❌ DB_ENCRYPTION_KEY невалиден: %s", e)
             return
 
-        # 🔥 ИСПРАВЛЕНО #14: Проверка конфигурации Platega ДО запуска
+        # Проверка конфигурации Platega ДО запуска
         if not _validate_platega_config():
             return
 
         logger.info("Инициализация БД...")
         await init_db()
-        
         logger.info(
             "🔄 Bot started — all in-memory operation locks cleared (restart). "
             "DB unique constraints + ActionLockMiddleware protect against duplicates."
         )
-        
+
         bot, dp = await setup_bot()
-        
+
         webhook_runner = None
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
             webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
 
-        # 🔥 ИСПРАВЛЕНО: Возобновляем прерванные рассылки после рестарта
+        # Возобновляем прерванные рассылки после рестарта
         await resume_pending_broadcasts(bot)
         logger.info("Pending broadcasts resumed (if any)")
 
-        # 🔥 ИСПРАВЛЕНО #5: Graceful shutdown
+        # Graceful shutdown
         loop = asyncio.get_running_loop()
+
         def _signal_handler():
             logger.info("Received shutdown signal (SIGTERM/SIGINT)")
             shutdown_event.set()
@@ -261,11 +273,10 @@ async def main():
 
         # Запускаем background workers
         worker_tasks = await start_background_workers(bot)
-        
         logger.info("Запуск polling...")
         polling_task = asyncio.create_task(dp.start_polling(bot))
 
-        # 🔥 ИСПРАВЛЕНО #5: Ждём либо shutdown signal, либо завершение polling
+        # Ждём либо shutdown signal, либо завершение polling
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         done, pending = await asyncio.wait(
             [polling_task, shutdown_task],
@@ -302,7 +313,6 @@ async def main():
         logger.info("Cleaning up resources...")
         if 'webhook_runner' in locals() and webhook_runner:
             await webhook_runner.cleanup()
-            
         await close_http_session()
         await close_db()
         logger.info("Работа бота завершена")

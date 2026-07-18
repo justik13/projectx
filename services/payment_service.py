@@ -12,12 +12,26 @@ from services.platega_client import PlategaClient
 from services.audit_service import AuditService
 from config.settings import get_settings
 from utils.datetime_helpers import now_utc
+import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
 
-# 🔥 НОВОЕ: Дедупликация алертов/уведомлений paid-after-cancel
+# Дедупликация алертов/уведомлений paid-after-cancel
 _alerted_paid_after_cancel: set[int] = set()
 _notified_paid_after_cancel: set[int] = set()
+
+_redis_client: aioredis.Redis | None = None
+
+async def _get_redis() -> aioredis.Redis:
+    global _redis_client
+    if _redis_client is None:
+        settings = get_settings()
+        _redis_client = aioredis.from_url(
+            settings.REDIS_URL,
+            decode_responses=True,
+            socket_timeout=5.0,
+        )
+    return _redis_client
 
 
 class PaymentService:
@@ -27,153 +41,187 @@ class PaymentService:
     ) -> tuple[bool, str]:
         """
         Обрабатывает успешную оплату.
-        🔥 ИСПРАВЛЕНО P0-1: Идемпотентность — при rowcount==0 проверяем текущий статус.
-        Возвращает (success, result_code).
-        result_code: "success" | "already_processed" | "paid_after_cancel" | "error"
+        🔥 ИСПРАВЛЕНО HIGH #7: Double Bonus через Redis Lock.
         """
-        try:
-            async with session.begin_nested() as savepoint:
-                stmt = (
-                    update(Payment)
-                    .where(Payment.id == payment_id, Payment.status == 'pending')
-                    .values(
-                        status='completed',
-                        paid_at=now_utc(),
-                    )
-                )
-                result = await session.execute(stmt)
+        # 🔥 ИСПРАВЛЕНО HIGH #7: Redis Lock для атомарной проверки is_first_payment
+        redis = await _get_redis()
+        lock_key = f"lock:payment_bonus:user"
+        # Блокируем на уровне пользователя, которому начисляется бонус
+        payment_obj = await session.get(Payment, payment_id)
+        if not payment_obj:
+            return False, "not_found"
+        user_lock_key = f"lock:payment_bonus:{payment_obj.user_id}"
+        redis_lock = redis.lock(user_lock_key, timeout=30, blocking_timeout=15)
 
-                if result.rowcount == 0:
-                    current_payment = await session.get(Payment, payment_id)
-                    if current_payment and current_payment.status == 'completed':
-                        await savepoint.commit()
-                        logger.info(
-                            f"Payment {payment_id} already completed (idempotent)"
+        try:
+            acquired = await redis_lock.acquire()
+            if not acquired:
+                logger.warning(
+                    f"Payment {payment_id}: failed to acquire Redis bonus lock"
+                )
+                # Продолжаем без бонуса — платеж все равно пройдет
+                pass
+
+            try:
+                async with session.begin_nested() as savepoint:
+                    stmt = (
+                        update(Payment)
+                        .where(Payment.id == payment_id, Payment.status == 'pending')
+                        .values(
+                            status='completed',
+                            paid_at=now_utc(),
                         )
-                        return True, "already_processed"
-                    elif current_payment and current_payment.status == 'cancelled':
-                        await savepoint.commit()
-                        await _alert_paid_after_cancel(session, payment_id)
-                        await _notify_client_paid_after_cancel(session, payment_id)
-                        return True, "paid_after_cancel"
-                    else:
+                    )
+                    result = await session.execute(stmt)
+
+                    if result.rowcount == 0:
+                        current_payment = await session.get(Payment, payment_id)
+                        if current_payment and current_payment.status == 'completed':
+                            await savepoint.commit()
+                            logger.info(
+                                f"Payment {payment_id} already completed (idempotent)"
+                            )
+                            return True, "already_processed"
+                        elif current_payment and current_payment.status == 'cancelled':
+                            await savepoint.commit()
+                            await _alert_paid_after_cancel(session, payment_id)
+                            await _notify_client_paid_after_cancel(session, payment_id)
+                            return True, "paid_after_cancel"
+                        else:
+                            await savepoint.rollback()
+                            return False, "error"
+
+                    result = await session.execute(
+                        select(Payment)
+                        .options(
+                            selectinload(Payment.user),
+                            selectinload(Payment.tariff),
+                        )
+                        .where(Payment.id == payment_id)
+                    )
+                    payment = result.scalar_one()
+                    tariff = payment.tariff
+                    user = payment.user
+
+                    if not tariff or not user:
+                        logger.error(
+                            f"Payment {payment_id}: missing tariff or user"
+                        )
                         await savepoint.rollback()
                         return False, "error"
 
-                result = await session.execute(
-                    select(Payment)
-                    .options(
-                        selectinload(Payment.user),
-                        selectinload(Payment.tariff),
+                    new_device_limit = getattr(
+                        tariff, 'device_limit', user.device_limit
                     )
-                    .where(Payment.id == payment_id)
-                )
-                payment = result.scalar_one()
-                tariff = payment.tariff
-                user = payment.user
 
-                if not tariff or not user:
-                    logger.error(
-                        f"Payment {payment_id}: missing tariff or user"
-                    )
-                    await savepoint.rollback()
-                    return False, "error"
-
-                new_device_limit = getattr(
-                    tariff, 'device_limit', user.device_limit
-                )
-
-                try:
-                    await SubscriptionService.extend_subscription(
-                        session, user.telegram_id, tariff.duration_days,
-                        new_device_limit=new_device_limit,
-                        new_tariff_id=tariff.id,
-                    )
-                except ValueError as e:
-                    logger.error(
-                        f"Failed to extend subscription for payment "
-                        f"{payment_id}: {e}",
-                        exc_info=True,
-                    )
-                    await savepoint.rollback()
-                    return False, "device_limit_exceeded"
-                except Exception as e:
-                    logger.error(
-                        f"Failed to extend subscription for payment "
-                        f"{payment_id}: {e}",
-                        exc_info=True,
-                    )
-                    await savepoint.rollback()
-                    return False, "error"
-
-                payments = await get_user_payments(session, user.id)
-                successful_payments = [
-                    p for p in payments if p.status == 'completed'
-                ]
-                is_first_payment = len(successful_payments) == 1
-
-                if user.referred_by:
                     try:
-                        await ReferralService.process_bonus(
-                            session,
-                            user.telegram_id,
-                            user.referred_by,
-                            is_first_payment=is_first_payment,
-                            duration_days=tariff.duration_days,
+                        await SubscriptionService.extend_subscription(
+                            session, user.telegram_id, tariff.duration_days,
+                            new_device_limit=new_device_limit,
+                            new_tariff_id=tariff.id,
+                        )
+                    except ValueError as e:
+                        logger.error(
+                            f"Failed to extend subscription for payment "
+                            f"{payment_id}: {e}",
+                            exc_info=True,
+                        )
+                        await savepoint.rollback()
+                        return False, "device_limit_exceeded"
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to extend subscription for payment "
+                            f"{payment_id}: {e}",
+                            exc_info=True,
+                        )
+                        await savepoint.rollback()
+                        return False, "error"
+
+                    payments = await get_user_payments(session, user.id)
+                    successful_payments = [
+                        p for p in payments if p.status == 'completed'
+                    ]
+                    is_first_payment = len(successful_payments) == 1
+
+                    if user.referred_by:
+                        try:
+                            await ReferralService.process_bonus(
+                                session,
+                                user.telegram_id,
+                                user.referred_by,
+                                is_first_payment=is_first_payment,
+                                duration_days=tariff.duration_days,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Referral bonus failed for payment "
+                                f"{payment_id}: {e}"
+                            )
+
+                    user.last_payment_at = now_utc()
+                    await savepoint.commit()
+                    invalidate_user_cache(user.telegram_id)
+
+                    try:
+                        await AuditService.log_action(
+                            session, admin_id=0, action="PAYMENT_SUCCESS",
+                            target_type="Payment", target_id=payment_id,
+                            details=(
+                                f"user={user.telegram_id}, "
+                                f"amount={payment.amount} {payment.currency}"
+                            ),
                         )
                     except Exception as e:
-                        logger.warning(
-                            f"Referral bonus failed for payment "
-                            f"{payment_id}: {e}"
+                        logger.error(
+                            f"Failed to log payment success to audit: {e}"
                         )
 
-                user.last_payment_at = now_utc()
-                await savepoint.commit()
-                invalidate_user_cache(user.telegram_id)
-
-                try:
-                    await AuditService.log_action(
-                        session, admin_id=0, action="PAYMENT_SUCCESS",
-                        target_type="Payment", target_id=payment_id,
-                        details=(
-                            f"user={user.telegram_id}, "
-                            f"amount={payment.amount} {payment.currency}"
-                        ),
+                    logger.info(
+                        f"Payment {payment_id} processed successfully "
+                        f"for user {user.telegram_id}"
                     )
-                except Exception as e:
-                    logger.error(
-                        f"Failed to log payment success to audit: {e}"
-                    )
-
-                logger.info(
-                    f"Payment {payment_id} processed successfully "
-                    f"for user {user.telegram_id}"
+                    return True, "success"
+            except Exception as e:
+                await session.rollback()
+                logger.error(
+                    f"Failed to process payment {payment_id}: {e}",
+                    exc_info=True,
                 )
-                return True, "success"
-
-        except Exception as e:
-            await session.rollback()
-            logger.error(
-                f"Failed to process payment {payment_id}: {e}",
-                exc_info=True,
-            )
-            return False, "error"
+                return False, "error"
+        finally:
+            try:
+                await redis_lock.release()
+            except Exception:
+                pass
 
     @staticmethod
     async def force_grant_payment(
         session: AsyncSession, payment_id: int, admin_id: int
     ) -> tuple[bool, str]:
         """
-        🔥 ИСПРАВЛЕНО P0-4: Принудительная выдача подписки по cancelled платежу.
+        🔥 ИСПРАВЛЕНО MEDIUM #8: Double Admin Grant.
+        Принудительная выдача подписки по cancelled платежу.
+        Теперь проверяет, что платеж еще не completed.
         """
         try:
             async with session.begin_nested() as savepoint:
+                # 🔥 ИСПРАВЛЕНО MEDIUM #8: WHERE status != 'completed'
                 stmt = (
                     update(Payment)
-                    .where(Payment.id == payment_id)
+                    .where(
+                        Payment.id == payment_id,
+                        Payment.status != 'completed'
+                    )
                     .values(status='completed', paid_at=now_utc())
                 )
-                await session.execute(stmt)
+                result = await session.execute(stmt)
+
+                if result.rowcount == 0:
+                    await savepoint.rollback()
+                    current = await session.get(Payment, payment_id)
+                    if current and current.status == 'completed':
+                        return False, "Платёж уже выдан"
+                    return False, "Платёж не найден или не может быть выдан"
 
                 result = await session.execute(
                     select(Payment)
@@ -184,6 +232,7 @@ class PaymentService:
                     .where(Payment.id == payment_id)
                 )
                 payment = result.scalar_one_or_none()
+
                 if not payment:
                     await savepoint.rollback()
                     return False, "Платёж не найден"
@@ -249,7 +298,6 @@ class PaymentService:
                     logger.error(f"force_grant: audit failed: {e}")
 
                 return True, "ok"
-
         except Exception as e:
             await session.rollback()
             logger.error(
@@ -264,6 +312,7 @@ class PaymentService:
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
         settings = get_settings()
+
         payment = await create_payment(
             session=session, user_id=user_id, tariff_id=tariff_id,
             amount=int(amount), currency="RUB",
@@ -272,6 +321,7 @@ class PaymentService:
         description = (
             f"Оплата подписки. TgId:{telegram_id} UserId:{user_id}"
         )
+
         clean_username = bot_username.lstrip("@")
         return_url = settings.PLATEGA_RETURN_URL.format(
             bot_username=clean_username
@@ -317,6 +367,7 @@ class PaymentService:
                 logger.error(
                     f"Failed to log payment failure to audit: {e}"
                 )
+
             return None, None
 
         payment.external_id = transaction.get("transactionId")
@@ -456,12 +507,11 @@ class PaymentService:
             if user:
                 from database.repositories.profiles_repo import get_user_profiles
                 from database.repositories.servers_repo import get_server_by_id
-
                 current_time = now_utc()
+
                 user.subscription_end = current_time
                 user.current_tariff_id = None
 
-                # 🔥 ИСПРАВЛЕНО P0-2: ОТКАТ РЕФЕРАЛЬНЫХ БОНУСОВ
                 if user.referred_by:
                     try:
                         from database.repositories.users_repo import get_user_by_telegram_id
@@ -473,17 +523,21 @@ class PaymentService:
                             ]
                             is_first_payment = len(successful_payments) <= 1
                             tariff = payment.tariff
+
                             if tariff and tariff.duration_days >= 30:
                                 if is_first_payment:
                                     bonus_referral = 5
                                     bonus_referrer = 3
+
                                     if user.referral_days and user.referral_days >= bonus_referral:
                                         user.referral_days -= bonus_referral
                                     if referrer.referral_days and referrer.referral_days >= bonus_referrer:
                                         referrer.referral_days -= bonus_referrer
+
                                     if referrer.subscription_end and referrer.subscription_end > current_time:
                                         from datetime import timedelta
                                         referrer.subscription_end = referrer.subscription_end - timedelta(days=bonus_referrer)
+
                                     logger.info(
                                         f"Chargeback: rolled back referral bonuses "
                                         f"for user {user.telegram_id} and referrer {referrer.telegram_id}"
@@ -524,15 +578,6 @@ class PaymentService:
                                 profile.id, e,
                             )
 
-                    # ═══════════════════════════════════════════════════════════
-                    # 🔥 ИСПРАВЛЕНО P1-6: HTTP вынесен в asyncio.create_task
-                    # Было:
-                    #   results = await asyncio.gather(*[_disable_peer(...)])  # ← БЛОКИРУЕТ!
-                    # Стало:
-                    #   asyncio.create_task(_disable_peers_background(...))  # ← В ФОНЕ!
-                    #   → Webhook сразу возвращает 200 OK Platega (в пределах 60s timeout)
-                    #   → Устройства отключаются параллельно в фоновой задаче
-                    # ═══════════════════════════════════════════════════════════
                     if tasks_info:
                         asyncio.create_task(
                             _disable_peers_background(
@@ -542,13 +587,15 @@ class PaymentService:
                             )
                         )
 
-            invalidate_user_cache(user.telegram_id)
-            logger.warning(
-                "CHARGEBACK processed: user %s, payment %s. "
-                "Access revoked (API disable in background).",
-                user.telegram_id if user else "unknown",
-                payment.id,
-            )
+                invalidate_user_cache(user.telegram_id)
+
+                logger.warning(
+                    "CHARGEBACK processed: user %s, payment %s. "
+                    "Access revoked (API disable in background).",
+                    user.telegram_id if user else "unknown",
+                    payment.id,
+                )
+
             logger.warning(f"Chargeback for payment {payment.id}")
 
             try:
@@ -576,10 +623,9 @@ class PaymentService:
     async def check_platega_payment(
         session: AsyncSession, payment_id: int
     ) -> tuple[bool, str]:
-        """
-        🔥 ИСПРАВЛЕНО: Возвращает (success, result_code).
-        """
+        """Возвращает (success, result_code)."""
         payment = await get_payment_by_id(session, payment_id)
+
         if not payment or not payment.external_id:
             return False, "not_found"
 
@@ -591,6 +637,7 @@ class PaymentService:
 
         client = PlategaClient()
         status_data = await client.check_status(payment.external_id)
+
         if not status_data:
             return False, "api_error"
 
@@ -601,6 +648,7 @@ class PaymentService:
                 session, payment.id
             )
             return success, result_code
+
         elif status == "CANCELED":
             if payment.status != "cancelled":
                 payment.status = "cancelled"
@@ -622,20 +670,11 @@ class PaymentService:
         return False, "pending"
 
 
-# ═══════════════════════════════════════════════════════════
-# 🔥 ИСПРАВЛЕНО P1-6: Фоновая задача отключения устройств при chargeback
-# Запускается через asyncio.create_task, не блокирует webhook
-# ═══════════════════════════════════════════════════════════
 async def _disable_peers_background(
     tasks_info: list, telegram_id: int, payment_id: int
 ):
-    """
-    Отключает устройства пользователя в Amnezia API (фоновая задача).
-    Используется при chargeback — webhook отвечает сразу, а устройства
-    отключаются асинхронно.
-    """
+    """Отключает устройства пользователя в Amnezia API (фоновая задача)."""
     from services.amnezia_client import AmneziaClient
-
     sem = asyncio.Semaphore(20)
 
     async def _disable_peer(info):
@@ -658,10 +697,12 @@ async def _disable_peers_background(
         *[_disable_peer(info) for info in tasks_info],
         return_exceptions=True,
     )
+
     api_errors = [
         r for r in results
         if isinstance(r, Exception) or r is False
     ]
+
     if api_errors:
         logger.warning(
             "Chargeback background: %d/%d API calls failed for user %s",
@@ -678,7 +719,7 @@ async def _disable_peers_background(
 async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
-    """🔥 УЛУЧШЕНО: Алерт админам с кнопками быстрого действия + дедупликация"""
+    """Алерт админам с кнопками быстрого действия + дедупликация"""
     global _alerted_paid_after_cancel
     if payment_id in _alerted_paid_after_cancel:
         return
@@ -716,9 +757,11 @@ async def _alert_paid_after_cancel(
 
     user = payment.user
     tariff = payment.tariff
+
     username = (
         f"@{user.username}" if user and user.username else "—"
     )
+
     tariff_name = "—"
     if tariff:
         tariff_name = get_tariff_display_name(
@@ -730,11 +773,13 @@ async def _alert_paid_after_cancel(
         text="✅ Выдать подписку",
         callback_data=f"admin_manual_grant:{payment.id}"
     )
+
     if payment.payment_method == "SBPQR" and payment.external_id:
         builder.button(
             text="💸 Вернуть средства (Platega)",
             url=f"https://app.platega.io/transactions/{payment.external_id}"
         )
+
     builder.button(
         text="👤 Профиль клиента",
         callback_data=(
@@ -791,9 +836,7 @@ async def _alert_paid_after_cancel(
 async def _notify_client_paid_after_cancel(
     session, payment_id: int
 ) -> None:
-    """
-    🔥 НОВОЕ: Отправляет клиенту заботливое + техническое уведомление.
-    """
+    """Отправляет клиенту заботливое + техническое уведомление."""
     global _notified_paid_after_cancel
     if payment_id in _notified_paid_after_cancel:
         return
@@ -837,6 +880,7 @@ async def _notify_client_paid_after_cancel(
 
     settings = get_settings()
     support_username = settings.SUPPORT_USERNAME.lstrip("@")
+
     tariff_name = "—"
     if tariff:
         tariff_name = get_tariff_display_name(
@@ -921,9 +965,11 @@ async def _send_chargeback_alert(
 
     user = payment.user
     tariff = payment.tariff
+
     username = (
         f"@{user.username}" if user and user.username else "—"
     )
+
     tariff_name = (
         f"{tariff.duration_days} дн. / {tariff.device_limit} устр."
         if tariff else "—"
