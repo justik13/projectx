@@ -15,6 +15,8 @@ HEARTBEAT_INTERVAL = 60.0
 _api_alert_sent: dict[str, float] = {}
 _API_ALERT_COOLDOWN = 1800.0
 
+_bot_ref = None
+
 
 async def heartbeat_loop(shutdown_event: asyncio.Event):
     logger.info(f"Heartbeat worker started, file={HEARTBEAT_FILE}")
@@ -56,7 +58,6 @@ async def _check_circuit_breakers():
 
     for api_url, cb in list(_circuit_breakers.items()):
         if not cb.is_open:
-            _api_alert_sent.pop(api_url, None)
             continue
 
         last_alert = _api_alert_sent.get(api_url, 0)
@@ -97,9 +98,6 @@ async def _check_circuit_breakers():
         _api_alert_sent[api_url] = now
 
 
-_bot_ref = None
-
-
 def set_bot_ref(bot):
     global _bot_ref
     _bot_ref = bot
@@ -121,6 +119,7 @@ def _write_heartbeat(final: bool = False):
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
+
         os.replace(temp_file, HEARTBEAT_FILE)
 
         try:

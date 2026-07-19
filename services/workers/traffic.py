@@ -16,12 +16,17 @@ from config.settings import get_settings
 logger = logging.getLogger("BackgroundWorker")
 
 BATCH_SIZE = 100
-REVERSE_HEALING_WINDOW_SECONDS = 300  # 5 минут
-TRAFFIC_QUOTA_BYTES = 1 * 1024 * 1024 * 1024 * 1024  # 1 TB
-_quota_alerted: set[int] = set()  # profile_id которые уже алертнули
+REVERSE_HEALING_WINDOW_SECONDS = 300
+TRAFFIC_QUOTA_BYTES = 1 * 1024 * 1024 * 1024 * 1024
+TRAFFIC_MAX_BACKOFF = 900
+
+_quota_alerted: set[int] = set()
+_consecutive_crashes: int = 0
 
 
 async def traffic_sync_loop(shutdown_event: asyncio.Event):
+    global _consecutive_crashes
+
     while not shutdown_event.is_set():
         try:
             try:
@@ -74,18 +79,28 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                 server_id = server_info['id']
                 if server_id not in api_data_by_server:
                     continue
-
                 api_clients = api_data_by_server[server_id]
                 await _process_server_traffic(server_info, api_clients)
+
+            _consecutive_crashes = 0
 
         except asyncio.CancelledError:
             logger.info("Traffic sync worker cancelled")
             break
         except Exception as e:
-            logger.error(f"Критическая ошибка в цикле трафика: {e}", exc_info=True)
+            _consecutive_crashes += 1
+            backoff = min(
+                WORKER_ERROR_SLEEP_INTERVAL * (2 ** min(_consecutive_crashes - 1, 4)),
+                TRAFFIC_MAX_BACKOFF,
+            )
+            logger.error(
+                f"Критическая ошибка в цикле трафика "
+                f"(crash #{_consecutive_crashes}, next retry in {backoff}s): {e}",
+                exc_info=True,
+            )
             if shutdown_event.is_set():
                 break
-            await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
+            await asyncio.sleep(backoff)
 
     logger.info("Traffic sync worker stopped gracefully")
 
@@ -103,9 +118,10 @@ async def _process_server_traffic(server_info, api_clients):
             )
             .join(User, VPNProfile.user_id == User.id)
             .where(VPNProfile.server_id == server_id)
+            .execution_options(yield_per=BATCH_SIZE)
         )
 
-        result = await session.stream(stmt, yield_per=BATCH_SIZE)
+        result = await session.stream(stmt)
 
         updates_data = {}
         healing_tasks = []
@@ -121,7 +137,6 @@ async def _process_server_traffic(server_info, api_clients):
                     continue
 
                 api_data = api_clients[peer_id]
-
                 api_t_down = api_data.traffics.totalDownload
                 api_t_up = api_data.traffics.totalUpload
 
@@ -130,7 +145,6 @@ async def _process_server_traffic(server_info, api_clients):
 
                 last_conn_raw = api_data.lastHandshake or api_data.lastSeen or api_data.updatedAt
                 new_last_connected = last_conn
-
                 if last_conn_raw:
                     try:
                         ts = int(float(str(last_conn_raw)))
@@ -142,7 +156,6 @@ async def _process_server_traffic(server_info, api_clients):
 
                 api_is_active = (api_data.status == "active")
                 is_subscription_expired = sub_end and sub_end < current_time
-
                 local_should_be_disabled = (
                     (not is_active) or is_banned or is_subscription_expired
                 )
@@ -161,7 +174,6 @@ async def _process_server_traffic(server_info, api_clients):
                         'reason': reason,
                         'target_status': 'disabled',
                     })
-
                 elif is_active and not local_should_be_disabled and not api_is_active:
                     api_updated = api_data.updatedAt
                     if api_updated:
@@ -171,7 +183,6 @@ async def _process_server_traffic(server_info, api_clients):
                                 ts = ts // 1000
                             updated_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                             time_since_update = (current_time - updated_dt).total_seconds()
-
                             if time_since_update < REVERSE_HEALING_WINDOW_SECONDS:
                                 reverse_healing_tasks.append({
                                     'api_url': server_info['api_url'],
@@ -198,6 +209,7 @@ async def _process_server_traffic(server_info, api_clients):
                             f"Reverse healing: no updatedAt for peer {peer_id[:16]}..., "
                             f"cannot assess freshness"
                         )
+
                 if (
                     t_down != new_t_down or t_up != new_t_up
                     or last_conn != new_last_connected
@@ -207,12 +219,13 @@ async def _process_server_traffic(server_info, api_clients):
                         'traffic_up': new_t_up,
                         'last_connected': new_last_connected,
                     }
-                    total_traffic = (new_t_down or 0) + (new_t_up or 0)
-                    if total_traffic > TRAFFIC_QUOTA_BYTES and p_id not in _quota_alerted:
-                        _quota_alerted.add(p_id)
-                        asyncio.create_task(
-                            _send_quota_alert(tg_id, server_info['name'], total_traffic, p_id)
-                        )
+
+                total_traffic = (new_t_down or 0) + (new_t_up or 0)
+                if total_traffic > TRAFFIC_QUOTA_BYTES and p_id not in _quota_alerted:
+                    _quota_alerted.add(p_id)
+                    asyncio.create_task(
+                        _send_quota_alert(tg_id, server_info['name'], total_traffic, p_id)
+                    )
 
         if updates_data:
             await _batch_update_profiles(updates_data)
@@ -308,7 +321,6 @@ async def _batch_update_profiles(updates_data: dict):
                     index_elements=['id'],
                     set_=update_dict
                 )
-
             await session.execute(stmt)
 
 
