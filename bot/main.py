@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import signal
 from aiogram import Bot, Dispatcher
@@ -7,7 +8,6 @@ from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuBu
 from aiogram.utils.chat_action import ChatActionMiddleware
 from cryptography.fernet import Fernet
 from aiohttp import web
-
 from bot import texts
 from bot.middlewares import (
     DBSessionMiddleware,
@@ -25,6 +25,7 @@ from services.amnezia_client import close_http_session
 from services.workers import start_background_workers, shutdown_event
 from bot.handlers.webhook import setup_webhook_routes
 from bot.handlers.admin.broadcast import resume_pending_broadcasts
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - [%(request_id)s] %(name)s: %(message)s",
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     from bot.middlewares.correlation import get_current_request_id
     request_id = get_current_request_id()
+
     logger.critical(
         "[%s] Unhandled exception: %s",
         request_id,
@@ -58,9 +60,8 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
 
     try:
         settings = get_settings()
-        error_type = type(event.exception).__name__
-        error_short = str(event.exception)[:200]
-        
+        error_type = html.escape(type(event.exception).__name__)
+        error_short = html.escape(str(event.exception)[:200])
         error_msg = (
             f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА БОТА</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -71,7 +72,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             f"<i>Полный лог доступен через:\n"
             f"<code>journalctl -u projectx-bot | grep {request_id}</code></i>"
         )
-
         for admin_id in settings.ADMIN_IDS:
             try:
                 await event.bot.send_message(admin_id, error_msg, parse_mode="HTML")
@@ -109,6 +109,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     bot = Bot(token=settings.BOT_TOKEN)
     storage = RedisStorage.from_url(settings.REDIS_URL)
     dp = Dispatcher(storage=storage)
+
     dp.message.middleware(CorrelationMiddleware())
     dp.callback_query.middleware(CorrelationMiddleware())
     dp.message.middleware(DBSessionMiddleware())
@@ -171,14 +172,12 @@ def _validate_platega_config() -> bool:
             "Укажите PLATEGA_SECRET в .env или удалите PLATEGA_MERCHANT_ID."
         )
         return False
-
     if has_secret and not has_merchant:
         logger.critical(
             "❌ PLATEGA_SECRET задан, но PLATEGA_MERCHANT_ID пуст! "
             "Укажите оба параметра или удалите оба."
         )
         return False
-
     return True
 
 
@@ -189,17 +188,18 @@ async def main():
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
-
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
             logger.critical("❌ DB_ENCRYPTION_KEY невалиден: %s", e)
             return
+
         if not _validate_platega_config():
             return
 
         logger.info("Инициализация БД...")
         await init_db()
+
         logger.info(
             "🔄 Bot started — all in-memory operation locks cleared (restart). "
             "DB unique constraints + ActionLockMiddleware protect against duplicates."
@@ -210,8 +210,10 @@ async def main():
         webhook_runner = None
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
             webhook_runner = await start_webhook_server(settings.PLATEGA_WEBHOOK_PORT)
+
         await resume_pending_broadcasts(bot)
         logger.info("Pending broadcasts resumed (if any)")
+
         loop = asyncio.get_running_loop()
 
         def _signal_handler():
@@ -223,14 +225,18 @@ async def main():
                 loop.add_signal_handler(sig, _signal_handler)
             except NotImplementedError:
                 pass
+
         worker_tasks = await start_background_workers(bot)
+
         logger.info("Запуск polling...")
         polling_task = asyncio.create_task(dp.start_polling(bot))
         shutdown_task = asyncio.create_task(shutdown_event.wait())
+
         done, pending = await asyncio.wait(
             [polling_task, shutdown_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+
         if shutdown_event.is_set():
             logger.info("Shutdown requested, stopping polling...")
             await dp.stop_polling()
@@ -241,7 +247,7 @@ async def main():
                 pass
 
     except Exception as e:
-        logger.error("Критическая ошибка: %s", e, exc_info=True)
+        logger.critical("Fatal error in main: %s", e, exc_info=True)
     finally:
         logger.info("Waiting for background workers to finish...")
         if 'worker_tasks' in locals():

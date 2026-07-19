@@ -19,7 +19,7 @@ from database.repositories.servers_repo import (
     get_server_count, get_servers_paginated, update_server,
     delete_server, delete_profiles_by_server_id,
 )
-from services.amnezia_client import AmneziaClient
+from services.amnezia_client import AmneziaClient, cleanup_server_circuit_breakers
 from services.audit_service import AuditService
 from utils.admin import is_admin
 from utils.telegram import safe, render_hub
@@ -60,7 +60,6 @@ async def _build_servers_list_text_and_kb(
                 text=f"{status} {flag} {safe(server.name)} · {server.protocol}",
                 callback_data=f"admin_server_card:{server.id}",
             )
-
     if page > 1:
         builder.button(text="⬅️", callback_data=f"admin_servers_page:{page - 1}")
     if page < total_pages:
@@ -92,28 +91,32 @@ async def _show_servers_list(
 
 async def _bulk_delete_peers_from_api(
     profiles_data, api_url: str, api_key: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, list[tuple[int, str]]]:
     if not profiles_data:
-        return 0, 0
+        return 0, 0, []
 
     client = AmneziaClient(api_url, api_key)
     sem = asyncio.Semaphore(20)
     success = 0
     fail = 0
+    failed_peers: list[tuple[int, str]] = []
+    lock = asyncio.Lock()
 
-    async def _delete_limited(peer_id: str):
+    async def _delete_limited(profile_id: int, peer_id: str):
         nonlocal success, fail
         async with sem:
-            ok = await client.delete_client(client_id=peer_id)
-            if ok:
-                success += 1
-            else:
-                fail += 1
+            ok = await client.delete_user(client_id=peer_id)
+            async with lock:
+                if ok:
+                    success += 1
+                else:
+                    fail += 1
+                    failed_peers.append((profile_id, peer_id))
 
     try:
         await asyncio.wait_for(
             asyncio.gather(
-                *[_delete_limited(pid) for _, pid in profiles_data],
+                *[_delete_limited(pid, peer) for pid, peer in profiles_data],
                 return_exceptions=True,
             ),
             timeout=300.0
@@ -123,7 +126,8 @@ async def _bulk_delete_peers_from_api(
             f"_bulk_delete_peers_from_api: timeout after 300s "
             f"for {len(profiles_data)} peers"
         )
-    return success, fail
+
+    return success, fail, failed_peers
 
 
 async def _delete_server_background(
@@ -131,18 +135,15 @@ async def _delete_server_background(
     profiles_data: list, api_url: str, api_key: str,
     deleted_profiles: int,
 ):
-    failed_peers = []
-
     if profiles_data:
-        api_success, api_fail = await _bulk_delete_peers_from_api(
+        api_success, api_fail, failed_peers = await _bulk_delete_peers_from_api(
             profiles_data, api_url, api_key,
         )
 
-        if api_fail > 0:
-            # 🔥 ИСПРАВЛЕНО: Записываем zombie-пиры в pending_api_deletions
+        if failed_peers:
             try:
                 async with session_scope() as session:
-                    for profile_id, peer_id in profiles_data:
+                    for profile_id, peer_id in failed_peers:
                         pending = PendingAPIDeletion(
                             server_name=server_name,
                             api_url=api_url,
@@ -154,12 +155,10 @@ async def _delete_server_background(
                         session.add(pending)
                     await session.commit()
                 logger.info(
-                    f"Saved {api_fail} zombie peers to pending_api_deletions"
+                    f"Saved {len(failed_peers)} zombie peers to pending_api_deletions"
                 )
             except Exception as e:
-                logger.error(
-                    f"Failed to save zombie peers: {e}"
-                )
+                logger.error(f"Failed to save zombie peers: {e}")
 
             msg = (
                 f"⚠️ Сервер {server_name} удалён из БД ({deleted_profiles} устр.),\n"
@@ -326,8 +325,8 @@ async def process_add_server(
                 get_back_button("admin_servers")
             )
             return
-        await state.update_data(api_key=api_key)
 
+        await state.update_data(api_key=api_key)
         all_data = await state.get_data()
 
         check_msg = await render_hub(
@@ -481,16 +480,19 @@ async def toggle_server(
 
     new_status = not server.is_active
     await update_server(session, server, is_active=new_status)
+
     await AuditService.log_action(
         session, callback.from_user.id, "TOGGLE_SERVER", "Server", server_id,
         "enabled" if new_status else "disabled",
     )
+
     status_text = "включен" if new_status else "выключен"
     await callback.answer(f"✅ Сервер {status_text}", show_alert=True)
     logger.info(
         f"Admin {callback.from_user.id} toggled server {server_id} "
         f"to {new_status}"
     )
+
     refreshed = await get_server_by_id(session, server_id)
     await _show_server_card(callback, session, refreshed)
 
@@ -503,6 +505,7 @@ async def request_delete_server(
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
+
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
@@ -513,9 +516,11 @@ async def request_delete_server(
         select(VPNProfile.id).where(VPNProfile.server_id == server.id),
     )
     profiles_count = len(result.all())
+
     flag = server.country_flag or "🌍"
     await state.update_data(delete_server_id=server_id)
     await state.set_state(AdminStates.confirming_server_delete)
+
     await callback.message.edit_text(
         texts.ADMIN_SERVER_DELETE_CONFIRM.format(
             flag=flag, name=safe(server.name), profiles_count=profiles_count,
@@ -538,8 +543,8 @@ async def confirm_delete_server(
     if current_state != AdminStates.confirming_server_delete:
         await callback.answer("⚠️ Сессия подтверждения истекла", show_alert=True)
         return
-    await state.clear()
 
+    await state.clear()
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
     if not server:
@@ -560,6 +565,9 @@ async def confirm_delete_server(
 
     deleted_profiles = await delete_profiles_by_server_id(session, server_id)
     await delete_server(session, server)
+
+    cleanup_server_circuit_breakers(api_url)
+
     await AuditService.log_action(
         session, callback.from_user.id, "DELETE_SERVER", "Server", server_id,
         f"{server_name}: {deleted_profiles} profiles deleted",
@@ -573,6 +581,7 @@ async def confirm_delete_server(
         f"Admin {callback.from_user.id} fully deleted server {server_id} "
         f"({server_name}) with {deleted_profiles} profiles"
     )
+
     await _show_servers_list(callback, session, page=1)
 
     if profiles_data:
@@ -616,7 +625,6 @@ async def start_edit_server_flag(
     if not server:
         await callback.answer(texts.ERROR_SERVER_NOT_FOUND, show_alert=True)
         return
-
     current_flag = server.country_flag or "🌍"
     await state.update_data(server_id=server_id, edit_field="flag")
     await state.set_state(AdminStates.editing_server_flag)
@@ -633,7 +641,6 @@ async def process_edit_server_flag(
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-
     if not message.text:
         await render_hub(
             message.bot, message.chat.id,
@@ -641,7 +648,6 @@ async def process_edit_server_flag(
             get_back_button("admin_servers")
         )
         return
-
     if message.text.startswith("/"):
         await state.clear()
         await render_hub(
@@ -692,7 +698,6 @@ async def process_edit_server_name(
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-
     if not message.text:
         await render_hub(
             message.bot, message.chat.id,
@@ -700,7 +705,6 @@ async def process_edit_server_name(
             get_back_button("admin_servers")
         )
         return
-
     if message.text.startswith("/"):
         await state.clear()
         await render_hub(
