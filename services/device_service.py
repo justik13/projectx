@@ -166,197 +166,197 @@ class DeviceService:
                     )
                     raise ServerUnavailable("Server is full")
 
-        lock = _get_user_lock(user.id)
-        async with lock:
-            result = await session.execute(
-                select(User)
-                .where(User.telegram_id == user.telegram_id)
-                .with_for_update()
-            )
-            user = result.scalar_one_or_none()
-            if not user:
-                raise ServerUnavailable("User disappeared")
-
-            if not is_admin(user.telegram_id):
-                now_msk_date = now_msk().date()
-                if not _is_same_day_msk(
-                    user.last_creation_date, now_msk_date,
-                ):
-                    user.device_creations_today = 0
-                    user.last_creation_date = now_msk_date
-                    await session.flush()
-
-                if (
-                    user.device_creations_today
-                    >= DEVICE_DAILY_LIMIT
-                ):
-                    logger.warning(
-                        f"create_device: user "
-                        f"{user.telegram_id} exceeded "
-                        f"daily limit"
-                    )
-                    try:
-                        await AuditService.log_action(
-                            session,
-                            admin_id=0,
-                            action="DEVICE_CREATE_BLOCKED",
-                            target_type="User",
-                            target_id=user.telegram_id,
-                            details=(
-                                f"Daily limit: "
-                                f"{user.device_creations_today}"
-                                f"/{DEVICE_DAILY_LIMIT}"
-                            ),
-                        )
-                    except Exception as audit_error:
-                        logger.error(
-                            f"Failed to log "
-                            f"DEVICE_CREATE_BLOCKED: "
-                            f"{audit_error}"
-                        )
-                    raise DailyLimitExceeded(
-                        "Daily limit exceeded",
-                    )
-
-            short_hash = uuid.uuid4().hex[:4]
-            clean_device_name = re.sub(
-                r'[^a-zA-Z0-9]', '', device_name,
-            )[:10]
-            if not clean_device_name:
-                clean_device_name = "Device"
-
-            client_name = (
-                f"tg_{user.telegram_id}_"
-                f"{clean_device_name}_{short_hash}"
-            )
-
-            expires_ts = (
-                await SubscriptionService.get_expires_timestamp(
-                    user,
+            lock = _get_user_lock(user.id)
+            async with lock:
+                result = await session.execute(
+                    select(User)
+                    .where(User.telegram_id == user.telegram_id)
+                    .with_for_update()
                 )
-            )
+                user = result.scalar_one_or_none()
+                if not user:
+                    raise ServerUnavailable("User disappeared")
 
-            client = AmneziaClient(
-                server.api_url, server.api_key,
-            )
-            api_result = await client.create_user(
-                client_name=client_name,
-                expires_at=expires_ts,
-            )
+                if not is_admin(user.telegram_id):
+                    now_msk_date = now_msk().date()
+                    if not _is_same_day_msk(
+                        user.last_creation_date, now_msk_date,
+                    ):
+                        user.device_creations_today = 0
+                        user.last_creation_date = now_msk_date
+                        await session.flush()
 
-            if not api_result:
-                raise ServerUnavailable(
-                    "API create_user failed",
-                )
-
-            peer_id = api_result.id
-            raw_config = api_result.config
-
-            if not is_valid_vpn_uri(raw_config):
-                logger.error(
-                    "create_device: API returned invalid "
-                    "vpn:// URI. Rolling back."
-                )
-                try:
-                    await client.delete_user(
-                        client_id=peer_id,
-                    )
-                except Exception as rollback_error:
-                    logger.error(
-                        f"Failed to rollback invalid "
-                        f"config: {rollback_error}"
-                    )
-                raise InvalidConfig("Invalid vpn:// URI")
-
-            try:
-                async with session.begin_nested():
-                    profiles_count = (
-                        await get_user_profiles_count(
-                            session, user.id,
-                        )
-                    )
-                    if profiles_count >= user.device_limit:
-                        raise DeviceLimitExceeded(
-                            "Device limit reached",
-                        )
-
-                    profile = await create_profile(
-                        session,
-                        user_id=user.id,
-                        server_id=server.id,
-                        device_name=device_name,
-                        peer_id=peer_id,
-                        raw_config=raw_config,
-                    )
-
-                    if not is_admin(user.telegram_id):
-                        user.device_creations_today += 1
-
-                    try:
-                        await AuditService.log_action(
-                            session,
-                            admin_id=user.telegram_id,
-                            action="DEVICE_CREATED",
-                            target_type="VPNProfile",
-                            target_id=profile.id,
-                            details=(
-                                f"user={user.telegram_id}, "
-                                f"device={device_name}, "
-                                f"server={server.name}"
-                            ),
-                        )
-                    except Exception as audit_error:
+                    if (
+                        user.device_creations_today
+                        >= DEVICE_DAILY_LIMIT
+                    ):
                         logger.warning(
-                            f"Failed to log DEVICE_CREATED: "
-                            f"{audit_error}"
+                            f"create_device: user "
+                            f"{user.telegram_id} exceeded "
+                            f"daily limit"
+                        )
+                        try:
+                            await AuditService.log_action(
+                                session,
+                                admin_id=0,
+                                action="DEVICE_CREATE_BLOCKED",
+                                target_type="User",
+                                target_id=user.telegram_id,
+                                details=(
+                                    f"Daily limit: "
+                                    f"{user.device_creations_today}"
+                                    f"/{DEVICE_DAILY_LIMIT}"
+                                ),
+                            )
+                        except Exception as audit_error:
+                            logger.error(
+                                f"Failed to log "
+                                f"DEVICE_CREATE_BLOCKED: "
+                                f"{audit_error}"
+                            )
+                        raise DailyLimitExceeded(
+                            "Daily limit exceeded",
                         )
 
-                    return profile
+                short_hash = uuid.uuid4().hex[:4]
+                clean_device_name = re.sub(
+                    r'[^a-zA-Z0-9]', '', device_name,
+                )[:10]
+                if not clean_device_name:
+                    clean_device_name = "Device"
 
-            except DeviceLimitExceeded:
-                try:
-                    await client.delete_user(
-                        client_id=peer_id,
-                    )
-                except Exception as rollback_error:
-                    logger.error(
-                        f"Failed to rollback API client "
-                        f"after limit check: "
-                        f"{rollback_error}"
-                    )
-                raise
-
-            except IntegrityError as e:
-                await session.rollback()
-                logger.error(
-                    f"create_device: IntegrityError: {e}"
+                client_name = (
+                    f"tg_{user.telegram_id}_"
+                    f"{clean_device_name}_{short_hash}"
                 )
-                try:
-                    await client.delete_user(
-                        client_id=peer_id,
-                    )
-                except Exception as rollback_error:
-                    logger.error(
-                        f"Failed to rollback after "
-                        f"IntegrityError: {rollback_error}"
-                    )
-                raise
 
-            except (
-                DailyLimitExceeded,
-                DeviceLimitExceeded,
-                InvalidConfig,
-                ServerUnavailable,
-            ):
-                raise
-
-            except Exception as e:
-                await session.rollback()
-                logger.error(
-                    f"create_device: DB error: {e}",
-                    exc_info=True,
+                expires_ts = (
+                    await SubscriptionService.get_expires_timestamp(
+                        user,
+                    )
                 )
-                raise ServerUnavailable(f"DB error: {e}")
+
+                client = AmneziaClient(
+                    server.api_url, server.api_key,
+                )
+                api_result = await client.create_user(
+                    client_name=client_name,
+                    expires_at=expires_ts,
+                )
+
+                if not api_result:
+                    raise ServerUnavailable(
+                        "API create_user failed",
+                    )
+
+                peer_id = api_result.id
+                raw_config = api_result.config
+
+                if not is_valid_vpn_uri(raw_config):
+                    logger.error(
+                        "create_device: API returned invalid "
+                        "vpn:// URI. Rolling back."
+                    )
+                    try:
+                        await client.delete_user(
+                            client_id=peer_id,
+                        )
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback invalid "
+                            f"config: {rollback_error}"
+                        )
+                    raise InvalidConfig("Invalid vpn:// URI")
+
+                try:
+                    async with session.begin_nested():
+                        profiles_count = (
+                            await get_user_profiles_count(
+                                session, user.id,
+                            )
+                        )
+                        if profiles_count >= user.device_limit:
+                            raise DeviceLimitExceeded(
+                                "Device limit reached",
+                            )
+
+                        profile = await create_profile(
+                            session,
+                            user_id=user.id,
+                            server_id=server.id,
+                            device_name=device_name,
+                            peer_id=peer_id,
+                            raw_config=raw_config,
+                        )
+
+                        if not is_admin(user.telegram_id):
+                            user.device_creations_today += 1
+
+                        try:
+                            await AuditService.log_action(
+                                session,
+                                admin_id=user.telegram_id,
+                                action="DEVICE_CREATED",
+                                target_type="VPNProfile",
+                                target_id=profile.id,
+                                details=(
+                                    f"user={user.telegram_id}, "
+                                    f"device={device_name}, "
+                                    f"server={server.name}"
+                                ),
+                            )
+                        except Exception as audit_error:
+                            logger.warning(
+                                f"Failed to log DEVICE_CREATED: "
+                                f"{audit_error}"
+                            )
+
+                        return profile
+
+                except DeviceLimitExceeded:
+                    try:
+                        await client.delete_user(
+                            client_id=peer_id,
+                        )
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback API client "
+                            f"after limit check: "
+                            f"{rollback_error}"
+                        )
+                    raise
+
+                except IntegrityError as e:
+                    await session.rollback()
+                    logger.error(
+                        f"create_device: IntegrityError: {e}"
+                    )
+                    try:
+                        await client.delete_user(
+                            client_id=peer_id,
+                        )
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback after "
+                            f"IntegrityError: {rollback_error}"
+                        )
+                    raise
+
+                except (
+                    DailyLimitExceeded,
+                    DeviceLimitExceeded,
+                    InvalidConfig,
+                    ServerUnavailable,
+                ):
+                    raise
+
+                except Exception as e:
+                    await session.rollback()
+                    logger.error(
+                        f"create_device: DB error: {e}",
+                        exc_info=True,
+                    )
+                    raise ServerUnavailable(f"DB error: {e}")
 
         finally:
             try:
