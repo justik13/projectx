@@ -11,8 +11,8 @@ _GLOBAL_THROTTLE_TTL = 0.3
 
 
 class ThrottlingMiddleware:
-    def __init__(self, limit: float = 0.3):
-        self.limit = limit
+
+    def __init__(self):
         self._last_call = TTLCache(maxsize=_MAX_CACHE_SIZE, ttl=_DEFAULT_TTL)
         self._global_throttle = TTLCache(
             maxsize=_MAX_CACHE_SIZE, ttl=_GLOBAL_THROTTLE_TTL
@@ -22,6 +22,7 @@ class ThrottlingMiddleware:
         user_id = event.from_user.id if event.from_user else None
         if not user_id:
             return await handler(event, data)
+
         if isinstance(event, CallbackQuery):
             global_key = f"global_cb:{user_id}"
         elif isinstance(event, Message):
@@ -40,6 +41,7 @@ class ThrottlingMiddleware:
             return
 
         self._global_throttle[global_key] = True
+
         if isinstance(event, CallbackQuery):
             action_data = event.data or ""
             action_type = (

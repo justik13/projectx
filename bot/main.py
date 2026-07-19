@@ -2,12 +2,14 @@ import asyncio
 import html
 import logging
 import signal
+
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault, ErrorEvent, MenuButtonCommands
 from aiogram.utils.chat_action import ChatActionMiddleware
 from cryptography.fernet import Fernet
 from aiohttp import web
+
 from bot import texts
 from bot.middlewares import (
     DBSessionMiddleware,
@@ -62,6 +64,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         settings = get_settings()
         error_type = html.escape(type(event.exception).__name__)
         error_short = html.escape(str(event.exception)[:200])
+
         error_msg = (
             f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА БОТА</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -72,6 +75,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             f"<i>Полный лог доступен через:\n"
             f"<code>journalctl -u projectx-bot | grep {request_id}</code></i>"
         )
+
         for admin_id in settings.ADMIN_IDS:
             try:
                 await event.bot.send_message(admin_id, error_msg, parse_mode="HTML")
@@ -112,16 +116,23 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
     dp.message.middleware(CorrelationMiddleware())
     dp.callback_query.middleware(CorrelationMiddleware())
+
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
+
     dp.message.middleware(CleanChatMiddleware())
+
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
+
     dp.message.middleware(BanCheckMiddleware())
     dp.callback_query.middleware(BanCheckMiddleware())
-    dp.message.middleware(ThrottlingMiddleware(limit=0.3))
-    dp.callback_query.middleware(ThrottlingMiddleware(limit=0.1))
+
+    dp.message.middleware(ThrottlingMiddleware())
+    dp.callback_query.middleware(ThrottlingMiddleware())
+
     dp.callback_query.middleware(ActionLockMiddleware())
+
     dp.message.middleware(ChatActionMiddleware())
 
     from bot.handlers.admin.broadcast import router as admin_broadcast_router
@@ -145,13 +156,16 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
         dp.include_router(r)
 
     dp.errors.register(global_error_handler)
+
     await setup_bot_commands(bot)
+
     return bot, dp
 
 
 async def start_webhook_server(port: int):
     app = web.Application()
     setup_webhook_routes(app)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
@@ -162,6 +176,7 @@ async def start_webhook_server(port: int):
 
 def _validate_platega_config() -> bool:
     settings = get_settings()
+
     has_merchant = bool(settings.PLATEGA_MERCHANT_ID.strip())
     has_secret = bool(settings.PLATEGA_SECRET.strip())
 
@@ -172,12 +187,14 @@ def _validate_platega_config() -> bool:
             "Укажите PLATEGA_SECRET в .env или удалите PLATEGA_MERCHANT_ID."
         )
         return False
+
     if has_secret and not has_merchant:
         logger.critical(
             "❌ PLATEGA_SECRET задан, но PLATEGA_MERCHANT_ID пуст! "
             "Укажите оба параметра или удалите оба."
         )
         return False
+
     return True
 
 
@@ -188,6 +205,7 @@ async def main():
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
+
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
@@ -248,6 +266,7 @@ async def main():
 
     except Exception as e:
         logger.critical("Fatal error in main: %s", e, exc_info=True)
+
     finally:
         logger.info("Waiting for background workers to finish...")
         if 'worker_tasks' in locals():

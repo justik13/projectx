@@ -120,7 +120,6 @@ async def _process_server_traffic(server_info, api_clients):
             .where(VPNProfile.server_id == server_id)
             .execution_options(yield_per=BATCH_SIZE)
         )
-
         result = await session.stream(stmt)
 
         updates_data = {}
@@ -137,6 +136,7 @@ async def _process_server_traffic(server_info, api_clients):
                     continue
 
                 api_data = api_clients[peer_id]
+
                 api_t_down = api_data.traffics.totalDownload
                 api_t_up = api_data.traffics.totalUpload
 
@@ -174,6 +174,7 @@ async def _process_server_traffic(server_info, api_clients):
                         'reason': reason,
                         'target_status': 'disabled',
                     })
+
                 elif is_active and not local_should_be_disabled and not api_is_active:
                     api_updated = api_data.updatedAt
                     if api_updated:
@@ -183,7 +184,14 @@ async def _process_server_traffic(server_info, api_clients):
                                 ts = ts // 1000
                             updated_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                             time_since_update = (current_time - updated_dt).total_seconds()
+
                             if time_since_update < REVERSE_HEALING_WINDOW_SECONDS:
+                                # Передаём expiresAt из БД пользователя,
+                                # чтобы API не оставил бессрочный доступ
+                                expires_ts = None
+                                if sub_end and sub_end.year < 2100:
+                                    expires_ts = int(sub_end.timestamp())
+
                                 reverse_healing_tasks.append({
                                     'api_url': server_info['api_url'],
                                     'api_key': server_info['api_key'],
@@ -192,6 +200,7 @@ async def _process_server_traffic(server_info, api_clients):
                                     'telegram_id': tg_id,
                                     'reason': 'api_desync',
                                     'target_status': 'active',
+                                    'expires_at': expires_ts,
                                 })
                             else:
                                 logger.info(
@@ -254,6 +263,7 @@ async def _send_quota_alert(telegram_id: int, server_name: str, total_bytes: int
             return
 
         tb = total_bytes / (1024 ** 4)
+
         msg = (
             f"⚠️ <b>Fair Usage Policy: Превышение квоты трафика!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -284,6 +294,7 @@ async def _send_quota_alert(telegram_id: int, server_name: str, total_bytes: int
                 )
             except Exception as e:
                 logger.error(f"Failed to send quota alert to {admin_id}: {e}")
+
     except Exception as e:
         logger.error(f"Failed to send quota alert: {e}")
 
@@ -291,9 +302,11 @@ async def _send_quota_alert(telegram_id: int, server_name: str, total_bytes: int
 async def _batch_update_profiles(updates_data: dict):
     async with session_scope() as session:
         items = list(updates_data.items())
+
         for i in range(0, len(items), BATCH_SIZE):
             batch = items[i:i + BATCH_SIZE]
             batch_values = []
+
             for p_id, data in batch:
                 row = {'id': p_id}
                 if 'traffic_down' in data:
@@ -308,6 +321,7 @@ async def _batch_update_profiles(updates_data: dict):
                 continue
 
             stmt = insert(VPNProfile).values(batch_values)
+
             update_dict = {}
             if any('traffic_down' in data for _, data in batch):
                 update_dict['traffic_down'] = stmt.excluded.traffic_down
@@ -321,6 +335,7 @@ async def _batch_update_profiles(updates_data: dict):
                     index_elements=['id'],
                     set_=update_dict
                 )
+
             await session.execute(stmt)
 
 
@@ -346,7 +361,8 @@ async def _self_heal_peers(healing_tasks: list):
             try:
                 result = await client.update_client(
                     client_id=task['peer_id'],
-                    status=task['target_status']
+                    status=task['target_status'],
+                    expires_at=task.get('expires_at'),
                 )
                 if result:
                     success_count += 1

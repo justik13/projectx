@@ -15,10 +15,12 @@ from utils.datetime_helpers import now_utc
 import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
+
 _alerted_paid_after_cancel: set[int] = set()
 _notified_paid_after_cancel: set[int] = set()
 
 _redis_client: aioredis.Redis | None = None
+
 
 async def _get_redis() -> aioredis.Redis:
     global _redis_client
@@ -33,15 +35,18 @@ async def _get_redis() -> aioredis.Redis:
 
 
 class PaymentService:
+
     @staticmethod
     async def handle_successful_payment(
         session: AsyncSession, payment_id: int
     ) -> tuple[bool, str]:
         redis = await _get_redis()
         lock_key = f"lock:payment_bonus:user"
+
         payment_obj = await session.get(Payment, payment_id)
         if not payment_obj:
             return False, "not_found"
+
         user_lock_key = f"lock:payment_bonus:{payment_obj.user_id}"
         redis_lock = redis.lock(user_lock_key, timeout=30, blocking_timeout=15)
 
@@ -151,27 +156,29 @@ class PaymentService:
 
                     user.last_payment_at = now_utc()
                     await savepoint.commit()
-                    invalidate_user_cache(user.telegram_id)
 
-                    try:
-                        await AuditService.log_action(
-                            session, admin_id=0, action="PAYMENT_SUCCESS",
-                            target_type="Payment", target_id=payment_id,
-                            details=(
-                                f"user={user.telegram_id}, "
-                                f"amount={payment.amount} {payment.currency}"
-                            ),
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to log payment success to audit: {e}"
-                        )
+                invalidate_user_cache(user.telegram_id)
 
-                    logger.info(
-                        f"Payment {payment_id} processed successfully "
-                        f"for user {user.telegram_id}"
+                try:
+                    await AuditService.log_action(
+                        session, admin_id=0, action="PAYMENT_SUCCESS",
+                        target_type="Payment", target_id=payment_id,
+                        details=(
+                            f"user={user.telegram_id}, "
+                            f"amount={payment.amount} {payment.currency}"
+                        ),
                     )
-                    return True, "success"
+                except Exception as e:
+                    logger.error(
+                        f"Failed to log payment success to audit: {e}"
+                    )
+
+                logger.info(
+                    f"Payment {payment_id} processed successfully "
+                    f"for user {user.telegram_id}"
+                )
+                return True, "success"
+
             except Exception as e:
                 await session.rollback()
                 logger.error(
@@ -179,6 +186,7 @@ class PaymentService:
                     exc_info=True,
                 )
                 return False, "error"
+
         finally:
             try:
                 await redis_lock.release()
@@ -224,6 +232,7 @@ class PaymentService:
 
                 tariff = payment.tariff
                 user = payment.user
+
                 if not tariff or not user:
                     await savepoint.rollback()
                     return False, "Нет тарифа или пользователя"
@@ -268,21 +277,23 @@ class PaymentService:
                         )
 
                 await savepoint.commit()
-                invalidate_user_cache(user.telegram_id)
 
-                try:
-                    await AuditService.log_action(
-                        session, admin_id=admin_id, action="MANUAL_GRANT",
-                        target_type="Payment", target_id=payment_id,
-                        details=(
-                            f"Admin {admin_id} manually granted cancelled "
-                            f"payment {payment_id} for user {user.telegram_id}"
-                        ),
-                    )
-                except Exception as e:
-                    logger.error(f"force_grant: audit failed: {e}")
+            invalidate_user_cache(user.telegram_id)
 
-                return True, "ok"
+            try:
+                await AuditService.log_action(
+                    session, admin_id=admin_id, action="MANUAL_GRANT",
+                    target_type="Payment", target_id=payment_id,
+                    details=(
+                        f"Admin {admin_id} manually granted cancelled "
+                        f"payment {payment_id} for user {user.telegram_id}"
+                    ),
+                )
+            except Exception as e:
+                logger.error(f"force_grant: audit failed: {e}")
+
+            return True, "ok"
+
         except Exception as e:
             await session.rollback()
             logger.error(
@@ -296,6 +307,7 @@ class PaymentService:
         amount: float, telegram_id: int, bot_username: str,
     ) -> tuple:
         from database.repositories.payments_repo import create_payment
+
         settings = get_settings()
 
         payment = await create_payment(
@@ -332,12 +344,11 @@ class PaymentService:
                 logger.error(
                     f"Failed to delete phantom payment {payment.id}: {delete_error}"
                 )
-
-            payment.status = "failed"
-            try:
-                await session.flush()
-            except Exception:
-                pass
+                payment.status = "failed"
+                try:
+                    await session.flush()
+                except Exception:
+                    pass
 
             try:
                 await AuditService.log_action(
@@ -352,7 +363,6 @@ class PaymentService:
                 logger.error(
                     f"Failed to log payment failure to audit: {e}"
                 )
-
             return None, None
 
         payment.external_id = transaction.get("transactionId")
@@ -397,10 +407,42 @@ class PaymentService:
                 )
                 return True, "already_processed"
 
-            if (
-                callback_amount is not None
-                and payment.amount != int(callback_amount)
-            ):
+            # ── Верификация суммы ──────────────────────────────
+            # Если amount не прислан в callback — запрашиваем
+            # через Platega API. Если и там нет — отклоняем.
+            if callback_amount is None:
+                client = PlategaClient()
+                status_data = await client.check_status(transaction_id)
+                if status_data and status_data.get("amount") is not None:
+                    callback_amount = float(status_data["amount"])
+                    logger.info(
+                        f"Platega callback: amount recovered via API "
+                        f"check_status: {callback_amount} "
+                        f"for transaction={transaction_id}"
+                    )
+                else:
+                    logger.error(
+                        f"Platega callback: amount not provided in callback "
+                        f"and API verification failed for "
+                        f"transaction={transaction_id}. Rejecting."
+                    )
+                    try:
+                        await AuditService.log_action(
+                            session, admin_id=0,
+                            action="PAYMENT_AMOUNT_MISSING",
+                            target_type="Payment", target_id=payment.id,
+                            details=(
+                                f"Amount not in callback and API "
+                                f"check_status failed. "
+                                f"transaction={transaction_id}. "
+                                f"Subscription NOT granted."
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    return False, "amount_mismatch"
+
+            if payment.amount != int(callback_amount):
                 logger.error(
                     f"Platega amount mismatch: DB={payment.amount}, "
                     f"callback={callback_amount}, payment_id={payment.id}, "
@@ -492,8 +534,8 @@ class PaymentService:
             if user:
                 from database.repositories.profiles_repo import get_user_profiles
                 from database.repositories.servers_repo import get_server_by_id
-                current_time = now_utc()
 
+                current_time = now_utc()
                 user.subscription_end = current_time
                 user.current_tariff_id = None
 
@@ -516,6 +558,7 @@ class PaymentService:
 
                                     if user.referral_days and user.referral_days >= bonus_referral:
                                         user.referral_days -= bonus_referral
+
                                     if referrer.referral_days and referrer.referral_days >= bonus_referrer:
                                         referrer.referral_days -= bonus_referrer
 
@@ -609,7 +652,6 @@ class PaymentService:
         session: AsyncSession, payment_id: int
     ) -> tuple[bool, str]:
         payment = await get_payment_by_id(session, payment_id)
-
         if not payment or not payment.external_id:
             return False, "not_found"
 
@@ -632,7 +674,6 @@ class PaymentService:
                 session, payment.id
             )
             return success, result_code
-
         elif status == "CANCELED":
             if payment.status != "cancelled":
                 payment.status = "cancelled"
@@ -658,6 +699,7 @@ async def _disable_peers_background(
     tasks_info: list, telegram_id: int, payment_id: int
 ):
     from services.amnezia_client import AmneziaClient
+
     sem = asyncio.Semaphore(20)
 
     async def _disable_peer(info):
@@ -703,6 +745,7 @@ async def _alert_paid_after_cancel(
     session, payment_id: int
 ) -> None:
     global _alerted_paid_after_cancel
+
     if payment_id in _alerted_paid_after_cancel:
         return
     _alerted_paid_after_cancel.add(payment_id)
@@ -755,13 +798,11 @@ async def _alert_paid_after_cancel(
         text="✅ Выдать подписку",
         callback_data=f"admin_manual_grant:{payment.id}"
     )
-
     if payment.payment_method == "SBPQR" and payment.external_id:
         builder.button(
             text="💸 Вернуть средства (Platega)",
             url=f"https://app.platega.io/transactions/{payment.external_id}"
         )
-
     builder.button(
         text="👤 Профиль клиента",
         callback_data=(
@@ -819,6 +860,7 @@ async def _notify_client_paid_after_cancel(
     session, payment_id: int
 ) -> None:
     global _notified_paid_after_cancel
+
     if payment_id in _notified_paid_after_cancel:
         return
     _notified_paid_after_cancel.add(payment_id)
