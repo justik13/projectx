@@ -54,9 +54,11 @@ class PaymentService:
             acquired = await redis_lock.acquire()
             if not acquired:
                 logger.warning(
-                    f"Payment {payment_id}: failed to acquire Redis bonus lock"
+                    f"Payment {payment_id}: failed to acquire "
+                    f"Redis bonus lock. Continuing without lock "
+                    f"(idempotency via UPDATE WHERE "
+                    f"status='pending')."
                 )
-                pass
 
             try:
                 async with session.begin_nested() as savepoint:

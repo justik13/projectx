@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
+
 MSK_TZ = ZoneInfo("Europe/Moscow")
 
 
@@ -17,40 +18,26 @@ def to_msk(dt: Optional[datetime]) -> Optional[datetime]:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    
     return dt.astimezone(MSK_TZ)
 
 
 def format_datetime_msk(dt: Optional[datetime], format_str: str = "%d.%m.%Y %H:%M") -> str:
     if dt is None:
         return "—"
-    
     msk_dt = to_msk(dt)
     return msk_dt.strftime(format_str)
-
-
-def format_date_msk(dt: Optional[datetime]) -> str:
-    if dt is None:
-        return "—"
-    
-    msk_dt = to_msk(dt)
-    return msk_dt.strftime("%d.%m")
 
 
 def days_left_msk(dt: Optional[datetime]) -> str:
     if dt is None:
         return "—"
-    
     msk_dt = to_msk(dt)
     now_msk_dt = now_msk()
-    
     if msk_dt < now_msk_dt:
         return "—"
-    
     diff = msk_dt - now_msk_dt
     days = diff.days
     hours = diff.seconds // 3600
-    
     if days > 0:
         return f"{days} дн. {hours} ч."
     else:
@@ -62,5 +49,4 @@ def is_expired(dt: Optional[datetime]) -> bool:
         return True
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    
     return dt < now_utc()

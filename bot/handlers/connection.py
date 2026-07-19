@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import re
+
 from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from bot.keyboards import (
     get_back_button,
     get_device_delete_confirm_keyboard,
@@ -48,12 +50,17 @@ from utils.telegram import (
     get_cached_hub_ids,
     delete_hub_ids,
 )
-from utils.vpn_parser import build_vpn_file, build_conf_file
+from utils.vpn_parser import (
+    decode_vpn_uri_to_json,
+    build_vpn_file_from_dict,
+    build_conf_file_from_dict,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 DEVICE_NAME_REGEX = re.compile(r"^[a-zA-Z0-9\s_-]+$")
+
 _deleting_devices: set[int] = set()
 _creating_devices: set[int] = set()
 
@@ -84,10 +91,13 @@ async def _build_connections_screen(
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
     device_limit = await _get_effective_device_limit(user, session)
+
     rendered = texts.CONNECTION_LIST_HEADER.format(
         count=profiles_count, limit=device_limit,
     )
+
     builder = InlineKeyboardBuilder()
+
     if profiles_count == 0:
         rendered += texts.CONNECTION_EMPTY
     else:
@@ -95,10 +105,12 @@ async def _build_connections_screen(
             server = profile.server
             flag = server.country_flag if server else "🌍"
             server_name = server.name if server else "Неизвестно"
+
             builder.button(
                 text=f"⚙️ {safe(profile.device_name)}",
                 callback_data=f"manage_device:{profile.id}",
             )
+
             last_connected_text = (
                 texts.DEVICE_RECENTLY_ACTIVE.format(
                     last_connected=format_datetime(profile.last_connected),
@@ -106,13 +118,16 @@ async def _build_connections_screen(
                 if profile.last_connected
                 else texts.DEVICE_NOT_CONNECTED
             )
+
             rendered += format_connection_device_card(
                 profile, flag, server_name, last_connected_text,
             )
+
     if profiles_count < device_limit:
         builder.button(
             text="➕ Добавить устройство", callback_data="add_device",
         )
+
     builder.adjust(1)
     return rendered, builder
 
@@ -127,6 +142,7 @@ async def _render_connections(
             get_back_button("back_to_main_menu"),
         )
         return
+
     if not await SubscriptionService.check_access(
         session, user.telegram_id,
     ):
@@ -142,6 +158,7 @@ async def _render_connections(
             builder.as_markup(),
         )
         return
+
     rendered, builder = await _build_connections_screen(user, session)
     builder.button(
         text="🏠 В главное меню", callback_data="back_to_main_menu",
@@ -159,11 +176,13 @@ async def hub_menu_connections(
 ):
     await callback.answer()
     await state.clear()
+
     if not db_user:
         await callback.answer(
             texts.ERROR_USER_NOT_FOUND, show_alert=True,
         )
         return
+
     await _render_connections(callback.message, db_user, session)
 
 
@@ -174,11 +193,13 @@ async def back_to_connections(
 ):
     await callback.answer()
     await state.clear()
+
     if not db_user:
         await callback.answer(
             texts.ERROR_USER_NOT_FOUND, show_alert=True,
         )
         return
+
     await _render_connections(callback.message, db_user, session)
 
 
@@ -189,17 +210,21 @@ async def manage_device(
 ):
     await callback.answer()
     await state.clear()
+
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED, show_alert=True,
         )
         return
+
     server = await get_server_by_id(session, profile.server_id)
     flag = server.country_flag if server else "🌍"
     server_name = server.name if server else "Неизвестно"
     protocol = _format_protocol(server.protocol if server else None)
+
     rendered = texts.DEVICE_MANAGE_HEADER.format(
         device_name=safe(profile.device_name),
         flag=flag,
@@ -214,6 +239,7 @@ async def manage_device(
             else "Нет данных"
         ),
     )
+
     await render_hub(
         callback.bot, callback.message.chat.id,
         rendered, get_device_keyboard(profile.id),
@@ -227,13 +253,16 @@ async def show_config(
 ):
     await callback.answer()
     await state.clear()
+
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED, show_alert=True,
         )
         return
+
     await render_hub(
         callback.bot, callback.message.chat.id,
         texts.DEVICE_SHOW_KEY.format(
@@ -251,19 +280,38 @@ async def download_conf(
 ):
     await callback.answer("⏳ Генерирую файлы...")
     await state.clear()
+
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED, show_alert=True,
         )
         return
+
     safe_device_name = "".join(
         c for c in profile.device_name
         if c.isalnum() or c in (" ", "_", "-")
     ).strip() or "client"
-    vpn_content = build_vpn_file(profile.raw_config)
-    conf_content = build_conf_file(profile.raw_config)
+
+    # Декодируем vpn:// URI ОДИН раз и передаём dict
+    # в обе функции генерации файлов
+    decoded = decode_vpn_uri_to_json(profile.raw_config)
+
+    if decoded is None:
+        await render_hub(
+            callback.bot, callback.message.chat.id,
+            texts.DOWNLOAD_CONF_FALLBACK.format(
+                device_name=safe(profile.device_name),
+            ),
+            get_back_button(f"manage_device:{profile.id}"),
+        )
+        return
+
+    vpn_content = build_vpn_file_from_dict(decoded)
+    conf_content = build_conf_file_from_dict(decoded)
+
     if not vpn_content or not conf_content:
         await render_hub(
             callback.bot, callback.message.chat.id,
@@ -273,6 +321,7 @@ async def download_conf(
             get_back_button(f"manage_device:{profile.id}"),
         )
         return
+
     vpn_file = BufferedInputFile(
         vpn_content.encode("utf-8"),
         filename=f"{safe_device_name}.vpn",
@@ -281,7 +330,9 @@ async def download_conf(
         conf_content.encode("utf-8"),
         filename=f"{safe_device_name}.conf",
     )
+
     old_hub_ids = get_cached_hub_ids(callback.message.chat.id)
+
     await append_hub_document(
         callback.bot, callback.message.chat.id,
         document=vpn_file,
@@ -292,6 +343,7 @@ async def download_conf(
         ),
         parse_mode="HTML",
     )
+
     await append_hub_document(
         callback.bot, callback.message.chat.id,
         document=conf_file,
@@ -302,20 +354,23 @@ async def download_conf(
         ),
         parse_mode="HTML",
     )
+
     instruction_text = (
-        "✅ <b>Файлы конфигурации отправлены!</b>\n"
+        "✅ <b>Файлы конфигурации отправлены!</b>\n\n"
         "📥 <b>Как подключить:</b>\n"
         "1️⃣ <b>.vpn</b> — импортируйте в <b>основной клиент Amnezia</b>.\n"
-        "2️⃣ <b>.conf</b> — импортируйте в <b>AmneziaWG</b>.\n"
+        "2️⃣ <b>.conf</b> — импортируйте в <b>AmneziaWG</b>.\n\n"
         "<i>💡 Нажмите на файл выше, чтобы открыть его "
         "в нужном приложении.</i>"
     )
+
     await append_hub_message(
         callback.bot, callback.message.chat.id,
         text=instruction_text,
         reply_markup=get_back_button(f"manage_device:{profile.id}"),
         parse_mode="HTML",
     )
+
     await delete_hub_ids(
         callback.bot, callback.message.chat.id, old_hub_ids,
     )
@@ -327,15 +382,19 @@ async def rename_device_start(
     session: AsyncSession, db_user: User | None = None,
 ):
     await callback.answer()
+
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED, show_alert=True,
         )
         return
+
     await state.update_data(profile_id=profile_id)
     await state.set_state(DeviceManagementStates.rename_device)
+
     await render_hub(
         callback.bot, callback.message.chat.id,
         texts.DEVICE_RENAME_PROMPT,
@@ -350,7 +409,9 @@ async def rename_device_process(
     if not message.text or message.text.startswith("/"):
         await state.clear()
         return
+
     new_name = message.text.strip()
+
     if (
         not new_name
         or len(new_name) > 16
@@ -362,8 +423,10 @@ async def rename_device_process(
             get_back_button("back_to_connections"),
         )
         return
+
     data = await state.get_data()
     profile = await get_profile_by_id(session, data.get("profile_id"))
+
     if profile:
         await update_profile(session, profile, device_name=new_name)
         await render_hub(
@@ -371,6 +434,7 @@ async def rename_device_process(
             f"✅ Устройство переименовано в <b>{safe(new_name)}</b>",
             get_device_keyboard(profile.id),
         )
+
     await state.clear()
 
 
@@ -381,13 +445,16 @@ async def request_delete_device(
 ):
     await callback.answer()
     await state.clear()
+
     profile_id = int(callback.data.split(":")[1])
     profile = await get_profile_by_id(session, profile_id)
+
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED, show_alert=True,
         )
         return
+
     await render_hub(
         callback.bot, callback.message.chat.id,
         texts.DEVICE_DELETE_CONFIRM.format(
@@ -404,6 +471,7 @@ async def cancel_delete_device(
 ):
     await callback.answer("❌ Удаление отменено")
     await state.clear()
+
     profile_id = int(callback.data.split(":")[1])
     await render_hub(
         callback.bot, callback.message.chat.id,
@@ -418,16 +486,21 @@ async def confirm_delete_device(
     session: AsyncSession, db_user: User | None = None,
 ):
     profile_id = int(callback.data.split(":")[1])
+
     if profile_id in _deleting_devices:
         await callback.answer(
             "⏳ Уже удаляем устройство...", show_alert=True,
         )
         return
+
     _deleting_devices.add(profile_id)
+
     try:
         await callback.answer("⏳ Удаляю устройство...")
         await state.clear()
+
         profile = await get_profile_by_id(session, profile_id)
+
         if (
             not profile
             or not db_user
@@ -437,17 +510,20 @@ async def confirm_delete_device(
                 texts.ERROR_ACCESS_DENIED, show_alert=True,
             )
             return
+
         if not await DeviceService.delete_device(session, profile):
             await callback.answer(
                 texts.ERROR_SERVER_UNAVAILABLE_GENERIC,
                 show_alert=True,
             )
             return
+
         user = db_user or await get_user_by_telegram_id(
             session, callback.from_user.id,
         )
         if user:
             await _render_connections(callback.message, user, session)
+
     finally:
         _deleting_devices.discard(profile_id)
 
@@ -458,12 +534,15 @@ async def start_add_device(
     session: AsyncSession, db_user: User | None = None,
 ):
     user_id = callback.from_user.id
+
     if user_id in _creating_devices:
         await callback.answer(
             "⏳ Уже обрабатываем запрос...", show_alert=True,
         )
         return
+
     user = db_user or await get_user_by_telegram_id(session, user_id)
+
     if not user or not await SubscriptionService.check_access(
         session, user.telegram_id,
     ):
@@ -471,11 +550,15 @@ async def start_add_device(
             texts.ERROR_NO_SUBSCRIPTION, show_alert=True,
         )
         return
+
     _creating_devices.add(user_id)
+
     try:
         await callback.answer()
         await state.clear()
+
         servers = await get_available_servers(session)
+
         if not servers:
             await render_hub(
                 callback.bot, callback.message.chat.id,
@@ -483,6 +566,7 @@ async def start_add_device(
                 get_back_button("back_to_connections"),
             )
             return
+
         builder = InlineKeyboardBuilder()
         for server in servers:
             flag = server.country_flag or "🌍"
@@ -490,16 +574,19 @@ async def start_add_device(
                 text=f"{flag} {server.name}",
                 callback_data=f"select_server:{server.id}",
             )
+
         builder.button(
             text="← Назад", callback_data="back_to_connections",
         )
         builder.adjust(1)
+
         await render_hub(
             callback.bot, callback.message.chat.id,
             texts.CONNECTION_SELECT_SERVER,
             builder.as_markup(),
         )
         await state.set_state(DeviceCreationStates.choose_server)
+
     finally:
         _creating_devices.discard(user_id)
 
@@ -513,9 +600,11 @@ async def select_server(
     session: AsyncSession, db_user: User | None = None,
 ):
     await callback.answer()
+
     user = db_user or await get_user_by_telegram_id(
         session, callback.from_user.id,
     )
+
     if not user or not await SubscriptionService.check_access(
         session, user.telegram_id,
     ):
@@ -524,14 +613,17 @@ async def select_server(
         )
         await state.clear()
         return
+
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
+
     if not server:
         await callback.answer(
             texts.ERROR_LOCATION_NOT_FOUND, show_alert=True,
         )
         await state.clear()
         return
+
     if not server.is_active:
         await callback.answer(
             "⚠️ Сервер временно недоступен. "
@@ -540,8 +632,10 @@ async def select_server(
         )
         await state.clear()
         return
+
     await state.update_data(server_id=server_id)
     await state.set_state(DeviceCreationStates.enter_device_name)
+
     flag = server.country_flag or "🌍"
     await render_hub(
         callback.bot, callback.message.chat.id,
@@ -559,6 +653,7 @@ async def enter_device_name(
 ):
     user_id = message.from_user.id
     user = db_user or await get_user_by_telegram_id(session, user_id)
+
     if not user or not await SubscriptionService.check_access(
         session, user.telegram_id,
     ):
@@ -569,6 +664,7 @@ async def enter_device_name(
         )
         await state.clear()
         return
+
     if user_id in _creating_devices:
         await render_hub(
             message.bot, message.chat.id,
@@ -577,7 +673,9 @@ async def enter_device_name(
             get_back_button("add_device"),
         )
         return
+
     _creating_devices.add(user_id)
+
     try:
         if not message.text or message.text.startswith("/"):
             await render_hub(
@@ -586,7 +684,9 @@ async def enter_device_name(
                 get_back_button("add_device"),
             )
             return
+
         device_name = message.text.strip()
+
         if (
             not device_name
             or len(device_name) > 16
@@ -598,8 +698,10 @@ async def enter_device_name(
                 get_back_button("add_device"),
             )
             return
+
         data = await state.get_data()
         server_id = data.get("server_id")
+
         if not server_id:
             await render_hub(
                 message.bot, message.chat.id,
@@ -608,6 +710,7 @@ async def enter_device_name(
             )
             await state.clear()
             return
+
         await render_hub(
             message.bot, message.chat.id,
             "⏳ <b>Создаю устройство...</b>\n"
@@ -615,6 +718,7 @@ async def enter_device_name(
             get_back_button("add_device"),
             parse_mode="HTML",
         )
+
         try:
             profile = await DeviceService.create_device(
                 session, user, server_id, device_name,
@@ -662,17 +766,21 @@ async def enter_device_name(
             )
             await state.clear()
             return
+
         server = await get_server_by_id(session, profile.server_id)
+
         success_text = texts.DEVICE_ADDED_SUCCESS.format(
             device_name=safe(device_name),
             flag=server.country_flag if server else "🌍",
             server_name=safe(server.name) if server else "—",
         )
+
         await render_hub(
             message.bot, message.chat.id,
             success_text,
             get_device_keyboard(profile.id),
         )
         await state.clear()
+
     finally:
         _creating_devices.discard(user_id)

@@ -303,18 +303,46 @@ async def _batch_update_profiles(updates_data: dict):
     async with session_scope() as session:
         items = list(updates_data.items())
 
+        # Guard: проверяем что все profile id существуют.
+        # Если профиль удалён между SELECT (в
+        # _process_server_traffic) и INSERT здесь —
+        # без guard'а INSERT вставил бы строку с
+        # user_id=NULL, server_id=NULL → NOT NULL
+        # violation → crash worker'а.
+        all_ids = [p_id for p_id, _ in items]
+        existing_result = await session.execute(
+            select(VPNProfile.id).where(
+                VPNProfile.id.in_(all_ids)
+            )
+        )
+        existing_ids = set(
+            existing_result.scalars().all()
+        )
+
+        items = [
+            (p_id, data)
+            for p_id, data in items
+            if p_id in existing_ids
+        ]
+        if not items:
+            return
+
         for i in range(0, len(items), BATCH_SIZE):
-            batch = items[i:i + BATCH_SIZE]
+            batch = items[i : i + BATCH_SIZE]
             batch_values = []
 
             for p_id, data in batch:
-                row = {'id': p_id}
-                if 'traffic_down' in data:
-                    row['traffic_down'] = data['traffic_down']
-                if 'traffic_up' in data:
-                    row['traffic_up'] = data['traffic_up']
-                if 'last_connected' in data:
-                    row['last_connected'] = data['last_connected']
+                row = {"id": p_id}
+                if "traffic_down" in data:
+                    row["traffic_down"] = data[
+                        "traffic_down"
+                    ]
+                if "traffic_up" in data:
+                    row["traffic_up"] = data["traffic_up"]
+                if "last_connected" in data:
+                    row["last_connected"] = data[
+                        "last_connected"
+                    ]
                 batch_values.append(row)
 
             if not batch_values:
@@ -323,17 +351,31 @@ async def _batch_update_profiles(updates_data: dict):
             stmt = insert(VPNProfile).values(batch_values)
 
             update_dict = {}
-            if any('traffic_down' in data for _, data in batch):
-                update_dict['traffic_down'] = stmt.excluded.traffic_down
-            if any('traffic_up' in data for _, data in batch):
-                update_dict['traffic_up'] = stmt.excluded.traffic_up
-            if any('last_connected' in data for _, data in batch):
-                update_dict['last_connected'] = stmt.excluded.last_connected
+            if any(
+                "traffic_down" in data
+                for _, data in batch
+            ):
+                update_dict["traffic_down"] = (
+                    stmt.excluded.traffic_down
+                )
+            if any(
+                "traffic_up" in data for _, data in batch
+            ):
+                update_dict["traffic_up"] = (
+                    stmt.excluded.traffic_up
+                )
+            if any(
+                "last_connected" in data
+                for _, data in batch
+            ):
+                update_dict["last_connected"] = (
+                    stmt.excluded.last_connected
+                )
 
             if update_dict:
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=['id'],
-                    set_=update_dict
+                    index_elements=["id"],
+                    set_=update_dict,
                 )
 
             await session.execute(stmt)

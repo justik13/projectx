@@ -1,4 +1,5 @@
 import logging
+
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
@@ -8,9 +9,7 @@ from bot.keyboards import get_admin_menu, get_audit_keyboard
 from bot import texts
 from database.repositories.audit_repo import get_recent_audit_logs
 from database.repositories.servers_repo import get_total_free_ips
-from database.repositories.users_repo import (
-    get_active_subscriptions_count, get_new_users_count_24h, get_user_count,
-)
+from database.repositories.users_repo import get_dashboard_stats
 from utils.admin import is_admin
 from utils.formatters import format_datetime
 from utils.telegram import safe, render_hub
@@ -18,18 +17,20 @@ from utils.telegram import safe, render_hub
 router = Router()
 logger = logging.getLogger(__name__)
 
+
 async def _render_dashboard(callback: CallbackQuery, session: AsyncSession):
-    total_users = await get_user_count(session)
-    active_subs = await get_active_subscriptions_count(session)
-    new_users_24h = await get_new_users_count_24h(session)
+    stats = await get_dashboard_stats(session)
     free_ips = await get_total_free_ips(session)
-    
+
     rendered = texts.DASHBOARD_HEADER + texts.DASHBOARD_STATS.format(
-        total_users=total_users, active_subs=active_subs,
-        new_users_24h=new_users_24h, free_ips=free_ips
+        total_users=stats["total"],
+        active_subs=stats["active"],
+        new_users_24h=stats["new_24h"],
+        free_ips=free_ips,
     )
-    
+
     await render_hub(callback.bot, callback.message.chat.id, rendered, get_admin_menu())
+
 
 @router.callback_query(F.data == "menu_admin")
 async def hub_menu_admin(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
@@ -40,6 +41,7 @@ async def hub_menu_admin(callback: CallbackQuery, state: FSMContext, session: As
     await _render_dashboard(callback, session)
     await callback.answer()
 
+
 @router.callback_query(F.data == "admin_menu")
 async def back_to_admin(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     if not is_admin(callback.from_user.id):
@@ -49,14 +51,16 @@ async def back_to_admin(callback: CallbackQuery, state: FSMContext, session: Asy
     await _render_dashboard(callback, session)
     await callback.answer()
 
+
 @router.callback_query(F.data == "admin_audit")
 async def show_audit_log(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     if not is_admin(callback.from_user.id):
         await callback.answer(texts.ERROR_ACCESS_DENIED, show_alert=True)
         return
     await state.clear()
-    
+
     logs = await get_recent_audit_logs(session, limit=10)
+
     if not logs:
         rendered = texts.AUDIT_LOG_HEADER + texts.AUDIT_LOG_EMPTY
     else:
@@ -72,6 +76,6 @@ async def show_audit_log(callback: CallbackQuery, state: FSMContext, session: As
                 target=target_info,
                 details=details
             )
-    
+
     await render_hub(callback.bot, callback.message.chat.id, rendered, get_audit_keyboard())
     await callback.answer()

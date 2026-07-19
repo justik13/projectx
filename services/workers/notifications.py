@@ -1,17 +1,14 @@
 import asyncio
 import logging
 import time
-
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import timedelta
 from sqlalchemy import select, or_
-
 from database.connection import session_scope
-from database.repositories.tariffs_repo import get_tariff_by_id
+from database.models import User, Tariff
 from database.repositories.users_repo import mark_user_bot_blocked
-from database.models import User
 from bot.constants import NOTIFICATION_INTERVAL, WORKER_ERROR_SLEEP_INTERVAL
 from utils.datetime_helpers import now_utc
 
@@ -19,7 +16,10 @@ logger = logging.getLogger("BackgroundWorker")
 
 MAX_RETRY_COUNT = 4
 BACKOFF_BASE_INTERVAL = NOTIFICATION_INTERVAL
+
+
 class NotificationRateLimiter:
+
     def __init__(self, rate: float = 25.0):
         self.rate = rate
         self.tokens = rate
@@ -33,11 +33,9 @@ class NotificationRateLimiter:
                 elapsed = now - self.last_refill
                 self.tokens = min(self.rate, self.tokens + elapsed * self.rate)
                 self.last_refill = now
-
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
-
                 wait_time = (1.0 - self.tokens) / self.rate
             await asyncio.sleep(wait_time)
 
@@ -48,84 +46,135 @@ _notification_limiter = NotificationRateLimiter(rate=25.0)
 def _get_backoff_delay(retry_count: int) -> int:
     capped = min(retry_count, MAX_RETRY_COUNT)
     return BACKOFF_BASE_INTERVAL * (2 ** capped)
+
+
 NOTIFICATION_BATCH_SIZE = 20
 
 
-async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Event):
+async def subscription_notifications_loop(
+    bot: Bot, shutdown_event: asyncio.Event,
+):
     while not shutdown_event.is_set():
         try:
             try:
                 await asyncio.wait_for(
-                    shutdown_event.wait(), timeout=NOTIFICATION_INTERVAL
+                    shutdown_event.wait(),
+                    timeout=NOTIFICATION_INTERVAL,
                 )
                 break
             except asyncio.TimeoutError:
                 pass
+
             current_time = now_utc()
             users = []
+            tariff_cache: dict[int, Tariff] = {}
+
             async with session_scope() as session:
                 stmt = select(User).where(
                     User.subscription_end > current_time,
-                    User.subscription_end <= current_time + timedelta(days=3),
+                    User.subscription_end
+                    <= current_time + timedelta(days=3),
                     User.is_banned == False,
                     User.is_bot_blocked == False,
                     User.is_deleted == False,
                     or_(
                         User.notified_3d == False,
                         User.notified_1d == False,
-                        User.notified_2h == False
-                    )
+                        User.notified_2h == False,
+                    ),
                 )
                 result = await session.execute(stmt)
                 users = list(result.scalars().all())
 
+                # Загружаем ВСЕ тарифы одним запросом.
+                # Устраняет N+1: было get_tariff_by_id()
+                # для каждого пользователя в цикле.
+                tariff_result = await session.execute(
+                    select(Tariff)
+                )
+                tariff_cache = {
+                    t.id: t
+                    for t in tariff_result.scalars().all()
+                }
+
             if not users:
                 continue
 
-            logger.info(f"Notifications: found {len(users)} users to notify")
+            logger.info(
+                f"Notifications: found {len(users)} users "
+                f"to notify, {len(tariff_cache)} tariffs cached"
+            )
+
             all_blocked_user_ids = []
 
             for i in range(0, len(users), NOTIFICATION_BATCH_SIZE):
-                batch = users[i:i + NOTIFICATION_BATCH_SIZE]
+                batch = users[i : i + NOTIFICATION_BATCH_SIZE]
                 blocked_user_ids = []
 
                 async with session_scope() as session:
                     for user in batch:
-                        time_left = user.subscription_end - current_time
+                        time_left = (
+                            user.subscription_end - current_time
+                        )
                         msg = None
                         notification_type = None
-                        retry_count = user.notification_retry_count or 0
+                        retry_count = (
+                            user.notification_retry_count or 0
+                        )
 
                         if retry_count >= MAX_RETRY_COUNT:
                             user.notification_retry_count = 0
                             continue
 
-                        if retry_count > 0 and user.last_notification_attempt:
-                            backoff_delay = _get_backoff_delay(retry_count - 1)
+                        if (
+                            retry_count > 0
+                            and user.last_notification_attempt
+                        ):
+                            backoff_delay = _get_backoff_delay(
+                                retry_count - 1
+                            )
                             time_since_last = (
-                                current_time - user.last_notification_attempt
+                                current_time
+                                - user.last_notification_attempt
                             ).total_seconds()
                             if time_since_last < backoff_delay:
                                 continue
 
-                        if time_left <= timedelta(hours=2) and not user.notified_2h:
+                        if (
+                            time_left <= timedelta(hours=2)
+                            and not user.notified_2h
+                        ):
                             msg = (
-                                "🔴 <b>Ваш доступ отключится через 2 часа!</b>\n"
+                                "🔴 <b>Ваш доступ отключится "
+                                "через 2 часа!</b>\n"
                                 "Не оставайтесь без ProjectX.\n"
-                                "Нажмите кнопку ниже, чтобы продлить подписку в один клик."
+                                "Нажмите кнопку ниже, чтобы "
+                                "продлить подписку в один клик."
                             )
                             notification_type = "2h"
-                        elif time_left <= timedelta(days=1) and not user.notified_1d:
+                        elif (
+                            time_left <= timedelta(days=1)
+                            and not user.notified_1d
+                        ):
                             msg = (
-                                "🟡 <b>Ваш доступ отключится через 1 день.</b>\n"
-                                "Рекомендуем продлить подписку заранее, чтобы не потерять связь.\n"
-                                "Нажмите кнопку ниже для быстрого продления."
+                                "🟡 <b>Ваш доступ отключится "
+                                "через 1 день.</b>\n"
+                                "Рекомендуем продлить подписку "
+                                "заранее, чтобы не потерять связь.\n"
+                                "Нажмите кнопку ниже для быстрого "
+                                "продления."
                             )
                             notification_type = "1d"
-                        elif time_left <= timedelta(days=3) and not user.notified_3d:
+                        elif (
+                            time_left <= timedelta(days=3)
+                            and not user.notified_3d
+                        ):
                             msg = (
-                                "🟢 <b>Ваш доступ отключится через 3 дня.</b>\n"
-                                "Успейте продлить подписку и продолжайте пользоваться сервисом без перебоев.\n"
+                                "🟢 <b>Ваш доступ отключится "
+                                "через 3 дня.</b>\n"
+                                "Успейте продлить подписку и "
+                                "продолжайте пользоваться сервисом "
+                                "без перебоев.\n"
                                 "Нажмите кнопку ниже для оплаты."
                             )
                             notification_type = "3d"
@@ -134,30 +183,43 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
                             try:
                                 await _notification_limiter.acquire()
 
-                                tariff = await get_tariff_by_id(
-                                    session, user.current_tariff_id
-                                ) if user.current_tariff_id else None
+                                # Берём тариф из кэша
+                                # вместо DB-запроса
+                                tariff = (
+                                    tariff_cache.get(
+                                        user.current_tariff_id
+                                    )
+                                    if user.current_tariff_id
+                                    else None
+                                )
 
                                 kb = InlineKeyboardBuilder()
                                 if tariff:
                                     kb.button(
                                         text="💳 Продлить доступ",
-                                        callback_data="menu_subscription"
+                                        callback_data=(
+                                            "menu_subscription"
+                                        ),
                                     )
                                 kb.button(
                                     text="✅ Прочитано (убрать)",
-                                    callback_data="dismiss_notification"
+                                    callback_data=(
+                                        "dismiss_notification"
+                                    ),
                                 )
                                 kb.adjust(1)
 
                                 await bot.send_message(
-                                    user.telegram_id, msg,
+                                    user.telegram_id,
+                                    msg,
                                     reply_markup=kb.as_markup(),
-                                    parse_mode="HTML"
+                                    parse_mode="HTML",
                                 )
 
                                 user.notification_retry_count = 0
-                                user.last_notification_attempt = current_time
+                                user.last_notification_attempt = (
+                                    current_time
+                                )
 
                                 if notification_type == "2h":
                                     user.notified_2h = True
@@ -168,30 +230,44 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
 
                             except TelegramForbiddenError:
                                 logger.info(
-                                    f"User {user.telegram_id} blocked the bot"
+                                    f"User {user.telegram_id} "
+                                    f"blocked the bot"
                                 )
-                                blocked_user_ids.append(user.telegram_id)
+                                blocked_user_ids.append(
+                                    user.telegram_id
+                                )
                             except Exception as e:
-                                user.notification_retry_count = retry_count + 1
-                                user.last_notification_attempt = current_time
-                                logger.warning(
-                                    f"Failed to send notification to "
-                                    f"{user.telegram_id}: {e}"
+                                user.notification_retry_count = (
+                                    retry_count + 1
                                 )
-                    if blocked_user_ids:
-                        try:
+                                user.last_notification_attempt = (
+                                    current_time
+                                )
+                                logger.warning(
+                                    f"Failed to send notification "
+                                    f"to {user.telegram_id}: {e}"
+                                )
+
+                if blocked_user_ids:
+                    try:
+                        async with session_scope() as session:
                             for uid in blocked_user_ids:
-                                await mark_user_bot_blocked(session, uid)
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to batch mark users as bot_blocked: {e}"
-                            )
+                                await mark_user_bot_blocked(
+                                    session, uid
+                                )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to batch mark users as "
+                            f"bot_blocked: {e}"
+                        )
 
                 all_blocked_user_ids.extend(blocked_user_ids)
 
             if all_blocked_user_ids:
                 logger.info(
-                    f"Notifications: {len(all_blocked_user_ids)} users blocked the bot"
+                    f"Notifications: "
+                    f"{len(all_blocked_user_ids)} users "
+                    f"blocked the bot"
                 )
 
         except asyncio.CancelledError:
@@ -199,7 +275,8 @@ async def subscription_notifications_loop(bot: Bot, shutdown_event: asyncio.Even
             break
         except Exception as e:
             logger.error(
-                f"Критическая ошибка в цикле уведомлений: {e}", exc_info=True
+                f"Критическая ошибка в цикле уведомлений: {e}",
+                exc_info=True,
             )
             if shutdown_event.is_set():
                 break

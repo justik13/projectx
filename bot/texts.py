@@ -1,4 +1,3 @@
-
 WELCOME_TEXT = (
     "👋 <b>Добро пожаловать!</b>\n"
     "🔐 Здесь вы можете подключить свои устройства к ProjectX в один клик.\n"
@@ -30,32 +29,37 @@ PROFILE_TEXT_INACTIVE = (
     "Чтобы подключать устройства и пользоваться сервисом, оформите подписку.\n"
     "🎁 <b>Рефералов:</b> {referrals_count}  ·  Получено дней: +{referral_days}"
 )
+
 REFERRAL_TEXT = (
     "🎁 <b>Реферальная программа</b>\n"
-    "Приглашайте друзей и получайте бонусные дни!\n\n"
+    "Приглашайте друзей и получайте бонусные дни!\n"
     "🔗 <b>Ваша ссылка:</b>\n"
-    "<code>{referral_link}</code>\n\n"
-    "💡 <i>Нажмите на ссылку выше, чтобы скопировать.</i>\n\n"
+    "<code>{referral_link}</code>\n"
+    "💡 <i>Нажмите на ссылку выше, чтобы скопировать.</i>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "📊 <b>Как начисляются бонусы:</b>\n"
     "• <b>Первая покупка</b> друга (от 30 дней):\n"
     "  👤 Другу: <b>+5 дней</b> к подписке\n"
     "  🎁 Вам: <b>+3 дня</b> к подписке\n"
     "• <b>Продление</b> друга (от 30 дней):\n"
-    "  🎁 Вам: <b>+1 день</b> к подписке\n\n"
+    "  🎁 Вам: <b>+1 день</b> к подписке\n"
     "👥 Приглашено: <b>{invited_count}</b>\n"
     "🏆 Заработано дней: <b>+{bonus_total}</b>"
 )
 
 REFERRAL_LIST_HEADER = "👥 <b>Ваши рефералы</b>\n"
+
 REFERRAL_LIST_EMPTY = (
     "<i>Список рефералов пока пуст.</i>\n"
     "Пригласите друзей по вашей ссылке, чтобы они появились здесь."
 )
+
 REFERRAL_LIST_FOOTER = "\nВсего приглашено: {count} пользователей"
 
 CONNECTION_LIST_HEADER = "🔌 <b>Ваши устройства</b> ({count}/{limit})\n"
+
 CONNECTION_EMPTY = "<i>У вас пока нет подключённых устройств.</i>"
+
 CONNECTION_SELECT_SERVER = "🌍 <b>Выберите локацию для подключения:</b>\n"
 
 DEVICE_CARD = (
@@ -63,7 +67,9 @@ DEVICE_CARD = (
     "{last_connected_text}\n"
     "↓ {traffic_down}  ↑ {traffic_up}  Σ {traffic_total}\n"
 )
+
 DEVICE_NOT_CONNECTED = "⏱ Ещё не подключалось"
+
 DEVICE_RECENTLY_ACTIVE = "⏱ Активно недавно ({last_connected})"
 
 DEVICE_MANAGE_HEADER = (
@@ -75,32 +81,32 @@ DEVICE_MANAGE_HEADER = (
     "⏱ Последняя активность: {last_connected}\n"
     "<i>Нажмите «🔑 Показать ключ», чтобы получить ключ подключения.</i>"
 )
+
 DEVICE_SHOW_KEY = (
     "🔑 <b>Ключ подключения для {device_name}:</b>\n"
     "<code>{raw_config}</code>\n"
     "<i>💡 Нажмите на моноширинный текст выше, чтобы скопировать ключ.</i>"
 )
-DEVICE_CONF_CAPTION = (
-    "📁 <b>Конфигурация {protocol_badge}</b>\n"
-    "📱 Устройство: <b>{device_name}</b>\n"
-    "<i>Импортируйте файл в приложение для подключения.</i>"
-)
+
 DEVICE_DELETE_CONFIRM = (
     "⚠️ <b>Подтверждение удаления</b>\n"
     "Вы уверены, что хотите удалить устройство:\n"
     "📱 <b>{device_name}</b>?\n"
     "<i>После удаления вам нужно будет создать устройство заново.</i>"
 )
+
 DEVICE_ADD_NAME_PROMPT = (
     "✏️ <b>Введите имя устройства для {flag} {server_name}:</b>\n"
     "(например: IPhone, MacBook, Work PC)\n"
     "Максимум 16 символов, только латиница и цифры."
 )
+
 DEVICE_ADDED_SUCCESS = (
     "✅ <b>Устройство добавлено!</b>\n"
     "📱 {device_name} ({flag} {server_name})\n"
     "<i>Используйте кнопки ниже, чтобы получить ключ подключения.</i>"
 )
+
 DEVICE_RENAME_PROMPT = (
     "✏️ <b>Переименование устройства</b>\n"
     "Введите новое имя (латиница, цифры, пробелы, дефисы, до 16 символов):"
@@ -112,6 +118,7 @@ SUPPORT_TEXT = (
     "👤 {support_username}\n"
     "Мы отвечаем в течение 24 часов."
 )
+
 FAQ_TEXT = (
     "❓ <b>Частые вопросы</b>\n"
     "<b>1. Как подключить устройство?</b>\n"
@@ -132,6 +139,7 @@ PAYMENT_SHOWCASE_HEADER = (
     "🛡 <b>Выберите формат подписки</b>\n"
     "Выберите тариф, который подходит под ваши задачи. Все серверы работают на максимальной скорости.\n"
 )
+
 PAYMENT_HUB_HEADER = (
     "⏳ <b>Ваша подписка</b>\n"
     "🟢 <b>Статус:</b> Активна\n"
@@ -140,12 +148,14 @@ PAYMENT_HUB_HEADER = (
     "🔌 <b>Устройства:</b> {devices_count} / {device_limit}\n"
     "Выберите действие:"
 )
+
 PAYMENT_QUICK_RENEW_HEADER = (
     "🔄 <b>Продление доступа</b>\n"
     "Ваш текущий тариф: <b>{tariff_name}</b>\n"
     "Активен до: <i>{valid_until}</i>\n"
     "Выберите, на сколько продлить:"
 )
+
 PAYMENT_CHANGE_TARIFF_HEADER = (
     "⚙️ <b>Смена тарифа</b>\n"
     "Сейчас у вас: <b>{tariff_name}</b> (до {valid_until})\n"
@@ -179,11 +189,6 @@ PAYMENT_CHECKOUT_TEXT = (
     "💰 Итого: <b>{price_rub} ₽</b> / {price_stars} ⭐\n"
     "Выберите удобный способ оплаты:"
 )
-PAYMENT_SBP_TEXT = (
-    "💳 <b>Оплата через СБП</b>\n"
-    "К оплате: <b>{price_rub} ₽</b>\n"
-    "Нажмите кнопку ниже для оплаты — доступ будет активирован мгновенно."
-)
 
 PAYMENT_DOWNGRADE_BLOCKED = (
     "⚠️ <b>Переход на тариф с меньшим лимитом</b>\n"
@@ -212,24 +217,29 @@ PAYMENT_NO_TARIFFS = (
     "💳 В данный момент нет доступных тарифов.\n"
     "Обратитесь в поддержку для оформления подписки вручную."
 )
+
 PAYMENT_DELAYED = (
     "⚠️ Возникла задержка при зачислении. Пожалуйста, напишите в поддержку."
 )
 
 HISTORY_HEADER = "🧾 <b>История оплат</b>\n"
+
 HISTORY_EMPTY = "<i>История пуста. У вас пока не было оплат.</i>"
+
 HISTORY_LIMIT_NOTE = "\n<i>Показаны последние 10 из {count} оплат</i>"
 
 FALLBACK_MEDIA_TEXT = (
     "🤖 Я текстовый ассистент и пока не умею распознавать картинки, голосовые сообщения, стикеры или видео-кружочки.\n"
     "Пожалуйста, используйте кнопки в меню или вернитесь в главное меню."
 )
+
 FALLBACK_UNKNOWN_TEXT = (
     "🤔 Я не понимаю эту команду.\n"
     "Пожалуйста, используйте кнопки в меню или вернитесь в главное меню."
 )
 
 TOS_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19"
+
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-04-01-26"
 
 DOWNLOAD_CONF_FALLBACK = (
@@ -239,61 +249,96 @@ DOWNLOAD_CONF_FALLBACK = (
 )
 
 ERROR_ACCESS_DENIED = "⛔️ Нет доступа"
+
 ERROR_ACCESS_PANEL = "⛔️ У вас нет доступа к админ-панели."
+
 ERROR_BANNED_MESSAGE = (
     "⛔️ У вас заблокирован доступ к сервису.\n"
     "Если вы считаете, что это ошибка, свяжитесь с поддержкой."
 )
+
 ERROR_BANNED_ALERT = "⛔️ У вас заблокирован доступ к сервису."
+
 ERROR_ADMIN_BAN_FORBIDDEN = "⛔️ Нельзя банить администраторов"
 
 ERROR_TEXT_REQUIRED = "⚠️ Пожалуйста, отправьте текстовое сообщение."
+
 ERROR_TEXT_EXPECTED = "⚠️ Ожидается текстовый ввод."
+
 ERROR_TEXT_OR_MEDIA = "⚠️ Отправьте текст или фото/документ с описанием."
+
 ERROR_NUMERIC_ID = "⚠️ Отправьте числовой Telegram ID:"
+
 ERROR_NUMBER_GT_ZERO = "⚠️ Введите число больше 0:"
+
 ERROR_POSITIVE_NUMBER = "⚠️ Введите положительное число:"
+
 ERROR_NAME_TOO_LONG = "⚠️ Слишком длинное имя (макс. {max} символов)."
+
 ERROR_URL_TOO_LONG = "⚠️ Слишком длинный URL (макс. {max} символов)."
+
 ERROR_API_KEY_SHORT = "⚠️ API ключ слишком короткий (минимум {min} символов)."
+
 ERROR_DAYS_RANGE = "⚠️ Введите число от {min} до {max}:"
+
 ERROR_STARS_POSITIVE = "⚠️ Введите число больше 0 (Stars требует положительную сумму):"
+
 ERROR_INVALID_URL = (
     "⚠️ Некорректный формат URL.\n"
     "URL должен начинаться с <code>http://</code> или <code>https://</code>\n"
     "Пример: <code>http://127.0.0.1:4001</code>"
 )
+
 ERROR_INVALID_DEVICE_NAME = (
     "⚠️ Имя устройства должно быть от 1 до 16 символов (латиница, цифры, пробелы, дефисы):"
 )
+
 ERROR_VALIDATION = (
     "❌ Ошибка валидации: {error}\n"
     "Введите заново:"
 )
+
 ERROR_OPERATION_CANCELLED = "⚠️ Операция прервана."
+
 ERROR_OPERATION_INTERRUPTED = (
     "⚠️ <b>Операция прервана.</b>\n"
     "Я ожидаю текстовый ввод или нажатие кнопок.\n"
     "Пожалуйста, используйте меню или вернитесь назад."
 )
+
 ERROR_USER_NOT_FOUND = "❌ Пользователь не найден"
+
 ERROR_SERVER_NOT_FOUND = "❌ Сервер не найден"
+
 ERROR_TARIFF_NOT_FOUND = "❌ Тариф не найден"
+
 ERROR_PROFILE_NOT_FOUND = "❌ Профиль не найден"
+
 ERROR_DEVICE_NOT_FOUND = "❌ Устройство не найдено"
+
 ERROR_LOCATION_NOT_FOUND = "❌ Локация не найдена"
+
 ERROR_TARIFF_UNAVAILABLE = "❌ Выбранный тариф сейчас недоступен"
+
 ERROR_PAYMENT_DATA_INVALID = "❌ Ошибка данных"
+
 ERROR_TARIFF_INVALID_PRICE = "❌ Ошибка тарифа: некорректная цена."
+
 ERROR_TEXT_EMPTY = "❌ Текст сообщения пуст"
+
 ERROR_TECHNICAL_MESSAGE = (
     "⚠️ <b>Ошибка сервера</b>\n"
     "Мы уже чиним проблему. Попробуйте позже."
 )
+
 ERROR_TECHNICAL_ALERT = "⚠️ Ведутся технические работы. Попробуйте через минуту."
+
 ERROR_TOO_FREQUENT = "⏳ Слишком часто!"
+
 ERROR_ACTION_IN_PROGRESS = "⏳ Выполняется предыдущее действие..."
+
 ERROR_SERVER_UNAVAILABLE_GENERIC = "⚠️ Сервер недоступен. Попробуйте позже."
+
 ERROR_SERVER_UNREACHABLE = (
     "❌ <b>Сервер недоступен!</b>\n"
     "Не удалось подключиться к API по указанному адресу.\n"
@@ -304,38 +349,43 @@ ERROR_SERVER_UNREACHABLE = (
     "• API-сервис не запущен\n"
     "Проверьте данные и попробуйте снова."
 )
+
 ERROR_SERVER_API_INFO_FAILED = (
     "❌ <b>Ошибка подключения к API!</b>\n"
     "Сервер отвечает на healthcheck, но не удалось получить информацию.\n"
     "Возможно, неверный API ключ."
 )
+
 ERROR_PROTOCOL_NOT_SUPPORTED = (
     "⚠️ <b>Протокол amneziawg2 не поддерживается!</b>\n"
     "Доступные протоколы на сервере: <code>{protocols}</code>\n"
     "Этот бот работает только с протоколом <b>amneziawg2</b>."
 )
 
-ADMIN_TOGGLE_NETWORK_FAIL = "⚠️ API недоступен. Статус сервера не изменён."
-ADMIN_DELETE_SERVER_NETWORK_FAIL = "⚠️ Ошибка сети: не удалось отключить устройства на сервере. БД не изменена."
 ERROR_NO_SUBSCRIPTION = (
     "⚠️ <b>У вас нет активной подписки.</b>\n"
     "Продлите доступ, чтобы подключать устройства."
 )
+
 ERROR_DEVICE_LIMIT_REACHED = (
     "⚠️ <b>Достигнут лимит устройств</b> ({limit}).\n"
     "Удалите одно из устройств или перейдите на тариф с большим лимитом."
 )
+
 ERROR_SERVER_UNAVAILABLE = (
     "⚠️ <b>Выбранный сервер временно недоступен.</b>\n"
     "Попробуйте другую локацию или обратитесь в поддержку."
 )
+
 ERROR_NO_FREE_SLOTS = "❌ На всех серверах закончились свободные слоты."
+
 ERROR_PAYMENT_SERVICE = "❌ Ошибка платежной системы Telegram. Попробуйте позже."
 
 ADMIN_SERVER_CHECKING = (
     "🔍 <b>Проверяю доступность сервера...</b>\n"
     "Ожидайте, это может занять несколько секунд."
 )
+
 ADMIN_SERVER_ADDED = (
     "✅ <b>Сервер добавлен и проверен!</b>\n"
     "{flag} <b>{name}</b>\n"
@@ -343,6 +393,7 @@ ADMIN_SERVER_ADDED = (
     "Макс клиентов (из API): {max_clients}\n"
     "API: <code>{api_url}</code>"
 )
+
 ADMIN_SERVER_CARD = (
     "🛠 Админка › 🌍 Серверы › {flag} <b>{name}</b>\n"
     "<b>ID:</b> {id}\n"
@@ -351,17 +402,23 @@ ADMIN_SERVER_CARD = (
     "<b>API URL:</b> {api_url}\n"
     "<b>Макс клиентов:</b> {max_clients}"
 )
+
 ADMIN_SERVER_NAME_PROMPT = (
     "🛠 Админка › 🌍 Серверы › ➕ <b>Новый сервер</b>\n"
     "✏️ Введите имя сервера (например: Нидерланды):"
 )
+
 ADMIN_SERVER_FLAG_PROMPT = "🏳️ Введите флаг страны (эмодзи, например: 🇳🇱):"
+
 ADMIN_SERVER_URL_PROMPT = "🔗 Введите API URL сервера (например: http://127.0.0.1:4001):"
+
 ADMIN_SERVER_KEY_PROMPT = "🔑 Введите API ключ сервера:"
+
 ADMIN_SERVER_RENAME_PROMPT = (
     "🛠 Админка › 🌍 Серверы › ✏️ <b>Редактирование</b>\n"
     "✏️ Введите новое имя сервера:"
 )
+
 ADMIN_SERVER_RENAMED = "✅ Имя сервера изменено на: {name}"
 
 ADMIN_TARIFF_CARD = (
@@ -373,18 +430,22 @@ ADMIN_TARIFF_CARD = (
     "<b>Цена ⭐:</b> {price_stars}\n"
     "<b>Статус:</b> {status}"
 )
+
 ADMIN_TARIFF_EDIT_DAYS_PROMPT = (
     "🛠 Админка › 💰 Тарифы › ⏱ <b>Изменить дни</b>\n"
     "⏱ Введите новое количество дней:"
 )
+
 ADMIN_TARIFF_EDIT_DEVICES_PROMPT = (
     "🛠 Админка › 💰 Тарифы › 📱 <b>Изменить лимит устройств</b>\n"
     "📱 Введите новый лимит устройств (число ≥ 1):"
 )
+
 ADMIN_TARIFF_EDIT_RUB_PROMPT = (
     "🛠 Админка › 💰 Тарифы › 💵 <b>Изменить цену ₽</b>\n"
     "💵 Введите новую цену в рублях:"
 )
+
 ADMIN_TARIFF_EDIT_STARS_PROMPT = (
     "🛠 Админка › 💰 Тарифы › ⭐ <b>Изменить цену Stars</b>\n"
     "⭐ Введите новую цену в Stars:"
@@ -394,11 +455,14 @@ ADMIN_USERS_HEADER = (
     "🛠 Админка › 👥 <b>Пользователи</b>\n"
     "(стр. {page}/{total_pages}) · Всего: {total}\n"
 )
+
 ADMIN_USERS_EMPTY = "<i>Пользователей пока нет</i>\n"
+
 ADMIN_USER_SEARCH_PROMPT = (
     "🛠 Админка › 👥 Пользователи › 🔍 <b>Поиск</b>\n"
     "Введите Telegram ID пользователя:"
 )
+
 ADMIN_USER_CARD = (
     "🛠 Админка › 👥 Пользователи › 👤 <b>Карточка</b>\n"
     "<b>ID:</b> <code>{telegram_id}</code>\n"
@@ -414,35 +478,26 @@ ADMIN_USER_CARD = (
     "<b>Регистрация:</b> {created_at}"
 )
 
-ADMIN_EXTEND_HEADER = (
-    "🛠 Админка › 👥 Пользователи › ⏰ <b>Продление доступа</b>\n"
-    "Выберите срок продления для <code>{telegram_id}</code>:"
-)
-ADMIN_CUSTOM_EXTEND_HEADER = (
-    "🛠 Админка › 👥 Пользователи › ⌨️ <b>Ручное продление</b>\n"
-    "Введите количество дней для продления <code>{telegram_id}</code>:"
-)
-ADMIN_EXTENDED_CUSTOM = (
-    "✅ Подписка пользователя <code>{telegram_id}</code> продлена на {days} дней.\n"
-    "Действует до: {valid_until}"
-)
-
 ADMIN_USER_DEVICES_HEADER = (
     "🛠 Админка › 👥 Пользователи › 🔧 <b>Устройства</b>\n"
     "Пользователь <code>{telegram_id}</code>\n"
 )
+
 ADMIN_USER_DEVICES_EMPTY = "<i>Устройств нет</i>\n"
 
 AUDIT_LOG_HEADER = (
     "🛠 Админка › 📜 <b>Аудит-лог</b>\n"
     "<i>Последние 10 действий администраторов:</i>\n"
 )
+
 AUDIT_LOG_EMPTY = "<i>Лог действий пуст.</i>"
+
 AUDIT_ENTRY = (
     "[{date}]\n"
     "Admin <code>{admin_id}</code>\n"
     "➡️ {action}{target}{details}\n"
 )
+
 AUDIT_ACTIONS = {
     "EXTEND": "⏰ Продлил",
     "BAN": "🚫 Забанил",
@@ -465,6 +520,7 @@ DASHBOARD_HEADER = (
     "🛠 <b>Админ-панель</b>\n"
     "📊 <b>Статистика:</b>\n"
 )
+
 DASHBOARD_STATS = (
     "👥 Всего пользователей: {total_users}\n"
     "✅ Активных подписок: {active_subs}\n"
@@ -477,7 +533,9 @@ BROADCAST_PROMPT = (
     "📢 Введите текст сообщения для рассылки:\n"
     "Поддерживается HTML-разметка (<b>жирный</b>, <i>курсив</i>, <code>код</code>)"
 )
+
 BROADCAST_PREVIEW = "📢 <b>Предпросмотр рассылки ({content_type}):</b>\n{text}"
+
 BROADCAST_RESULT = (
     "✅ Рассылка завершена!\n"
     "📤 Отправлено: {success_count}\n"
@@ -490,10 +548,6 @@ ERROR_TARIFF_IN_USE = (
     "Этот тариф сейчас используют <b>{user_count}</b> активных клиентов.\n"
     "Чтобы удалить тариф, сначала переведите пользователей на другой тариф или дождитесь окончания их подписок."
 )
-TARIFF_DELETED_SUCCESS = (
-    "✅ <b>Тариф успешно удалён</b>\n"
-    "Тариф <b>ID:{tariff_id}</b> ({duration_days} дн., {device_limit} устр.) полностью удалён из системы."
-)
 
 ADMIN_SERVER_DELETE_CONFIRM = (
     "⚠️ <b>Подтверждение удаления сервера</b>\n"
@@ -505,17 +559,13 @@ ADMIN_SERVER_DELETE_CONFIRM = (
     "• Сам сервер будет удалён из системы\n"
     "<i>Это действие необратимо.</i>"
 )
-ADMIN_SERVER_DELETED = (
-    "✅ <b>Сервер полностью удалён</b>\n"
-    "{flag} {name}\n"
-    "Удалено устройств: {profiles_count}"
-)
 
 ADMIN_SERVER_FLAG_PROMPT_EDIT = (
     "🛠 Админка › 🌍 Серверы › 🏳 <b>Изменить флаг</b>\n"
     "Текущий флаг: {current_flag}\n"
     "Введите новый флаг страны (эмодзи, например: 🇩🇪):"
 )
+
 ADMIN_SERVER_FLAG_UPDATED = "✅ Флаг сервера изменён на: {flag}"
 
 ERROR_SERVER_DUPLICATE_URL = (
@@ -535,22 +585,14 @@ PAYMENT_SBP_INSTRUCTIONS = (
     "⏱ <i>Платеж действителен 15 минут</i>\n"
     "🔗 <a href='{payment_url}'>Ссылка для оплаты</a>"
 )
-PAYMENT_SBP_PENDING = (
-    "⏳ <b>Ожидание оплаты</b>\n"
-    "Ваш платеж создан. Отсканируйте QR-код или перейдите по ссылке для оплаты.\n"
-    "После успешной оплаты доступ будет активирован автоматически."
-)
-PAYMENT_CHECK_INSTRUCTIONS = (
-    "✅ <b>Проверка оплаты</b>\n"
-    "Нажмите кнопку ниже, чтобы проверить статус вашего платежа.\n"
-    "<i>Обычно оплата зачисляется в течение 1-2 минут после подтверждения банком.</i>"
-)
+
 ADMIN_SUBSCRIPTION_HEADER = (
     "🛠 Админка › 👥 Пользователи › 📅 <b>Подписка</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "{status_block}"
 )
+
 ADMIN_SUB_STATUS_ACTIVE = (
     "🟢 <b>Статус:</b> Активна\n"
     "💎 <b>Тариф:</b> {tariff_name}\n"
@@ -558,11 +600,13 @@ ADMIN_SUB_STATUS_ACTIVE = (
     "⏱ <b>Осталось:</b> {time_left}\n"
     "🔌 <b>Устройств:</b> {devices_count} / {device_limit}"
 )
+
 ADMIN_SUB_STATUS_INACTIVE = (
     "🔴 <b>Статус:</b> Неактивна\n"
     "💎 <b>Тариф:</b> {tariff_name}\n"
     "📅 <b>Истекла:</b> {valid_until}"
 )
+
 ADMIN_SUB_STATUS_NONE = (
     "⚪ <b>Статус:</b> Подписка отсутствует\n"
     "💎 <b>Тариф:</b> —\n"
@@ -577,6 +621,7 @@ ADMIN_SUB_CHANGE_TARIFF_HEADER = (
     "━━━━━━━━━━━━━━━━━━━━\n"
     "Выберите новый тариф:"
 )
+
 ADMIN_SUB_CONFIRM_TARIFF = (
     "⚠️ <b>Подтверждение смены тарифа</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
@@ -589,12 +634,14 @@ ADMIN_SUB_CONFIRM_TARIFF = (
     "• Срок подписки НЕ изменится\n"
     "<i>Это действие необратимо.</i>"
 )
+
 ADMIN_SUB_TARIFF_CHANGED = (
     "✅ <b>Тариф успешно изменён</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
     "Новый тариф: <b>{tariff_name}</b>\n"
     "Лимит устройств: <b>{device_limit}</b>"
 )
+
 ADMIN_SUB_DOWNGRADE_BLOCKED = (
     "⚠️ <b>Смена тарифа невозможна</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
@@ -611,6 +658,7 @@ ADMIN_SUB_EXTEND_HEADER = (
     "━━━━━━━━━━━━━━━━━━━━\n"
     "Выберите срок продления:"
 )
+
 ADMIN_SUB_CONFIRM_EXTEND = (
     "⚠️ <b>Подтверждение продления</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
@@ -619,6 +667,7 @@ ADMIN_SUB_CONFIRM_EXTEND = (
     "Новая дата: <b>{new_end}</b>\n"
     "<i>Это действие необратимо.</i>"
 )
+
 ADMIN_SUB_EXTEND_PROMPT = (
     "🛠 Админка › 📅 Подписка › ⌨️ <b>Ручное продление</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
@@ -631,6 +680,7 @@ ADMIN_SUB_REDUCE_PROMPT = (
     "Действует до: <b>{valid_until}</b>\n"
     "⏱ Введите количество дней для уменьшения (число ≥ 1):"
 )
+
 ADMIN_SUB_CONFIRM_REDUCE = (
     "⚠️ <b>Подтверждение уменьшения</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
@@ -640,6 +690,7 @@ ADMIN_SUB_CONFIRM_REDUCE = (
     "⚠️ Если новая дата в прошлом — подписка истечёт мгновенно.\n"
     "<i>Это действие необратимо.</i>"
 )
+
 ADMIN_SUB_REDUCED = (
     "✅ <b>Подписка уменьшена</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
@@ -652,6 +703,7 @@ ADMIN_SUB_GRANT_HEADER = (
     "━━━━━━━━━━━━━━━━━━━━\n"
     "Выберите тариф:"
 )
+
 ADMIN_SUB_GRANT_DAYS_HEADER = (
     "🛠 Админка › 🎫 Выдать доступ\n"
     "Пользователь: <code>{telegram_id}</code>\n"
@@ -659,12 +711,14 @@ ADMIN_SUB_GRANT_DAYS_HEADER = (
     "━━━━━━━━━━━━━━━━━━━━\n"
     "Выберите срок:"
 )
+
 ADMIN_SUB_GRANT_CUSTOM_PROMPT = (
     "🛠 Админка › 🎫 Выдать доступ › ⌨️ <b>Ручной срок</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
     "Тариф: <b>{tariff_name}</b>\n"
     "⏱ Введите количество дней (число ≥ 1):"
 )
+
 ADMIN_SUB_CONFIRM_GRANT = (
     "⚠️ <b>Подтверждение выдачи доступа</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
@@ -684,11 +738,13 @@ ADMIN_DELETE_DEVICE_CONFIRM = (
     "• Профиль будет удалён из БД\n"
     "<i>Это действие необратимо.</i>"
 )
+
 ADMIN_DELETE_DEVICE_SUCCESS = (
     "✅ <b>Устройство удалено</b>\n"
     "Пользователь: <code>{telegram_id}</code>\n"
     "Устройство: <b>{device_name}</b>"
 )
+
 ERROR_DEVICE_DAILY_LIMIT = (
     "⚠️ <b>Превышен суточный лимит</b>\n"
     "Вы пересоздали слишком много конфигураций за последние 24 часа. "
@@ -697,6 +753,7 @@ ERROR_DEVICE_DAILY_LIMIT = (
     "Лимит генераций обновится в 00:00. "
     "Если у вас возникли трудности с настройкой, пожалуйста, обратитесь в <b>💬 Поддержку</b>."
 )
+
 PAYMENT_DOWNGRADE_BLOCKED_PROFILES = (
     "⚠️ <b>Смена тарифа невозможна</b>\n"
     "У вас подключено <b>{profiles_count}</b> устройств,\n"
@@ -704,6 +761,7 @@ PAYMENT_DOWNGRADE_BLOCKED_PROFILES = (
     "Чтобы перейти на этот тариф, сначала удалите лишние устройства\n"
     "в разделе «🔌 Подключения»."
 )
+
 PAYMENT_PAID_AFTER_CANCEL = (
     "💳 <b>Мы получили вашу оплату</b>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
@@ -712,7 +770,7 @@ PAYMENT_PAID_AFTER_CANCEL = (
     "🆔 <b>Платёж:</b> <code>{payment_id}</code>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "Ранее в боте была нажата кнопка «Отменить», "
-    "поэтому доступ не активировался автоматически.\n\n"
+    "поэтому доступ не активировался автоматически.\n"
     "Напишите нам — решим за 2 минуты."
 )
 

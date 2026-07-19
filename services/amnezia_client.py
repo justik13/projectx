@@ -4,7 +4,12 @@ import logging
 import time
 from typing import Optional, List
 from pydantic import BaseModel, Field
-from bot.constants import AMNEZIA_PROTOCOL, API_TIMEOUT, API_CONCURRENCY_LIMIT, API_RETRY_COUNT
+from bot.constants import (
+    AMNEZIA_PROTOCOL,
+    API_TIMEOUT,
+    API_CONCURRENCY_LIMIT,
+    API_RETRY_COUNT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +17,12 @@ _http_session: Optional[aiohttp.ClientSession] = None
 
 
 class CircuitBreaker:
-    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0):
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 60.0,
+    ):
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.failure_count = 0
@@ -23,10 +33,13 @@ class CircuitBreaker:
     async def is_available(self) -> bool:
         async with self._lock:
             if self.state == "OPEN":
-                elapsed = time.monotonic() - self.last_failure_time
+                elapsed = (
+                    time.monotonic() - self.last_failure_time
+                )
                 if elapsed > self.recovery_timeout:
                     logger.info(
-                        f"Circuit breaker: half-open, attempting recovery "
+                        f"Circuit breaker: half-open, "
+                        f"attempting recovery "
                         f"(was OPEN for {elapsed:.0f}s)"
                     )
                     self.state = "CLOSED"
@@ -39,7 +52,8 @@ class CircuitBreaker:
         async with self._lock:
             if self.failure_count > 0:
                 logger.info(
-                    f"Circuit breaker: request succeeded, resetting failure count "
+                    f"Circuit breaker: request succeeded, "
+                    f"resetting failure count "
                     f"({self.failure_count} -> 0)"
                 )
             self.failure_count = 0
@@ -52,8 +66,10 @@ class CircuitBreaker:
             if self.failure_count >= self.failure_threshold:
                 if self.state != "OPEN":
                     logger.warning(
-                        f"Circuit breaker: OPEN after {self.failure_count} failures. "
-                        f"Will retry in {self.recovery_timeout}s."
+                        f"Circuit breaker: OPEN after "
+                        f"{self.failure_count} failures. "
+                        f"Will retry in "
+                        f"{self.recovery_timeout}s."
                     )
                 self.state = "OPEN"
 
@@ -85,6 +101,7 @@ def cleanup_server_circuit_breakers(api_url: str) -> None:
 
 
 class TokenBucketRateLimiter:
+
     def __init__(self, rate: float = 3.0, burst: int = 5):
         self.rate = rate
         self.burst = burst
@@ -98,7 +115,10 @@ class TokenBucketRateLimiter:
             async with self._lock:
                 now = time.monotonic()
                 elapsed = now - self.last_refill
-                self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
+                self.tokens = min(
+                    self.burst,
+                    self.tokens + elapsed * self.rate,
+                )
                 self.last_refill = now
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
@@ -106,15 +126,21 @@ class TokenBucketRateLimiter:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
-            await asyncio.sleep(min(1.0 / self.rate, remaining))
+            await asyncio.sleep(
+                min(1.0 / self.rate, remaining)
+            )
 
 
 _rate_limiters: dict[str, TokenBucketRateLimiter] = {}
 
 
-def _get_rate_limiter(api_url: str) -> TokenBucketRateLimiter:
+def _get_rate_limiter(
+    api_url: str,
+) -> TokenBucketRateLimiter:
     if api_url not in _rate_limiters:
-        _rate_limiters[api_url] = TokenBucketRateLimiter(rate=3.0, burst=5)
+        _rate_limiters[api_url] = TokenBucketRateLimiter(
+            rate=3.0, burst=5,
+        )
     return _rate_limiters[api_url]
 
 
@@ -136,7 +162,9 @@ class AmneziaClientListItem(BaseModel):
     username: str = ""
     peer_name: str = ""
     status: str = "active"
-    traffics: AmneziaClientTraffic = Field(default_factory=AmneziaClientTraffic)
+    traffics: AmneziaClientTraffic = Field(
+        default_factory=AmneziaClientTraffic
+    )
     lastHandshake: Optional[float] = None
     lastSeen: Optional[float] = None
     updatedAt: Optional[float] = None
@@ -158,18 +186,23 @@ class AmneziaServerInfo(BaseModel):
     SERVER_MAX_PEERS: int = 250
 
     def get_effective_max_peers(self) -> int:
-        return self.maxPeers or self.serverMaxPeers or self.SERVER_MAX_PEERS
+        return (
+            self.maxPeers
+            or self.serverMaxPeers
+            or self.SERVER_MAX_PEERS
+        )
 
 
 async def get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if _http_session is None:
         connector = aiohttp.TCPConnector(
-            limit=100, limit_per_host=API_CONCURRENCY_LIMIT
+            limit=100,
+            limit_per_host=API_CONCURRENCY_LIMIT,
         )
         timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
         _http_session = aiohttp.ClientSession(
-            connector=connector, timeout=timeout
+            connector=connector, timeout=timeout,
         )
     return _http_session
 
@@ -182,20 +215,25 @@ async def close_http_session():
 
 
 class AmneziaClient:
+
     def __init__(self, api_url: str, api_key: str):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self._headers = {
-            "x-api-key": api_key, "Content-Type": "application/json"
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
         }
 
-    async def _request(self, method: str, path: str, **kwargs) -> Optional[dict]:
+    async def _request(
+        self, method: str, path: str, **kwargs,
+    ) -> Optional[dict]:
         url = f"{self.api_url}{path}"
         cb = _get_circuit_breaker(self.api_url)
 
         if not await cb.is_available():
             logger.debug(
-                f"Circuit breaker OPEN for {self.api_url}{path}, skipping request"
+                f"Circuit breaker OPEN for "
+                f"{self.api_url}{path}, skipping request"
             )
             return None
 
@@ -204,15 +242,18 @@ class AmneziaClient:
         for attempt in range(API_RETRY_COUNT + 1):
             if not await limiter.acquire(timeout=30.0):
                 logger.warning(
-                    f"Rate limit timeout for {self.api_url}{path} "
-                    f"(attempt {attempt + 1}/{API_RETRY_COUNT + 1})"
+                    f"Rate limit timeout for "
+                    f"{self.api_url}{path} "
+                    f"(attempt {attempt + 1}/"
+                    f"{API_RETRY_COUNT + 1})"
                 )
                 return None
 
             session = await get_http_session()
             try:
                 async with session.request(
-                    method, url, headers=self._headers, **kwargs
+                    method, url,
+                    headers=self._headers, **kwargs,
                 ) as response:
                     if response.status == 204:
                         await cb.record_success()
@@ -227,14 +268,17 @@ class AmneziaClient:
                         if attempt < API_RETRY_COUNT:
                             backoff = 2 ** (attempt + 1)
                             logger.warning(
-                                f"API {self.api_url}{path} returned 429, "
-                                f"retrying in {backoff}s"
+                                f"API {self.api_url}{path} "
+                                f"returned 429, retrying "
+                                f"in {backoff}s"
                             )
                             await asyncio.sleep(backoff)
                             continue
                         logger.warning(
-                            f"API {self.api_url}{path} returned 429 "
-                            f"after all retries (rate limited, NOT a server failure)"
+                            f"API {self.api_url}{path} "
+                            f"returned 429 after all retries "
+                            f"(rate limited, NOT a server "
+                            f"failure)"
                         )
                         return None
                     elif 400 <= response.status < 500:
@@ -242,43 +286,58 @@ class AmneziaClient:
                         try:
                             error_text = await response.text()
                             logger.warning(
-                                f"API {self.api_url}{path} returned {response.status} "
-                                f"(client error): {error_text[:100]}"
+                                f"API {self.api_url}{path} "
+                                f"returned {response.status} "
+                                f"(client error): "
+                                f"{error_text[:100]}"
                             )
                         except Exception:
                             pass
                         return None
                     else:
-                        if attempt < API_RETRY_COUNT and response.status >= 500:
+                        if (
+                            attempt < API_RETRY_COUNT
+                            and response.status >= 500
+                        ):
                             backoff = 2 ** attempt
                             logger.warning(
-                                f"API {self.api_url}{path} returned {response.status}, "
-                                f"retrying in {backoff}s (attempt {attempt + 1})"
+                                f"API {self.api_url}{path} "
+                                f"returned {response.status}, "
+                                f"retrying in {backoff}s "
+                                f"(attempt {attempt + 1})"
                             )
                             await asyncio.sleep(backoff)
                             continue
                         await cb.record_failure()
                         return None
 
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+            ) as e:
                 if attempt < API_RETRY_COUNT:
                     backoff = 2 ** attempt
                     logger.warning(
-                        f"Network error for {self.api_url}{path}: {type(e).__name__}, "
-                        f"retrying in {backoff}s (attempt {attempt + 1})"
+                        f"Network error for "
+                        f"{self.api_url}{path}: "
+                        f"{type(e).__name__}, retrying "
+                        f"in {backoff}s "
+                        f"(attempt {attempt + 1})"
                     )
                     await asyncio.sleep(backoff)
                 else:
                     await cb.record_failure()
                     logger.error(
-                        f"All retries exhausted for {self.api_url}{path}: "
+                        f"All retries exhausted for "
+                        f"{self.api_url}{path}: "
                         f"{type(e).__name__}"
                     )
                     return None
             except Exception as e:
                 await cb.record_failure()
                 logger.error(
-                    f"Unexpected error for {self.api_url}{path}: "
+                    f"Unexpected error for "
+                    f"{self.api_url}{path}: "
                     f"{type(e).__name__}: {e}"
                 )
                 return None
@@ -286,60 +345,85 @@ class AmneziaClient:
         return None
 
     async def create_user(
-        self, client_name: str, expires_at: Optional[int] = None
+        self,
+        client_name: str,
+        expires_at: Optional[int] = None,
     ) -> Optional[AmneziaClientCreateResponse]:
         data = {
             "clientName": client_name,
             "protocol": AMNEZIA_PROTOCOL,
-            "expiresAt": expires_at
+            "expiresAt": expires_at,
         }
-        result = await self._request("POST", "/clients", json=data)
+        result = await self._request(
+            "POST", "/clients", json=data,
+        )
         if result and "client" in result:
             try:
-                return AmneziaClientCreateResponse(**result["client"])
+                return AmneziaClientCreateResponse(
+                    **result["client"]
+                )
             except Exception as e:
-                logger.error(f"Failed to parse create_user response: {e}")
+                logger.error(
+                    f"Failed to parse create_user "
+                    f"response: {e}"
+                )
                 return None
         return None
 
     async def delete_user(self, client_id: str) -> bool:
-        data = {"clientId": client_id, "protocol": AMNEZIA_PROTOCOL}
-        result = await self._request("DELETE", "/clients", json=data)
+        data = {
+            "clientId": client_id,
+            "protocol": AMNEZIA_PROTOCOL,
+        }
+        result = await self._request(
+            "DELETE", "/clients", json=data,
+        )
         return result is not None
 
     async def update_client(
         self,
         client_id: str,
         status: Optional[str] = None,
-        expires_at: Optional[int] = None
+        expires_at: Optional[int] = None,
     ) -> bool:
-        data = {"clientId": client_id, "protocol": AMNEZIA_PROTOCOL}
+        data = {
+            "clientId": client_id,
+            "protocol": AMNEZIA_PROTOCOL,
+        }
         if expires_at is not None and status is None:
             status = "active"
         if status is not None:
             data["status"] = status
         if expires_at is not None:
             data["expiresAt"] = expires_at
-        result = await self._request("PATCH", "/clients", json=data)
+        result = await self._request(
+            "PATCH", "/clients", json=data,
+        )
         return result is not None
 
-    async def get_server_stats(self) -> Optional[dict]:
-        return await self._request("GET", "/server/load")
-
-    async def get_server_info(self) -> Optional[AmneziaServerInfo]:
+    async def get_server_info(
+        self,
+    ) -> Optional[AmneziaServerInfo]:
         result = await self._request("GET", "/server")
         if result:
             try:
                 return AmneziaServerInfo(**result)
             except Exception as e:
-                logger.error(f"Failed to parse get_server_info response: {e}")
+                logger.error(
+                    f"Failed to parse get_server_info "
+                    f"response: {e}"
+                )
                 return None
         return None
 
     async def healthcheck(self) -> bool:
-        return (await self._request("GET", "/healthz")) is not None
+        return (
+            await self._request("GET", "/healthz")
+        ) is not None
 
-    async def get_all_clients(self) -> Optional[List[AmneziaClientListItem]]:
+    async def get_all_clients(
+        self,
+    ) -> Optional[List[AmneziaClientListItem]]:
         all_clients: List[AmneziaClientListItem] = []
         page_size = 100
         page_count = 0
@@ -347,15 +431,22 @@ class AmneziaClient:
 
         while page_count < MAX_SAFETY_PAGES:
             result = await self._request(
-                "GET", "/clients",
-                params={"skip": page_count * page_size, "limit": page_size}
+                "GET",
+                "/clients",
+                params={
+                    "skip": page_count * page_size,
+                    "limit": page_size,
+                },
             )
+
             if result is None:
                 if page_count == 0:
                     return None
                 logger.warning(
-                    f"get_all_clients: API failed on page {page_count}, "
-                    f"returning partial result ({len(all_clients)} clients)"
+                    f"get_all_clients: API failed on "
+                    f"page {page_count}, returning "
+                    f"partial result "
+                    f"({len(all_clients)} clients)"
                 )
                 break
 
@@ -363,52 +454,76 @@ class AmneziaClient:
             if not items_raw:
                 break
 
-            page_clients = self._parse_clients_page(items_raw)
+            page_clients = self._parse_clients_page(
+                items_raw
+            )
             all_clients.extend(page_clients)
 
             if len(page_clients) < page_size:
                 break
+
             page_count += 1
 
         if page_count >= MAX_SAFETY_PAGES:
             logger.warning(
                 f"get_all_clients: reached safety limit "
                 f"({MAX_SAFETY_PAGES * page_size} clients). "
-                f"Server has more clients than can be fetched."
+                f"Server has more clients than can be "
+                f"fetched."
             )
 
         logger.info(
-            f"get_all_clients: parsed {len(all_clients)} peers "
-            f"across {page_count + 1} page(s)"
+            f"get_all_clients: parsed "
+            f"{len(all_clients)} peers across "
+            f"{page_count + 1} page(s)"
         )
         return all_clients
 
     @staticmethod
-    def _parse_clients_page(items_raw: list) -> List[AmneziaClientListItem]:
+    def _parse_clients_page(
+        items_raw: list,
+    ) -> List[AmneziaClientListItem]:
         clients: List[AmneziaClientListItem] = []
+
         for item in items_raw:
             if not isinstance(item, dict):
                 continue
+
             username = item.get("username", "")
             peers = item.get("peers", [])
+
             if not isinstance(peers, list):
                 continue
+
             for peer in peers:
                 if not isinstance(peer, dict):
                     continue
+
                 peer_id = peer.get("id", "")
                 if not peer_id:
                     continue
+
                 traffic_raw = peer.get("traffic", {})
                 if isinstance(traffic_raw, dict):
                     traffic = AmneziaClientTraffic(
-                        totalDownload=traffic_raw.get("received", 0) or 0,
-                        totalUpload=traffic_raw.get("sent", 0) or 0,
-                        received=traffic_raw.get("received", 0) or 0,
-                        sent=traffic_raw.get("sent", 0) or 0,
+                        totalDownload=(
+                            traffic_raw.get("received", 0)
+                            or 0
+                        ),
+                        totalUpload=(
+                            traffic_raw.get("sent", 0) or 0
+                        ),
+                        received=(
+                            traffic_raw.get("received", 0)
+                            or 0
+                        ),
+                        sent=(
+                            traffic_raw.get("sent", 0) or 0
+                        ),
                     )
                 else:
                     traffic = AmneziaClientTraffic()
+
                 try:
                     client_item = AmneziaClientListItem(
                         id=peer_id,
@@ -416,19 +531,18 @@ class AmneziaClient:
                         peer_name=peer.get("name") or "",
                         status=peer.get("status", "active"),
                         traffics=traffic,
-                        lastHandshake=peer.get("lastHandshake"),
+                        lastHandshake=peer.get(
+                            "lastHandshake"
+                        ),
                         lastSeen=peer.get("lastSeen"),
                         updatedAt=peer.get("updatedAt"),
                     )
                     clients.append(client_item)
                 except Exception as e:
                     logger.warning(
-                        f"Failed to parse peer item: {e}, peer={peer}"
+                        f"Failed to parse peer item: "
+                        f"{e}, peer={peer}"
                     )
                     continue
-        return clients
 
-    async def delete_client(self, client_id: str) -> bool:
-        data = {"clientId": client_id, "protocol": AMNEZIA_PROTOCOL}
-        result = await self._request("DELETE", "/clients", json=data)
-        return result is not None
+        return clients

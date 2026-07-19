@@ -1,7 +1,7 @@
 from utils.encryption import EncryptedString, encrypt_value, decrypt_value
 from utils.datetime_helpers import (
     MSK_TZ, now_utc, now_msk, to_msk,
-    format_datetime_msk, format_date_msk, days_left_msk, is_expired
+    format_datetime_msk, days_left_msk, is_expired
 )
 from utils.formatters import (
     format_traffic, format_datetime, format_days_left,
@@ -24,7 +24,6 @@ __all__ = [
     "now_msk",
     "to_msk",
     "format_datetime_msk",
-    "format_date_msk",
     "days_left_msk",
     "is_expired",
     "format_traffic",

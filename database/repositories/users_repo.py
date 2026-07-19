@@ -6,15 +6,16 @@ from datetime import timedelta
 from typing import Optional, List, TypedDict
 from utils.datetime_helpers import now_utc
 
+
 class UserUpdateFields(TypedDict, total=False):
     username: str | None
     first_name: str | None
-    subscription_end: Optional['datetime']  # 🔥 ИСПРАВЛЕНО: было 'datetime' | None
+    subscription_end: Optional['datetime']
     device_limit: int
     current_tariff_id: int | None
     referred_by: int | None
     referral_days: int
-    last_payment_at: Optional['datetime']   # 🔥 ИСПРАВЛЕНО: было 'datetime' | None
+    last_payment_at: Optional['datetime']
     is_banned: bool
     is_admin: bool
     is_bot_blocked: bool
@@ -22,6 +23,7 @@ class UserUpdateFields(TypedDict, total=False):
     notified_1d: bool
     notified_2h: bool
     tos_accepted: bool
+
 
 async def get_user_by_telegram_id(
     session: AsyncSession, telegram_id: int
@@ -32,6 +34,7 @@ async def get_user_by_telegram_id(
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
 
 async def create_user(
     session: AsyncSession, telegram_id: int,
@@ -47,6 +50,7 @@ async def create_user(
     await session.refresh(user)
     return user
 
+
 async def update_user(
     session: AsyncSession, user: User, **kwargs: UserUpdateFields
 ) -> User:
@@ -57,6 +61,7 @@ async def update_user(
     await session.refresh(user)
     return user
 
+
 async def extend_subscription(
     session: AsyncSession, user: User, days: int
 ) -> User:
@@ -65,30 +70,21 @@ async def extend_subscription(
         current_end = user.subscription_end
     else:
         current_end = now
-    
+
     if days >= 36500:
         from bot.constants import PERMANENT_END_DATE
         new_end = PERMANENT_END_DATE
     else:
         new_end = current_end + timedelta(days=days)
-    
+
     return await update_user(session, user, subscription_end=new_end)
 
-async def get_all_users(
-    session: AsyncSession, limit: int | None = None, offset: int = 0
-) -> List[User]:
-    stmt = select(User).where(User.is_deleted == False).order_by(User.created_at.desc())
-    if limit is not None:
-        stmt = stmt.limit(limit)
-    if offset > 0:
-        stmt = stmt.offset(offset)
-    result = await session.execute(stmt)
-    return result.scalars().all()
 
 async def get_user_count(session: AsyncSession) -> int:
     stmt = select(func.count(User.id)).where(User.is_deleted == False)
     result = await session.execute(stmt)
     return result.scalar_one()
+
 
 async def get_active_subscriptions_count(session: AsyncSession) -> int:
     now = now_utc()
@@ -99,6 +95,7 @@ async def get_active_subscriptions_count(session: AsyncSession) -> int:
     result = await session.execute(stmt)
     return result.scalar_one()
 
+
 async def get_new_users_count_24h(session: AsyncSession) -> int:
     now = now_utc()
     stmt = select(func.count(User.id)).where(
@@ -107,6 +104,28 @@ async def get_new_users_count_24h(session: AsyncSession) -> int:
     )
     result = await session.execute(stmt)
     return result.scalar_one()
+
+
+async def get_dashboard_stats(session: AsyncSession) -> dict:
+    """Возвращает total, active, new_24h одним запросом вместо трёх."""
+    now = now_utc()
+    stmt = select(
+        func.count(User.id).label("total"),
+        func.count(User.id)
+        .filter(User.subscription_end > now)
+        .label("active"),
+        func.count(User.id)
+        .filter(User.created_at > now - timedelta(hours=24))
+        .label("new_24h"),
+    ).where(User.is_deleted == False)
+    result = await session.execute(stmt)
+    row = result.one()
+    return {
+        "total": row.total,
+        "active": row.active,
+        "new_24h": row.new_24h,
+    }
+
 
 async def get_users_paginated(
     session: AsyncSession, page: int = 1, per_page: int = 10
@@ -120,6 +139,7 @@ async def get_users_paginated(
         .limit(per_page)
     )
     return result.scalars().all()
+
 
 async def get_users_paginated_with_profiles(
     session: AsyncSession, page: int = 1, per_page: int = 10
@@ -136,17 +156,6 @@ async def get_users_paginated_with_profiles(
     result = await session.execute(stmt)
     return result.scalars().unique().all()
 
-async def get_active_users(session: AsyncSession) -> list[User]:
-    now = now_utc()
-    result = await session.execute(
-        select(User).where(
-            User.subscription_end > now,
-            User.is_banned == False,
-            User.is_bot_blocked == False,
-            User.is_deleted == False,
-        )
-    )
-    return result.scalars().all()
 
 async def get_user_referrals(
     session: AsyncSession, telegram_id: int
@@ -161,6 +170,7 @@ async def get_user_referrals(
     )
     result = await session.execute(stmt)
     return result.scalars().all()
+
 
 async def get_user_with_referrals(
     session: AsyncSession, telegram_id: int
@@ -178,6 +188,7 @@ async def get_user_with_referrals(
     )
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
+
     referrals = []
     if user:
         referrals = sorted(
@@ -185,7 +196,9 @@ async def get_user_with_referrals(
             key=lambda r: r.created_at,
             reverse=True
         )
+
     return user, referrals
+
 
 async def mark_user_bot_blocked(
     session: AsyncSession, telegram_id: int
@@ -194,6 +207,7 @@ async def mark_user_bot_blocked(
         update(User).where(User.telegram_id == telegram_id).values(is_bot_blocked=True)
     )
     await session.flush()
+
 
 async def count_users_with_tariff(
     session: AsyncSession, tariff_id: int

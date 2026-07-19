@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import Server, VPNProfile
 from services.slots_cache import get_real_peer_count
 from typing import Optional, List, TypedDict
+
+
 class ServerUpdateFields(TypedDict, total=False):
     name: str
     country_flag: str | None
@@ -11,13 +13,9 @@ class ServerUpdateFields(TypedDict, total=False):
     protocol: str
     max_clients: int
     is_active: bool
+
+
 PROTECTED_SERVER_FIELDS = {"id", "api_key", "created_at"}
-
-
-async def get_all_servers(session: AsyncSession) -> List[Server]:
-    stmt = select(Server).order_by(Server.name)
-    result = await session.execute(stmt)
-    return result.scalars().all()
 
 
 async def get_active_servers(session: AsyncSession) -> List[Server]:
@@ -27,26 +25,32 @@ async def get_active_servers(session: AsyncSession) -> List[Server]:
 
 
 async def get_available_servers(session: AsyncSession) -> List[Server]:
-    stmt_counts = (
-        select(VPNProfile.server_id, func.count(VPNProfile.id).label('profile_count'))
-        .join(Server, VPNProfile.server_id == Server.id)
-        .where(Server.is_active == True)
+    """Возвращает активные серверы со свободными слотами.
+
+    Один запрос с LEFT JOIN вместо двух отдельных.
+    """
+    profile_counts = (
+        select(
+            VPNProfile.server_id,
+            func.count(VPNProfile.id).label("profile_count"),
+        )
         .group_by(VPNProfile.server_id)
+        .subquery()
     )
-    counts_result = await session.execute(stmt_counts)
-    counts_map = {row.server_id: row.profile_count for row in counts_result.all()}
 
-    stmt = select(Server).where(Server.is_active == True).order_by(Server.name)
+    stmt = (
+        select(Server)
+        .outerjoin(profile_counts, Server.id == profile_counts.c.server_id)
+        .where(Server.is_active == True)
+        .where(
+            func.coalesce(profile_counts.c.profile_count, 0)
+            < Server.max_clients
+        )
+        .order_by(Server.name)
+    )
+
     result = await session.execute(stmt)
-    active_servers = result.scalars().all()
-
-    available = []
-    for server in active_servers:
-        current_count = counts_map.get(server.id, 0)
-        if current_count < server.max_clients:
-            available.append(server)
-
-    return available
+    return result.scalars().all()
 
 
 async def get_server_by_id(
