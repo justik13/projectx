@@ -67,7 +67,7 @@ class ProfileDeletionService:
     @staticmethod
     async def delete_profiles_list(
         session: AsyncSession,
-        profiles: list[VPNProfile],
+        profiles: list,
         *,
         reason: str,
         background: bool = True,
@@ -91,7 +91,7 @@ class ProfileDeletionService:
     @staticmethod
     async def _delete_profiles(
         session: AsyncSession,
-        profiles: list[VPNProfile],
+        profiles: list,
         *,
         reason: str,
         background: bool,
@@ -166,7 +166,7 @@ class ProfileDeletionService:
 
     @staticmethod
     async def _delete_peers_on_api_background(
-        deletion_tasks: list[dict],
+        deletion_tasks: list,
     ) -> None:
         """
         Пытается удалить пиры на серверах.
@@ -230,7 +230,7 @@ class ProfileDeletionService:
 
     @staticmethod
     async def _queue_failed_api_deletions(
-        failed_tasks: list[dict],
+        failed_tasks: list,
     ) -> None:
         """
         Сохраняет неудалённые пиры в pending_api_deletions.

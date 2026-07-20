@@ -11,13 +11,15 @@ logger = logging.getLogger(__name__)
 
 _slots_cache = TTLCache(maxsize=100, ttl=300)
 _locks: dict[int, tuple[asyncio.Lock, float]] = {}
-
 _last_cleanup_time: float = 0.0
 _CLEANUP_INTERVAL = 3600.0
 _LOCK_TTL = 3600.0
 
 
-async def get_real_peer_count(server: Server, force_refresh: bool = False) -> int:
+async def get_real_peer_count(
+    server: Server,
+    force_refresh: bool = False,
+) -> int:
     """
     Возвращает реальное количество пиров на сервере.
 
@@ -30,7 +32,8 @@ async def get_real_peer_count(server: Server, force_refresh: bool = False) -> in
     - 0..N — реальный ответ API;
     - -1 — данные получить не удалось.
 
-    Вышестоящий код должен трактовать -1 как «неизвестно», а не как «пусто».
+    Вышестоящий код должен трактовать -1 как «неизвестно»,
+    а не как «пусто».
     """
     global _last_cleanup_time
 
@@ -104,7 +107,8 @@ def _cleanup_old_locks(now: float) -> None:
 
     if old_servers:
         logger.debug(
-            "Slots cache locks cleanup: removed %s old locks, %s remaining",
+            "Slots cache locks cleanup: removed %s old locks, "
+            "%s remaining",
             len(old_servers),
             len(_locks),
         )

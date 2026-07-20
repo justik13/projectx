@@ -52,7 +52,6 @@ class SubscriptionService:
                 "Referral: self-referral attempt by %s",
                 telegram_id,
             )
-
             return False
 
         ref_user = await get_user_by_telegram_id(session, ref_id)
@@ -62,7 +61,6 @@ class SubscriptionService:
                 "Referral: referrer %s not found in DB",
                 ref_id,
             )
-
             return False
 
         current_id = ref_id
@@ -87,7 +85,6 @@ class SubscriptionService:
                     telegram_id,
                     ref_id,
                 )
-
                 return False
 
             chain_visited.add(current_user.referred_by)
@@ -115,11 +112,8 @@ class SubscriptionService:
 
                 if is_valid:
                     user.referred_by = ref_id
-
                     await session.flush()
-
                     invalidate_user_cache(telegram_id)
-
                     logger.info(
                         "Late referral binding: user %s bound to "
                         "referrer %s",
@@ -140,7 +134,6 @@ class SubscriptionService:
 
             if is_valid:
                 referred_by = ref_id
-
                 logger.info(
                     "New user %s referred by %s",
                     telegram_id,
@@ -191,7 +184,8 @@ class SubscriptionService:
         # не делаем подписку "активной до сейчас".
         #
         # Это нужно для сценария админской смены тарифа без продления:
-        # тариф/лимит можно поменять, но доступ не должен внезапно стать активным.
+        # тариф/лимит можно поменять, но доступ не должен внезапно
+        # стать активным.
         if days == 0 and not had_active_subscription:
             new_end = user.subscription_end
         else:
@@ -244,8 +238,10 @@ class SubscriptionService:
         invalidate_user_cache(telegram_id)
 
         # После изменения подписки синхронизируем статус устройств:
-        # - если доступ активен и пользователь не забанен — устройства активны;
-        # - если доступ неактивен или пользователь забанен — устройства неактивны.
+        # - если доступ активен и пользователь не забанен —
+        #   устройства активны;
+        # - если доступ неактивен или пользователь забанен —
+        #   устройства неактивны.
         await SubscriptionService._sync_access_state(session, user)
 
         return user
@@ -395,7 +391,6 @@ class SubscriptionService:
                 "subscription, sending expiresAt=null to API",
                 user.telegram_id,
             )
-
             return None
 
         expires_ts = int(user.subscription_end.timestamp())

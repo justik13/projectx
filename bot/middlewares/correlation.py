@@ -39,6 +39,7 @@ def _redact_callback_data(data: str | None) -> str:
         return "action=empty"
 
     action = data.split(":", 1)[0]
+
     if not action:
         return "action=empty"
 
@@ -80,10 +81,12 @@ class CorrelationMiddleware(BaseMiddleware):
             event_type = "callback"
             event_data = _redact_callback_data(event.data)
             user_id = event.from_user.id if event.from_user else 0
+
         elif isinstance(event, Message):
             event_type = "message"
             event_data = _message_log_summary(event)
             user_id = event.from_user.id if event.from_user else 0
+
         else:
             event_type = type(event).__name__ or "unknown"
             event_data = ""

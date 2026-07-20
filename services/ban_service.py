@@ -32,7 +32,7 @@ class BanService:
         session: AsyncSession,
         admin_id: int,
         telegram_id: int,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         user = await get_user_by_telegram_id(session, telegram_id)
 
         if not user:
@@ -61,13 +61,15 @@ class BanService:
         admin_id: int,
         user,
         telegram_id: int,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         # 1. Удаляем все устройства пользователя.
-        deleted_profiles = await ProfileDeletionService.delete_profiles_for_user(
-            session,
-            user.id,
-            reason="ban_delete",
-            background=True,
+        deleted_profiles = (
+            await ProfileDeletionService.delete_profiles_for_user(
+                session,
+                user.id,
+                reason="ban_delete",
+                background=True,
+            )
         )
 
         # 2. Отменяем ожидающие платежи.
@@ -93,7 +95,7 @@ class BanService:
             f"profiles_deleted={deleted_profiles}",
         )
 
-        # 5. Инвалидируем кэш пользователя.
+        # 5. Инвалидация кэша пользователя.
         invalidate_user_cache(telegram_id)
 
         logger.info(
@@ -111,7 +113,7 @@ class BanService:
         admin_id: int,
         user,
         telegram_id: int,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         # При разбане устройства НЕ восстанавливаются.
         # Пользователь должен создать их заново, если подписка активна.
 

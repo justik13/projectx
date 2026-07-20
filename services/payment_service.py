@@ -47,6 +47,13 @@ MANUAL_REVIEW_REASONS = {
     "cancel_after_completed": "Отмена после успешной оплаты",
 }
 
+MANUAL_GRANT_ALLOWED_STATUSES = {
+    "pending",
+    "cancelled",
+    "failed",
+    "requires_manual_review",
+}
+
 
 async def _get_redis() -> aioredis.Redis:
     global _redis_client
@@ -225,27 +232,18 @@ async def _send_manual_review_alert_now(
     keyboard = builder.as_markup()
 
     message = (
-        f"⚠️ <b>Платёж требует ручной проверки</b>
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-"
-        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>
-"
+        f"⚠️ <b>Платёж требует ручной проверки</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>\n"
         f"👤 <b>Клиент:</b> "
         f"<code>{user_telegram_id or '—'}</code> "
-        f"({snapshot.get('username', '—')})
-"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}
-"
+        f"({snapshot.get('username', '—')})\n"
+        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
         f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}
-"
-        f"🧩 <b>Причина:</b> {reason_text}
-"
-        f"📍 <b>Источник:</b> <code>{source}</code>
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-"
+        f"{snapshot.get('currency', '—')}\n"
+        f"🧩 <b>Причина:</b> {reason_text}\n"
+        f"📍 <b>Источник:</b> <code>{source}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Доступ не выдан автоматически.</i>"
     )
 
@@ -296,27 +294,18 @@ async def _send_paid_after_cancel_alert_now(
     keyboard = builder.as_markup()
 
     message = (
-        f"⚠️ <b>Оплата после отмены</b>
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-"
-        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>
-"
+        f"⚠️ <b>Оплата после отмены</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>\n"
         f"👤 <b>Клиент:</b> "
         f"<code>{user_telegram_id or '—'}</code> "
-        f"({snapshot.get('username', '—')})
-"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}
-"
+        f"({snapshot.get('username', '—')})\n"
+        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
         f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-"
-        f"<i>Деньги поступили, но платёж был ранее отменён.
-"
-        f"Клиент уведомлён автоматически.
-"
+        f"{snapshot.get('currency', '—')}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Деньги поступили, но платёж был ранее отменён.\n"
+        f"Клиент уведомлён автоматически.\n"
         f"Выберите действие:</i>"
     )
 
@@ -377,22 +366,15 @@ async def _notify_client_paid_after_cancel_now(
     keyboard = builder.as_markup()
 
     message = (
-        f"💳 <b>Мы получили вашу оплату</b>
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-"
+        f"💳 <b>Мы получили вашу оплату</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}
-"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}
-"
-        f"🆔 <b>Платёж:</b> <code>{payment_id}</code>
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-"
+        f"{snapshot.get('currency', '—')}\n"
+        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
+        f"🆔 <b>Платёж:</b> <code>{payment_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Ранее в боте была нажата кнопка «Отменить», "
-        f"поэтому доступ не активировался автоматически.
-"
+        f"поэтому доступ не активировался автоматически.\n"
         f"Напишите нам — решим за 2 минуты."
     )
 
@@ -473,27 +455,18 @@ async def _send_chargeback_alert_now(
     keyboard = builder.as_markup()
 
     message = (
-        f"🚨 <b>Возврат средств</b>
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-"
-        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>
-"
+        f"🚨 <b>Возврат средств</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>\n"
         f"👤 <b>Пользователь:</b> "
         f"<code>{user_telegram_id or '—'}</code> "
-        f"({snapshot.get('username', '—')})
-"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}
-"
+        f"({snapshot.get('username', '—')})\n"
+        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
         f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}
-"
-        f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-"
-        f"<i>Доступ отозван. Устройства удалены.
-"
+        f"{snapshot.get('currency', '—')}\n"
+        f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Доступ отозван. Устройства удалены.\n"
         f"Реферальные бонусы откатаны.</i>"
     )
 
@@ -506,7 +479,7 @@ class PaymentService:
     async def handle_successful_payment(
         session: AsyncSession,
         payment_id: int,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         """
         Обрабатывает успешный платёж.
 
@@ -518,8 +491,8 @@ class PaymentService:
         5. Проверяем сумму.
         6. Только затем выдаём доступ.
 
-        Если что-то не так, платёж переводится в requires_manual_review,
-        а админ получает алерт после commit.
+        Если что-то не так, платёж переводится в
+        requires_manual_review, а админ получает алерт.
         """
         redis = await _get_redis()
 
@@ -558,7 +531,8 @@ class PaymentService:
 
                     if payment.status == "completed":
                         logger.info(
-                            "Payment %s already completed (idempotent)",
+                            "Payment %s already completed "
+                            "(idempotent)",
                             payment_id,
                         )
                         return True, "already_processed"
@@ -598,7 +572,8 @@ class PaymentService:
 
                     if payment.status == "refunded":
                         logger.warning(
-                            "Payment %s is refunded, cannot grant access",
+                            "Payment %s is refunded, cannot grant "
+                            "access",
                             payment_id,
                         )
                         return False, "refunded"
@@ -649,7 +624,9 @@ class PaymentService:
                     manual_review_reason = None
 
                     if not user or not tariff:
-                        manual_review_reason = "missing_tariff_or_user"
+                        manual_review_reason = (
+                            "missing_tariff_or_user"
+                        )
 
                     elif user.is_deleted or user.is_banned:
                         manual_review_reason = "banned_or_deleted"
@@ -658,8 +635,8 @@ class PaymentService:
                         manual_review_reason = "inactive_tariff"
 
                     else:
-                        expected_amount = _expected_payment_amount(
-                            payment
+                        expected_amount = (
+                            _expected_payment_amount(payment)
                         )
 
                         if expected_amount is None:
@@ -730,7 +707,8 @@ class PaymentService:
 
                     except ValueError as e:
                         logger.error(
-                            "Payment %s: subscription extend failed: %s",
+                            "Payment %s: subscription extend "
+                            "failed: %s",
                             payment_id,
                             e,
                         )
@@ -835,7 +813,8 @@ class PaymentService:
 
                         except Exception as e:
                             logger.warning(
-                                "Referral bonus failed for payment %s: %s",
+                                "Referral bonus failed for payment "
+                                "%s: %s",
                                 payment_id,
                                 e,
                             )
@@ -860,12 +839,14 @@ class PaymentService:
 
                     except Exception as e:
                         logger.error(
-                            "Failed to log payment success to audit: %s",
+                            "Failed to log payment success to "
+                            "audit: %s",
                             e,
                         )
 
                     logger.info(
-                        "Payment %s processed successfully for user %s",
+                        "Payment %s processed successfully for "
+                        "user %s",
                         payment_id,
                         user.telegram_id,
                     )
@@ -893,7 +874,7 @@ class PaymentService:
         session: AsyncSession,
         payment_id: int,
         admin_id: int,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         """
         Ручная выдача платежа админом.
 
@@ -907,7 +888,8 @@ class PaymentService:
         - completed
         - refunded
 
-        Также запрещено выдавать доступ заблокированному пользователю.
+        Также запрещено выдавать доступ заблокированному
+        пользователю.
         """
         allowed_statuses = {
             "pending",
@@ -930,7 +912,9 @@ class PaymentService:
                     return False, "Платёж уже выдан"
 
                 if payment.status == "refunded":
-                    return False, "Платёж возвращён, выдача запрещена"
+                    return False, (
+                        "Платёж возвращён, выдача запрещена"
+                    )
 
                 if payment.status not in allowed_statuses:
                     return False, "Недопустимый статус платежа"
@@ -968,7 +952,8 @@ class PaymentService:
 
                 except ValueError as e:
                     logger.error(
-                        "force_grant: extend failed for payment %s: %s",
+                        "force_grant: extend failed for payment "
+                        "%s: %s",
                         payment_id,
                         e,
                     )
@@ -1023,7 +1008,8 @@ class PaymentService:
 
                     except Exception as e:
                         logger.warning(
-                            "Referral bonus failed for manual grant %s: %s",
+                            "Referral bonus failed for manual "
+                            "grant %s: %s",
                             payment_id,
                             e,
                         )
@@ -1040,13 +1026,17 @@ class PaymentService:
                         target_type="Payment",
                         target_id=payment_id,
                         details=(
-                            f"Admin {admin_id} manually granted payment "
-                            f"{payment_id} for user {user.telegram_id}"
+                            f"Admin {admin_id} manually granted "
+                            f"payment {payment_id} for user "
+                            f"{user.telegram_id}"
                         ),
                     )
 
                 except Exception as e:
-                    logger.error("force_grant: audit failed: %s", e)
+                    logger.error(
+                        "force_grant: audit failed: %s",
+                        e,
+                    )
 
                 return True, "ok"
 
@@ -1147,7 +1137,8 @@ class PaymentService:
                     target_type="Payment",
                     target_id=payment.id,
                     details=(
-                        f"user={user_id}, amount={decimal_amount} RUB, "
+                        f"user={user_id}, "
+                        f"amount={decimal_amount} RUB, "
                         f"payment provider create_transaction failed"
                     ),
                 )
@@ -1177,7 +1168,7 @@ class PaymentService:
         payload: str,
         callback_amount: float | None = None,
         callback_payload: str | None = None,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         stmt = (
             select(Payment)
             .options(
@@ -1208,7 +1199,8 @@ class PaymentService:
             if payment.status == "completed":
                 logger.info(
                     "Payment provider callback: payment %s already "
-                    "completed, idempotent success for transaction=%s",
+                    "completed, idempotent success for "
+                    "transaction=%s",
                     payment.id,
                     transaction_id,
                 )
@@ -1286,8 +1278,8 @@ class PaymentService:
 
             if callback_decimal is None:
                 logger.error(
-                    "Payment provider callback: invalid callback amount "
-                    "%s for transaction=%s",
+                    "Payment provider callback: invalid callback "
+                    "amount %s for transaction=%s",
                     callback_amount,
                     transaction_id,
                 )
@@ -1368,32 +1360,14 @@ class PaymentService:
                     payment.id,
                 )
 
-                snapshot = _build_payment_snapshot(payment)
-
-                await AuditService.log_action(
+                await PaymentService._set_manual_review(
                     session,
-                    admin_id=0,
-                    action="PAYMENT_CANCEL_AFTER_COMPLETED",
-                    target_type="Payment",
-                    target_id=payment.id,
-                    details=(
-                        f"transaction={transaction_id}, "
-                        f"user={payment.user_id}"
-                    ),
+                    payment.id,
+                    "cancel_after_completed",
+                    source="platega_callback",
                 )
 
-                queue_post_commit_task(
-                    session,
-                    lambda s=snapshot: (
-                        _send_manual_review_alert_now(
-                            s,
-                            "cancel_after_completed",
-                            "platega_callback",
-                        )
-                    ),
-                )
-
-                return True, "cancel_after_completed"
+                return True, "manual_review"
 
             payment.status = "cancelled"
 
@@ -1413,7 +1387,8 @@ class PaymentService:
 
             except Exception as e:
                 logger.error(
-                    "Failed to log payment cancellation to audit: %s",
+                    "Failed to log payment cancellation to "
+                    "audit: %s",
                     e,
                 )
 
@@ -1437,7 +1412,7 @@ class PaymentService:
     async def check_platega_payment(
         session: AsyncSession,
         payment_id: int,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         payment = await get_payment_by_id(
             session,
             payment_id,
@@ -1512,7 +1487,8 @@ class PaymentService:
                         target_type="Payment",
                         target_id=payment.id,
                         details=(
-                            "check_platega_payment: status=CANCELED, "
+                            "check_platega_payment: "
+                            "status=CANCELED, "
                             f"user={payment.user_id}"
                         ),
                     )
@@ -1541,7 +1517,7 @@ class PaymentService:
         payment_id: int,
         reason: str,
         source: str,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         """
         Переводит платёж в статус requires_manual_review.
 
@@ -1575,7 +1551,10 @@ class PaymentService:
             if current and current.status == "completed":
                 return True, "already_processed"
 
-            if current and current.status == "requires_manual_review":
+            if (
+                current
+                and current.status == "requires_manual_review"
+            ):
                 return True, "manual_review"
 
             return False, current.status if current else "not_found"
@@ -1594,7 +1573,8 @@ class PaymentService:
             target_type="Payment",
             target_id=payment_id,
             details=(
-                f"reason={reason}, source={source}"
+                f"reason={reason}, source={source}, "
+                f"user={payment.user_id if payment else '—'}"
             ),
         )
 
@@ -1612,7 +1592,7 @@ class PaymentService:
         session: AsyncSession,
         payment_id: int,
         transaction_id: str,
-    ) -> tuple[bool, str]:
+    ) -> tuple:
         try:
             async with session.begin_nested():
                 payment = await get_payment_by_id_for_update(
@@ -1625,8 +1605,8 @@ class PaymentService:
 
                 if payment.status == "refunded":
                     logger.info(
-                        "Payment provider callback: payment %s already "
-                        "refunded",
+                        "Payment provider callback: payment %s "
+                        "already refunded",
                         payment.id,
                     )
                     return True, "already_processed"
@@ -1692,7 +1672,8 @@ class PaymentService:
                                             bonus_referrer
                                         )
 
-                                    # Не вычитаем дни из вечной подписки.
+                                    # Не вычитаем дни из вечной
+                                    # подписки.
                                     if (
                                         referrer.subscription_end
                                         and referrer.subscription_end
@@ -1708,15 +1689,16 @@ class PaymentService:
                                         )
 
                                     logger.info(
-                                        "Chargeback: rolled back referral "
-                                        "bonus for referrer %s",
+                                        "Chargeback: rolled back "
+                                        "referral bonus for "
+                                        "referrer %s",
                                         referrer.telegram_id,
                                     )
 
                         except Exception as e:
                             logger.error(
-                                "Chargeback: failed to rollback referral "
-                                "bonuses: %s",
+                                "Chargeback: failed to rollback "
+                                "referral bonuses: %s",
                                 e,
                                 exc_info=True,
                             )

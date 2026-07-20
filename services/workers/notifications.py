@@ -21,7 +21,6 @@ logger = logging.getLogger("BackgroundWorker")
 
 MAX_RETRY_COUNT = 4
 BACKOFF_BASE_INTERVAL = NOTIFICATION_INTERVAL
-
 NOTIFICATION_BATCH_SIZE = 20
 
 # Короткая стартовая задержка вместо 30 минут.
@@ -438,7 +437,7 @@ async def _send_post_expiry_notifications(
                         "━━━━━━━━━━━━━━━━━━━━\n"
                         "Подписка истекла.\n"
                         "Если вы не продлите доступ, устройства будут "
-                        "удалены.\n\n"
+                        "удалены.\n"
                         "Продлите доступ, чтобы сохранить их."
                     )
                     notification_type = "grace_12h"
@@ -450,7 +449,7 @@ async def _send_post_expiry_notifications(
                         "🔴 <b>Подписка истекла</b>\n"
                         "━━━━━━━━━━━━━━━━━━━━\n"
                         "Ваши устройства перестали работать.\n"
-                        f"Устройства будут удалены через: <b>{countdown}</b>\n\n"
+                        f"Устройства будут удалены через: <b>{countdown}</b>\n"
                         "Продлите доступ, чтобы сохранить их."
                     )
                     notification_type = "expired"

@@ -70,15 +70,12 @@ _PROTOCOL_DISPLAY = {
     "amneziawg2": "AmneziaWG 2.0",
 }
 
-# Grace-период после истечения подписки.
-# Через 48 часов устройства удаляются полностью.
 GRACE_PERIOD_HOURS = 48
 
 
 def _format_protocol(raw_protocol: str | None) -> str:
     if not raw_protocol:
         return "—"
-
     return _PROTOCOL_DISPLAY.get(raw_protocol, raw_protocol)
 
 
@@ -88,10 +85,8 @@ async def _get_effective_device_limit(
 ) -> int:
     if user.current_tariff_id:
         tariff = await get_tariff_by_id(session, user.current_tariff_id)
-
         if tariff:
             return tariff.device_limit
-
     return 0
 
 
@@ -179,23 +174,15 @@ async def _build_connections_screen(
             countdown = _format_grace_countdown(deletion_time)
 
             rendered += (
-                "
-⚠️ <b>Подписка истекла</b>
-"
-                "Устройства можно удалить, но они не будут работать.
-"
-                f"Устройства будут удалены через: <b>{countdown}</b>
-"
-                "Продлите доступ, чтобы сохранить их.
-"
+                "\n⚠️ <b>Подписка истекла</b>\n"
+                "Устройства можно удалить, но они не будут работать.\n"
+                f"Устройства будут удалены через: <b>{countdown}</b>\n"
+                "Продлите доступ, чтобы сохранить их.\n"
             )
         else:
             rendered += (
-                "
-⚠️ <b>Подписка истекла</b>
-"
-                "Устройства можно удалить, но они не будут работать.
-"
+                "\n⚠️ <b>Подписка истекла</b>\n"
+                "Устройства можно удалить, но они не будут работать.\n"
             )
 
     builder = InlineKeyboardBuilder()
@@ -273,13 +260,6 @@ async def _render_connections(
     )
 
     if not has_access:
-        # Если подписка истекла, но устройства ещё существуют,
-        # показываем их в режиме "только удаление".
-        #
-        # Это решает проблему:
-        # - пользователь не может купить меньший тариф;
-        # - потому что не может удалить старые устройства;
-        # - так как раздел устройств был недоступен без подписки.
         if profiles_count > 0:
             rendered, builder = await _build_connections_screen(
                 user,
@@ -451,13 +431,9 @@ async def manage_device(
         keyboard = get_device_keyboard(profile.id)
     else:
         rendered += (
-            "
-⚠️ <b>Доступ неактивен</b>
-"
-            "Ключ и файлы конфигурации недоступны.
-"
-            "Устройство можно удалить.
-"
+            "\n⚠️ <b>Доступ неактивен</b>\n"
+            "Ключ и файлы конфигурации недоступны.\n"
+            "Устройство можно удалить.\n"
         )
 
         builder = InlineKeyboardBuilder()
@@ -617,10 +593,8 @@ async def download_conf(
         callback.message.chat.id,
         document=vpn_file,
         caption=(
-            f"📁 <b>Основной клиент Amnezia</b>
-"
-            f"📱 Устройство: <b>{safe(profile.device_name)}</b>
-"
+            f"📁 <b>Основной клиент Amnezia</b>\n"
+            f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
             f"<i>Для универсального приложения</i>"
         ),
         parse_mode="HTML",
@@ -631,24 +605,18 @@ async def download_conf(
         callback.message.chat.id,
         document=conf_file,
         caption=(
-            f"📁 <b>AmneziaWG</b>
-"
-            f"📱 Устройство: <b>{safe(profile.device_name)}</b>
-"
+            f"📁 <b>AmneziaWG</b>\n"
+            f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
             f"<i>Для отдельного легковесного приложения</i>"
         ),
         parse_mode="HTML",
     )
 
     instruction_text = (
-        "✅ <b>Файлы конфигурации отправлены!</b>
-"
-        "📥 <b>Как подключить:</b>
-"
-        "1️⃣ Первый файл импортируйте в <b>основной клиент Amnezia</b>.
-"
-        "2️⃣ Второй файл импортируйте в <b>AmneziaWG</b>.
-"
+        "✅ <b>Файлы конфигурации отправлены!</b>\n"
+        "📥 <b>Как подключить:</b>\n"
+        "1️⃣ Первый файл импортируйте в <b>основной клиент Amnezia</b>.\n"
+        "2️⃣ Второй файл импортируйте в <b>AmneziaWG</b>.\n"
         "<i>💡 Нажмите на файл выше, чтобы открыть его "
         "в нужном приложении.</i>"
     )
@@ -781,10 +749,6 @@ async def request_delete_device(
         )
         return
 
-    # Удаление устройства разрешено даже если подписка истекла.
-    # Это нужно, чтобы пользователь мог удалить лишние устройства
-    # и затем купить тариф с меньшим лимитом.
-
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -881,7 +845,6 @@ async def start_add_device(
 ):
     user_id = callback.from_user.id
 
-    # Режим технических работ.
     if not await MaintenanceService.can_user_perform_action(
         session,
         user_id,
@@ -975,7 +938,6 @@ async def select_server(
 ):
     await callback.answer()
 
-    # Режим технических работ.
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
@@ -1050,7 +1012,6 @@ async def enter_device_name(
 ):
     user_id = message.from_user.id
 
-    # Режим технических работ.
     if not await MaintenanceService.can_user_perform_action(
         session,
         user_id,
@@ -1135,8 +1096,7 @@ async def enter_device_name(
         await render_hub(
             message.bot,
             message.chat.id,
-            "⏳ <b>Создаю устройство...</b>
-"
+            "⏳ <b>Создаю устройство...</b>\n"
             "<i>Обычно это занимает несколько секунд.</i>",
             get_back_button("add_device"),
             parse_mode="HTML",

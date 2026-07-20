@@ -5,7 +5,6 @@ from datetime import timedelta
 
 from sqlalchemy import delete, select, update
 
-from bot.constants import CLEANUP_INTERVAL
 from database.connection import session_scope
 from database.models import (
     BroadcastProgress,

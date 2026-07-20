@@ -107,6 +107,7 @@ async def _get_server_profiles_count(
 
 
 class DeviceService:
+
     @staticmethod
     async def create_device(
         session: AsyncSession,
@@ -122,7 +123,6 @@ class DeviceService:
                 "or protocol mismatch",
                 server_id,
             )
-
             raise ServerUnavailable("Invalid server or protocol")
 
         if not server.is_active:
@@ -131,7 +131,6 @@ class DeviceService:
                 server.name,
                 server.id,
             )
-
             raise ServerUnavailable("Server is disabled by admin")
 
         redis = await _get_redis()
@@ -155,7 +154,6 @@ class DeviceService:
                     "for server %s",
                     server.id,
                 )
-
                 raise ServerUnavailable("Server is busy, try again")
 
             local_count = await _get_server_profiles_count(
@@ -173,7 +171,6 @@ class DeviceService:
                     local_count,
                     server.max_clients,
                 )
-
                 raise ServerUnavailable("Server is full")
 
             if free_slots < CRITICAL_SLOTS_THRESHOLD:
@@ -197,7 +194,6 @@ class DeviceService:
                         "Blocking creation to avoid overfill.",
                         server.name,
                     )
-
                     raise ServerUnavailable(
                         "Cannot verify server slots, try later",
                     )
@@ -210,7 +206,6 @@ class DeviceService:
                         real_count,
                         server.max_clients,
                     )
-
                     raise ServerUnavailable("Server is full")
 
             lock = _get_user_lock(user.id)
@@ -236,7 +231,6 @@ class DeviceService:
                     ):
                         user.device_creations_today = 0
                         user.last_creation_date = now_msk_date
-
                         await session.flush()
 
                     if (
@@ -306,7 +300,9 @@ class DeviceService:
                 )
 
                 if not api_result:
-                    raise ServerUnavailable("API create_user failed")
+                    raise ServerUnavailable(
+                        "API create_user failed",
+                    )
 
                 peer_id = api_result.id
                 raw_config = api_result.config
@@ -323,11 +319,14 @@ class DeviceService:
                         )
                     except Exception as rollback_error:
                         logger.error(
-                            "Failed to rollback invalid config: %s",
+                            "Failed to rollback invalid "
+                            "config: %s",
                             rollback_error,
                         )
 
-                    raise InvalidConfig("Invalid configuration URI")
+                    raise InvalidConfig(
+                        "Invalid configuration URI"
+                    )
 
                 try:
                     async with session.begin_nested():
@@ -457,7 +456,6 @@ class DeviceService:
 
             try:
                 await delete_profile(session, profile)
-
                 return True
             except Exception as e:
                 await session.rollback()

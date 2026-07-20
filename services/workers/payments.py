@@ -227,7 +227,7 @@ async def _send_stars_manual_review_alert(
         f"⚠️ <b>Stars-платежи требуют проверки</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Платежи не подтвердились автоматически за "
-        f"{STARS_MANUAL_REVIEW_HOURS} ч.\n\n"
+        f"{STARS_MANUAL_REVIEW_HOURS} ч.\n"
     )
 
     for payment in stars_payments[:10]:
@@ -292,7 +292,7 @@ async def _alert_new_stale_payments(bot: Bot, settings):
     msg = (
         f"⚠️ <b>Новые зависшие платежи (pending > 1ч)</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Количество: <b>{len(new_stale_for_alert)}</b>\n\n"
+        f"Количество: <b>{len(new_stale_for_alert)}</b>\n"
     )
 
     for p in new_stale_for_alert[:10]:

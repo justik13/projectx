@@ -50,7 +50,11 @@ _WORKER_FACTORIES = {
 }
 
 
-async def _send_worker_crash_alert(bot: Bot, worker_name: str, error_text: str):
+async def _send_worker_crash_alert(
+    bot: Bot,
+    worker_name: str,
+    error_text: str,
+):
     try:
         settings = get_settings()
 
@@ -141,7 +145,9 @@ async def _supervise_workers(bot: Bot):
 
             await _send_worker_crash_alert(bot, worker_name, error_text)
 
-            restart_counts[worker_name] = restart_counts.get(worker_name, 0) + 1
+            restart_counts[worker_name] = (
+                restart_counts.get(worker_name, 0) + 1
+            )
             count = restart_counts[worker_name]
 
             if count > _MAX_WORKER_RESTARTS:

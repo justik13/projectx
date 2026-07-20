@@ -134,6 +134,7 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
         except asyncio.CancelledError:
             logger.info("Traffic sync worker cancelled")
             break
+
         except Exception as e:
             _consecutive_crashes += 1
 
@@ -363,11 +364,11 @@ async def _process_server_traffic(server_info, api_clients):
                 server_info["name"],
             )
 
-        if healing_tasks:
-            await _self_heal_peers(healing_tasks)
+    if healing_tasks:
+        await _self_heal_peers(healing_tasks)
 
-        if reverse_healing_tasks:
-            await _self_heal_peers(reverse_healing_tasks)
+    if reverse_healing_tasks:
+        await _self_heal_peers(reverse_healing_tasks)
 
 
 async def _send_quota_alert(
@@ -390,7 +391,7 @@ async def _send_quota_alert(
         if not admin_ids:
             return
 
-        tb = total_bytes / (1024**4)
+        tb = total_bytes / (1024 ** 4)
 
         msg = (
             "⚠️ <b>Fair Usage Policy: Превышение квоты трафика!</b>\n"

@@ -86,7 +86,6 @@ async def cmd_start(
 
     payment_id = data.get("payment_id")
 
-    # Отменяем платёж в БД, если он был незавершён.
     if payment_id:
         try:
             await mark_payment_as_cancelled(session, payment_id)
@@ -172,7 +171,6 @@ async def back_to_main_menu(
 
     payment_id = data.get("payment_id")
 
-    # Отменяем платёж в БД, если он был незавершён.
     if payment_id:
         try:
             await mark_payment_as_cancelled(session, payment_id)

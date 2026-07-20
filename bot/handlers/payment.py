@@ -53,17 +53,12 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 PAYMENT_MANUAL_REVIEW_TEXT = (
-    "💳 <b>Оплата получена</b>
-"
-    "━━━━━━━━━━━━━━━━━━━━
-"
-    "Мы проверяем платёж.
-"
+    "💳 <b>Оплата получена</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "Мы проверяем платёж.\n"
     "Если доступ не активировался в течение нескольких минут, "
-    "напишите в поддержку.
-"
-    "━━━━━━━━━━━━━━━━━━━━
-"
+    "напишите в поддержку.\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
     "<i>Обычно проверка занимает не более 5 минут.</i>"
 )
 
@@ -71,7 +66,6 @@ PAYMENT_MANUAL_REVIEW_TEXT = (
 def _to_decimal(value) -> Decimal | None:
     if value is None:
         return None
-
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
@@ -81,7 +75,6 @@ def _to_decimal(value) -> Decimal | None:
 async def _is_subscription_active(user) -> bool:
     if not user or not user.subscription_end:
         return False
-
     return not is_expired(user.subscription_end)
 
 
@@ -92,7 +85,6 @@ async def _render_maintenance(
     back_to: str = "back_to_main_menu",
 ) -> None:
     message = await MaintenanceService.get_message(session)
-
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -136,10 +128,7 @@ async def hub_menu_payment(
         await _show_showcase(callback, session)
 
 
-async def _show_showcase(
-    callback: CallbackQuery,
-    session: AsyncSession,
-) -> None:
+async def _show_showcase(callback: CallbackQuery, session: AsyncSession) -> None:
     tariffs = await get_active_tariffs(session)
 
     if not tariffs:
@@ -155,10 +144,8 @@ async def _show_showcase(
 
     for tariff in tariffs:
         limit = getattr(tariff, "device_limit", 2)
-
         if limit not in grouped:
             grouped[limit] = []
-
         grouped[limit].append(tariff)
 
     keyboard = get_tariff_showcase_keyboard(grouped)
@@ -171,11 +158,7 @@ async def _show_showcase(
     )
 
 
-async def _show_hub(
-    callback: CallbackQuery,
-    user,
-    session: AsyncSession,
-) -> None:
+async def _show_hub(callback: CallbackQuery, user, session: AsyncSession) -> None:
     profiles = await get_user_profiles(session, user.id)
 
     tariff_name = get_tariff_display_name(user.device_limit)

@@ -54,7 +54,6 @@ for handler in root_logger.handlers:
 
 logger = logging.getLogger(__name__)
 
-
 _SECRET_PATTERNS = [
     (
         re.compile(
@@ -219,6 +218,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     settings = get_settings()
 
     bot = Bot(token=settings.BOT_TOKEN)
+
     storage = RedisStorage.from_url(settings.REDIS_URL)
 
     dp = Dispatcher(storage=storage)
@@ -253,6 +253,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     # Throttling and action locks.
     dp.message.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ThrottlingMiddleware())
+
     dp.callback_query.middleware(ActionLockMiddleware())
 
     # UX helper.
@@ -294,6 +295,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
 async def start_webhook_server(port: int):
     app = web.Application()
+
     setup_webhook_routes(app)
 
     runner = web.AppRunner(app)
@@ -342,7 +344,10 @@ async def main():
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
-            logger.critical("❌ DB_ENCRYPTION_KEY невалиден: %s", type(e).__name__)
+            logger.critical(
+                "❌ DB_ENCRYPTION_KEY невалиден: %s",
+                type(e).__name__,
+            )
             return
 
         if not _validate_platega_config():
@@ -402,6 +407,7 @@ async def main():
                 await polling_task
             except asyncio.CancelledError:
                 pass
+
         else:
             for task in done:
                 exc = task.exception() if not task.cancelled() else None
@@ -411,6 +417,9 @@ async def main():
                         "Fatal error in main task: %s",
                         type(exc).__name__,
                     )
+
+    except Exception as e:
+        logger.critical("Fatal error in main: %s", e, exc_info=True)
 
     finally:
         logger.info("Stopping background workers...")

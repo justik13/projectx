@@ -33,7 +33,6 @@ from utils.telegram import render_hub, safe
 router = Router()
 logger = logging.getLogger(__name__)
 
-
 PAYMENT_STATUS_ICONS = {
     "completed": "✅",
     "cancelled": "❌",
@@ -167,7 +166,6 @@ async def hub_menu_profile(
             texts.ERROR_USER_NOT_FOUND,
             show_alert=True,
         )
-
         return
 
     await _render_profile(
@@ -193,7 +191,6 @@ async def back_to_profile(
             texts.ERROR_USER_NOT_FOUND,
             show_alert=True,
         )
-
         return
 
     await _render_profile(
@@ -219,7 +216,6 @@ async def show_history(
             texts.ERROR_USER_NOT_FOUND,
             show_alert=True,
         )
-
         return
 
     payments = await get_user_payments(session, db_user.id)
@@ -278,7 +274,6 @@ async def show_referral(
             texts.ERROR_USER_NOT_FOUND,
             show_alert=True,
         )
-
         return
 
     user_with_refs, referrals = await get_user_with_referrals(
@@ -322,7 +317,6 @@ async def show_referrals_list(
             texts.ERROR_USER_NOT_FOUND,
             show_alert=True,
         )
-
         return
 
     user_with_refs, referrals = await get_user_with_referrals(
@@ -346,7 +340,7 @@ async def show_referrals_list(
 
         if len(referrals) > 20:
             rendered += (
-                f"\n<i>... и еще {len(referrals) - 20} "
+                f"\n<i>... и ещё {len(referrals) - 20} "
                 f"рефералов</i>"
             )
 
