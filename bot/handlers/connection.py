@@ -48,7 +48,7 @@ from utils.telegram import (
     append_hub_document,
     append_hub_message,
     delete_hub_ids,
-    get_cached_hub_ids,
+    get_hub_ids,
     render_hub,
     safe,
 )
@@ -179,15 +179,23 @@ async def _build_connections_screen(
             countdown = _format_grace_countdown(deletion_time)
 
             rendered += (
-                "\n⚠️ <b>Подписка истекла</b>\n"
-                "Устройства можно удалить, но они не будут работать.\n"
-                f"Устройства будут удалены через: <b>{countdown}</b>\n"
-                "Продлите доступ, чтобы сохранить их.\n"
+                "
+⚠️ <b>Подписка истекла</b>
+"
+                "Устройства можно удалить, но они не будут работать.
+"
+                f"Устройства будут удалены через: <b>{countdown}</b>
+"
+                "Продлите доступ, чтобы сохранить их.
+"
             )
         else:
             rendered += (
-                "\n⚠️ <b>Подписка истекла</b>\n"
-                "Устройства можно удалить, но они не будут работать.\n"
+                "
+⚠️ <b>Подписка истекла</b>
+"
+                "Устройства можно удалить, но они не будут работать.
+"
             )
 
     builder = InlineKeyboardBuilder()
@@ -443,9 +451,13 @@ async def manage_device(
         keyboard = get_device_keyboard(profile.id)
     else:
         rendered += (
-            "\n⚠️ <b>Доступ неактивен</b>\n"
-            "Ключ и файлы конфигурации недоступны.\n"
-            "Устройство можно удалить.\n"
+            "
+⚠️ <b>Доступ неактивен</b>
+"
+            "Ключ и файлы конфигурации недоступны.
+"
+            "Устройство можно удалить.
+"
         )
 
         builder = InlineKeyboardBuilder()
@@ -590,7 +602,7 @@ async def download_conf(
 
     vpn_file = BufferedInputFile(
         vpn_content.encode("utf-8"),
-        filename=f"{safe_device_name}.vpn",
+        filename=f"{safe_device_name}.amnezia",
     )
 
     conf_file = BufferedInputFile(
@@ -598,15 +610,17 @@ async def download_conf(
         filename=f"{safe_device_name}.conf",
     )
 
-    old_hub_ids = get_cached_hub_ids(callback.message.chat.id)
+    old_hub_ids = await get_hub_ids(callback.message.chat.id)
 
     await append_hub_document(
         callback.bot,
         callback.message.chat.id,
         document=vpn_file,
         caption=(
-            f"📁 <b>Основной клиент Amnezia</b>\n"
-            f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
+            f"📁 <b>Основной клиент Amnezia</b>
+"
+            f"📱 Устройство: <b>{safe(profile.device_name)}</b>
+"
             f"<i>Для универсального приложения</i>"
         ),
         parse_mode="HTML",
@@ -617,18 +631,24 @@ async def download_conf(
         callback.message.chat.id,
         document=conf_file,
         caption=(
-            f"📁 <b>AmneziaWG</b>\n"
-            f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
+            f"📁 <b>AmneziaWG</b>
+"
+            f"📱 Устройство: <b>{safe(profile.device_name)}</b>
+"
             f"<i>Для отдельного легковесного приложения</i>"
         ),
         parse_mode="HTML",
     )
 
     instruction_text = (
-        "✅ <b>Файлы конфигурации отправлены!</b>\n"
-        "📥 <b>Как подключить:</b>\n"
-        "1️⃣ Первый файл импортируйте в <b>основной клиент Amnezia</b>.\n"
-        "2️⃣ Второй файл импортируйте в <b>AmneziaWG</b>.\n"
+        "✅ <b>Файлы конфигурации отправлены!</b>
+"
+        "📥 <b>Как подключить:</b>
+"
+        "1️⃣ Первый файл импортируйте в <b>основной клиент Amnezia</b>.
+"
+        "2️⃣ Второй файл импортируйте в <b>AmneziaWG</b>.
+"
         "<i>💡 Нажмите на файл выше, чтобы открыть его "
         "в нужном приложении.</i>"
     )
@@ -1099,6 +1119,7 @@ async def enter_device_name(
             return
 
         data = await state.get_data()
+
         server_id = data.get("server_id")
 
         if not server_id:
@@ -1114,7 +1135,8 @@ async def enter_device_name(
         await render_hub(
             message.bot,
             message.chat.id,
-            "⏳ <b>Создаю устройство...</b>\n"
+            "⏳ <b>Создаю устройство...</b>
+"
             "<i>Обычно это занимает несколько секунд.</i>",
             get_back_button("add_device"),
             parse_mode="HTML",

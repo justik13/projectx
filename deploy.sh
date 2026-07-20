@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-IFS=$'\n\t'
+IFS=$'
+	'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -20,35 +21,50 @@ LOG_FILE="/var/log/projectx-deploy.log"
 SNAPSHOT_DIR="/root/.projectx-snapshots"
 ROLLBACK_LOG="/var/log/projectx-rollback.log"
 
+PG_PASS_FILE=""
+
 log()     { echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] [INFO]${NC} $1" | tee -a "$LOG_FILE"; }
 success() { echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] [✓]${NC} $1" | tee -a "$LOG_FILE"; }
 warn()    { echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] [!]${NC} $1" | tee -a "$LOG_FILE"; }
 error()   { echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] [✗]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
 
+cleanup_temp_files() {
+    if [[ -n "${PG_PASS_FILE:-}" ]]; then
+        rm -f "$PG_PASS_FILE" 2>/dev/null || true
+    fi
+}
+
+trap cleanup_temp_files EXIT INT TERM
+
 confirm() {
     local message="$1"
     local default="${2:-N}"
     local prompt
+
     [[ "$default" =~ ^[Yy]$ ]] && prompt="(Y/n)" || prompt="(y/N)"
+
     echo ""
     read -p "$message $prompt: " response
     response=${response:-$default}
+
     [[ "$response" =~ ^[Yy]$ ]] && return 0 || return 1
 }
 
 write_env_var() {
     local key=$1
     local value=$2
+
     value="${value//\'/\'\\\'\'}"
     value="${value//\$/\\\$}"
     value="${value//\`/\\\`}"
+
     echo "${key}='${value}'" >> "$PROJECT_DIR/.env"
 }
 
 rollback() {
     local step="$1"
     local error_msg="$2"
-    
+
     echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}🚨 ROLLBACK TRIGGERED at step: $step${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}Error: $error_msg${NC}" | tee -a "$ROLLBACK_LOG"
@@ -59,13 +75,17 @@ rollback() {
         log "Rollback: stopped $SERVICE_NAME"
     fi
 
-    local env_backup=$(ls -t "$PROJECT_DIR/.env.backup-"* 2>/dev/null | head -n1)
+    local env_backup
+    env_backup=$(ls -t "$PROJECT_DIR/.env.backup-"* 2>/dev/null | head -n1 || true)
+
     if [[ -n "$env_backup" && -f "$env_backup" ]]; then
         cp "$env_backup" "$PROJECT_DIR/.env"
         log "Rollback: restored .env from $env_backup"
     fi
 
-    local redis_backup=$(ls -t /etc/redis/redis.conf.backup-* 2>/dev/null | head -n1)
+    local redis_backup
+    redis_backup=$(ls -t /etc/redis/redis.conf.backup-* 2>/dev/null | head -n1 || true)
+
     if [[ -n "$redis_backup" && -f "$redis_backup" ]]; then
         cp "$redis_backup" /etc/redis/redis.conf 2>/dev/null || true
         systemctl restart redis-server 2>/dev/null || true
@@ -77,27 +97,37 @@ rollback() {
 
 preflight_checks() {
     log "Запуск pre-flight проверок..."
-    
+
     if [[ ! -f "$START_DIR/requirements.txt" ]]; then
         error "requirements.txt не найден в $START_DIR. Запустите скрипт из корня репозитория."
     fi
 
-    if [ "$EUID" -ne 0 ]; then error "Запустите от имени root: sudo bash deploy.sh"; fi
-    if [ ! -f /etc/os-release ]; then error "Не удалось определить ОС"; fi
-    
+    if [ "$EUID" -ne 0 ]; then
+        error "Запустите от имени root: sudo bash deploy.sh"
+    fi
+
+    if [ ! -f /etc/os-release ]; then
+        error "Не удалось определить ОС"
+    fi
+
     . /etc/os-release
+
     if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
         error "Поддерживаются только Ubuntu/Debian"
     fi
 
-    local avail_kb=$(df / | awk 'NR==2 {print $4}')
+    local avail_kb
+    avail_kb=$(df / | awk 'NR==2 {print $4}')
+
     local avail_gb=$((avail_kb / 1024 / 1024))
+
     if [ "$avail_gb" -lt 2 ]; then
         error "Недостаточно места. Доступно: ${avail_gb}GB, нужно 2GB"
     fi
 
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         warn "Сервис $SERVICE_NAME уже запущен"
+
         if ! confirm "Перезапустить его после деплоя?"; then
             error "Деплой отменён."
         fi
@@ -108,9 +138,12 @@ preflight_checks() {
 
 install_dependencies() {
     log "Установка системных зависимостей (PostgreSQL + Redis)..."
+
     apt-get update -qq || error "Не удалось обновить список пакетов"
 
-    local install_log=$(mktemp)
+    local install_log
+    install_log=$(mktemp)
+
     if ! apt-get install -y \
         python3 python3-venv python3-pip python3-dev \
         git curl wget rsync build-essential cron logrotate \
@@ -118,9 +151,12 @@ install_dependencies() {
         postgresql postgresql-contrib libpq-dev \
         redis-server \
         > "$install_log" 2>&1; then
-        error "Ошибка apt. Лог: $install_log\n$(tail -20 "$install_log")"
+        error "Ошибка apt. Лог: $install_log
+$(tail -20 "$install_log")"
     fi
+
     rm -f "$install_log"
+
     success "Системные зависимости установлены"
 
     if ! id "projectx" &>/dev/null; then
@@ -131,14 +167,15 @@ install_dependencies() {
 
 setup_postgresql() {
     log "Настройка базы данных PostgreSQL..."
-    
+
     if ! systemctl is-active --quiet postgresql; then
         systemctl start postgresql
         systemctl enable postgresql
     fi
 
-    # 🔥 КРИТИЧЕСКИЙ ФИКС: Определяем реальный порт, на котором работает PG
-    local PG_PORT=$(sudo -u postgres psql -tAc "SHOW port;" 2>/dev/null | tr -d '[:space:]')
+    local PG_PORT
+    PG_PORT=$(sudo -u postgres psql -tAc "SHOW port;" 2>/dev/null | tr -d '[:space:]')
+
     if [[ -z "$PG_PORT" || ! "$PG_PORT" =~ ^[0-9]+$ ]]; then
         PG_PORT=5432
         warn "Не удалось получить порт из PostgreSQL, предполагается стандартный: $PG_PORT"
@@ -146,28 +183,40 @@ setup_postgresql() {
         log "PostgreSQL работает на порту: $PG_PORT"
     fi
 
-    # Ждём, пока PostgreSQL физически откроет порт
     local wait_count=0
+
     while ! ss -tlnp | grep -qE ":${PG_PORT}\s"; do
         sleep 1
         wait_count=$((wait_count + 1))
+
         if [ $wait_count -ge 15 ]; then
             error "PostgreSQL не слушает порт $PG_PORT после 15 секунд ожидания. Проверьте: journalctl -u postgresql"
         fi
     done
+
     success "PostgreSQL запущен и слушает порт $PG_PORT"
+
+    PG_PASS_FILE="$(mktemp /tmp/projectx_pg_pass.XXXXXX)"
+    chmod 600 "$PG_PASS_FILE"
 
     if sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='projectx_bot'" | grep -q 1; then
         warn "База данных projectx_bot уже существует. Пропускаем создание."
-        read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD; echo ""
+
+        read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD
+        echo ""
+
         [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
-        echo "$DB_PASSWORD" > /tmp/.pg_pass
-        chmod 600 /tmp/.pg_pass
+
+        printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
+
         return
     fi
 
     log "Создание пользователя и базы данных PostgreSQL..."
-    read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD; echo ""
+
+    read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD
+    echo ""
+
     [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
 
     if [[ ! "$DB_PASSWORD" =~ ^[a-zA-Z0-9_@#%^*+=-]{8,}$ ]]; then
@@ -177,30 +226,35 @@ setup_postgresql() {
     sudo -u postgres psql -v ON_ERROR_STOP=1 <<EOF
 DO \$\$
 BEGIN
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
-        CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
-    END IF;
+   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
+      CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
+   END IF;
 END
 \$\$;
+
 CREATE DATABASE projectx_bot OWNER projectx;
 GRANT ALL PRIVILEGES ON DATABASE projectx_bot TO projectx;
 EOF
 
-    if [[ $? -ne 0 ]]; then error "Не удалось создать БД."; fi
+    if [[ $? -ne 0 ]]; then
+        error "Не удалось создать БД."
+    fi
+
     success "Пользователь projectx и база projectx_bot созданы"
-    echo "$DB_PASSWORD" > /tmp/.pg_pass
-    chmod 600 /tmp/.pg_pass
+
+    printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
 }
 
 setup_redis() {
     log "Настройка Redis для FSM Storage..."
-    
+
     if ! systemctl is-active --quiet redis-server; then
         systemctl start redis-server || true
         systemctl enable redis-server || true
     fi
 
     local redis_conf="/etc/redis/redis.conf"
+
     if [[ -f "$redis_conf" ]]; then
         cp "$redis_conf" "$redis_conf.backup-$(date +%s)" 2>/dev/null || true
 
@@ -227,11 +281,13 @@ setup_redis() {
     fi
 
     local redis_check=0
+
     for i in $(seq 1 10); do
         if redis-cli ping 2>/dev/null | grep -q "PONG"; then
             redis_check=1
             break
         fi
+
         sleep 1
     done
 
@@ -244,85 +300,119 @@ setup_redis() {
 
 verify_infrastructure() {
     log "Финальная проверка доступности БД и Redis..."
-    
-    local PG_PORT=$(sudo -u postgres psql -tAc "SHOW port;" 2>/dev/null | tr -d '[:space:]')
-    if [[ -z "$PG_PORT" ]]; then PG_PORT=5432; fi
-    
+
+    local PG_PORT
+    PG_PORT=$(sudo -u postgres psql -tAc "SHOW port;" 2>/dev/null | tr -d '[:space:]')
+
+    if [[ -z "$PG_PORT" ]]; then
+        PG_PORT=5432
+    fi
+
     if ! ss -tlnp | grep -qE ":${PG_PORT}\s"; then
         error "PostgreSQL не слушает порт $PG_PORT. Проверьте: journalctl -u postgresql"
     fi
+
     success "PostgreSQL слушает порт $PG_PORT"
 
     if ! redis-cli ping 2>/dev/null | grep -q "PONG"; then
         error "Redis не отвечает на ping."
     fi
+
     success "Redis полностью функционален"
 }
 
 setup_firewall() {
     log "Настройка UFW firewall..."
-    if ! command -v ufw &>/dev/null; then warn "UFW не установлен, пропуск"; return; fi
+
+    if ! command -v ufw &>/dev/null; then
+        warn "UFW не установлен, пропуск"
+        return
+    fi
 
     local SSH_PORT=""
+
     if [ -f /etc/ssh/sshd_config ]; then
         SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
     fi
+
     if [[ -z "$SSH_PORT" || ! "$SSH_PORT" =~ ^[0-9]+$ ]]; then
         SSH_PORT=22
         warn "Не удалось определить порт SSH, используется: $SSH_PORT"
     fi
 
     mkdir -p "$SNAPSHOT_DIR"
+
     ufw status numbered > "$SNAPSHOT_DIR/ufw-before-$(date +%s).txt" 2>&1 || true
 
-    if ! confirm "Применить правила UFW (SSH:$SSH_PORT, HTTP:80, HTTPS:443)?"; then return; fi
+    if ! confirm "Применить правила UFW (SSH:$SSH_PORT, HTTP:80, HTTPS:443)?"; then
+        return
+    fi
 
     ufw allow "$SSH_PORT"/tcp comment 'SSH' >/dev/null 2>&1 || true
     ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
     ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
     ufw deny 8080/tcp comment 'Webhook Internal' >/dev/null 2>&1 || true
     ufw deny 6379/tcp comment 'Redis (blocked external)' >/dev/null 2>&1 || true
+
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
+
     ufw --force enable >/dev/null 2>&1 || error "Ошибка включения UFW"
 
     success "UFW настроен безопасно"
 }
+
 migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
         log "Синхронизация проекта..."
+
         mkdir -p "$PROJECT_DIR"
+
         rsync -a --delete \
-            --exclude='.env' --exclude='*.db*' --exclude='.git' \
-            --exclude='venv/' --exclude='__pycache__/' \
+            --exclude='.env' \
+            --exclude='*.db*' \
+            --exclude='.git' \
+            --exclude='venv/' \
+            --exclude='__pycache__/' \
             "$START_DIR/" "$PROJECT_DIR/" || error "Ошибка rsync"
     fi
+
     cd "$PROJECT_DIR"
 }
 
 setup_venv() {
     log "Настройка Python VENV..."
+
     [ ! -d "$VENV_DIR" ] && python3 -m venv "$VENV_DIR"
+
     source "$VENV_DIR/bin/activate"
+
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
 
     local pip_log="$PROJECT_DIR/pip-install.log"
+
     if ! pip install -r "$PROJECT_DIR/requirements.txt" > "$pip_log" 2>&1; then
         error "Ошибка установки pip. Лог: $pip_log"
     fi
+
     success "Зависимости Python установлены"
 }
 
 setup_env() {
     log "Настройка .env файла..."
-    
+
     if [ -f "$PROJECT_DIR/.env" ]; then
         cp "$PROJECT_DIR/.env" "$PROJECT_DIR/.env.backup-$(date +%s)" 2>/dev/null || true
-        if ! confirm "Перезаписать .env новым конфигуратором?"; then return; fi
+
+        if ! confirm "Перезаписать .env новым конфигуратором?"; then
+            return
+        fi
     fi
 
     echo -e "${BLUE}[1/4]${NC} Telegram Bot Token"
-    read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN; echo ""
+    read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN
+    echo ""
+
     [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
 
     echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
@@ -334,39 +424,55 @@ setup_env() {
 
     echo -e "${BLUE}[4/4]${NC} Platega Merchant ID (Enter для пропуска)"
     read -p "Введите ID: " PLATEGA_MERCHANT_ID
+
     PLATEGA_SECRET=""
     PLATEGA_CALLBACK_DOMAIN=""
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
-        read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET; echo ""
+        read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET
+        echo ""
+
         [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET обязателен"
+
         read -p "Введите домен для callback: " PLATEGA_CALLBACK_DOMAIN
+
         [ -z "$PLATEGA_CALLBACK_DOMAIN" ] && error "Домен обязателен"
     fi
 
     local EXISTING_KEY=""
+
     if [ -f "$PROJECT_DIR/.env" ]; then
         EXISTING_KEY=$(grep "^DB_ENCRYPTION_KEY=" "$PROJECT_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'")
     fi
 
     local DB_KEY
+
     if [ -n "$EXISTING_KEY" ]; then
         DB_KEY="$EXISTING_KEY"
     else
         DB_KEY=$("$VENV_DIR/bin/python" -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
     fi
 
-    if [ ! -f /tmp/.pg_pass ]; then
-        read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD; echo ""
+    local DB_PASSWORD
+
+    if [[ -n "${PG_PASS_FILE:-}" && -f "$PG_PASS_FILE" ]]; then
+        DB_PASSWORD=$(cat "$PG_PASS_FILE")
+        rm -f "$PG_PASS_FILE"
+        PG_PASS_FILE=""
     else
-        DB_PASSWORD=$(cat /tmp/.pg_pass)
-        rm -f /tmp/.pg_pass
+        read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD
+        echo ""
     fi
 
-    local PG_PORT=$(sudo -u postgres psql -tAc "SHOW port;" 2>/dev/null | tr -d '[:space:]')
-    if [[ -z "$PG_PORT" ]]; then PG_PORT=5432; fi
+    local PG_PORT
+    PG_PORT=$(sudo -u postgres psql -tAc "SHOW port;" 2>/dev/null | tr -d '[:space:]')
+
+    if [[ -z "$PG_PORT" ]]; then
+        PG_PORT=5432
+    fi
 
     : > "$PROJECT_DIR/.env"
+
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
@@ -377,6 +483,7 @@ setup_env() {
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         local CALLBACK_URL="https://${PLATEGA_CALLBACK_DOMAIN}/webhook/platega"
+
         write_env_var "PLATEGA_MERCHANT_ID" "$PLATEGA_MERCHANT_ID"
         write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
         write_env_var "PLATEGA_CALLBACK_URL" "$CALLBACK_URL"
@@ -385,34 +492,67 @@ setup_env() {
 
     chown projectx:projectx "$PROJECT_DIR/.env"
     chmod 600 "$PROJECT_DIR/.env"
+
     success ".env защищён (Порт БД: $PG_PORT)"
 }
 
 verify_permissions() {
     chown -R projectx:projectx "$PROJECT_DIR"
+
     find "$PROJECT_DIR" -type d -exec chmod 750 {} \;
     find "$PROJECT_DIR" -type f -name "*.py" -exec chmod 640 {} \;
     find "$PROJECT_DIR" -type f -name "*.txt" -exec chmod 640 {} \;
     find "$PROJECT_DIR" -type f -name "*.sh" -exec chmod 750 {} \;
+
     if [ -d "$VENV_DIR/bin" ]; then
         find "$VENV_DIR/bin" -type f -exec chmod 750 {} \;
     fi
+
     chmod 600 "$PROJECT_DIR/.env"
+
     success "Права доступа установлены"
+}
+
+run_migrations() {
+    log "Применение миграций Alembic..."
+
+    cd "$PROJECT_DIR"
+
+    if [[ ! -f "$PROJECT_DIR/alembic.ini" ]]; then
+        warn "alembic.ini не найден. Пропускаем миграции."
+        return 0
+    fi
+
+    if [[ ! -x "$VENV_DIR/bin/alembic" ]]; then
+        warn "Alembic не установлен в venv. Пропускаем миграции."
+        return 0
+    fi
+
+    if ! runuser -u projectx -- "$VENV_DIR/bin/alembic" upgrade head >> "$LOG_FILE" 2>&1; then
+        warn "Ошибка применения миграций Alembic. Последние строки лога:"
+        tail -n 50 "$LOG_FILE" || true
+        return 1
+    fi
+
+    success "Миграции Alembic применены"
 }
 
 init_database() {
     log "Инициализация схемы БД PostgreSQL..."
+
     cd "$PROJECT_DIR"
+
     runuser -u projectx -- "$VENV_DIR/bin/python" -c "
 import asyncio
 from database.connection import init_db
+
 asyncio.run(init_db())
 " > /dev/null 2>&1 || warn "Инициализация отложена (выполнится при старте)"
 }
 
 setup_systemd() {
     log "Настройка systemd сервиса..."
+
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
     cat > "$SERVICE_FILE" << EOF
@@ -443,27 +583,41 @@ EOF
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+
     success "Systemd настроен"
 }
 
 setup_nginx_ssl() {
-    if ! grep -q "PLATEGA_CALLBACK_URL" "$PROJECT_DIR/.env" 2>/dev/null; then return; fi
-    local URL=$(grep "^PLATEGA_CALLBACK_URL=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
-    local DOMAIN=$(echo "$URL" | sed -E 's|https?://([^/:]+).*|\1|')
+    if ! grep -q "PLATEGA_CALLBACK_URL" "$PROJECT_DIR/.env" 2>/dev/null; then
+        return
+    fi
+
+    local URL
+    URL=$(grep "^PLATEGA_CALLBACK_URL=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
+
+    local DOMAIN
+    DOMAIN=$(echo "$URL" | sed -E 's|https?://([^/:]+).*|\1|')
+
     [ -z "$DOMAIN" ] && return
-    local WEBHOOK_PORT=$(grep "^PLATEGA_WEBHOOK_PORT=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
+
+    local WEBHOOK_PORT
+    WEBHOOK_PORT=$(grep "^PLATEGA_WEBHOOK_PORT=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
     WEBHOOK_PORT=${WEBHOOK_PORT:-8080}
 
     log "Настройка Nginx для $DOMAIN"
+
     rm -f /etc/nginx/sites-enabled/default
 
     cat > "/etc/nginx/sites-available/projectx" << NGINXEOF
 limit_req_zone \$binary_remote_addr zone=mylimit:10m rate=10r/s;
+
 server {
     listen 80;
     server_name $DOMAIN;
+
     location /webhook/platega {
         limit_req zone=mylimit burst=20 nodelay;
+
         proxy_pass http://127.0.0.1:${WEBHOOK_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -471,17 +625,22 @@ server {
         proxy_read_timeout 30s;
         client_max_body_size 1m;
     }
-    location / { return 404; }
+
+    location / {
+        return 404;
+    }
 }
 NGINXEOF
 
     ln -sf /etc/nginx/sites-available/projectx /etc/nginx/sites-enabled/
+
     if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx
         success "Nginx настроен"
     fi
 
     read -p "Email для SSL (certbot): " LE_EMAIL
+
     if ! timeout 120 certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" --redirect >/dev/null 2>&1; then
         warn "SSL не получен"
     fi
@@ -489,6 +648,7 @@ NGINXEOF
 
 setup_backup() {
     log "Настройка бэкапов..."
+
     mkdir -p "$BACKUP_DIR"
     chown projectx:projectx "$BACKUP_DIR"
 
@@ -496,59 +656,110 @@ setup_backup() {
 #!/bin/bash
 DIR="/root/backups/projectx"
 DATE=$(date +%Y%m%d_%H%M%S)
+
 if sudo -u postgres pg_dump -Fc projectx_bot | gzip > "$DIR/db_$DATE.sql.gz"; then
     echo "[$(date)] PostgreSQL backup created"
 fi
+
 cp /opt/projectx-bot/.env "$DIR/env_$DATE.bak" && gzip "$DIR/env_$DATE.bak"
+
 find "$DIR" -type f -mtime +30 -delete
 EOF
 
     chmod +x /usr/local/bin/projectx-backup.sh
+
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "0 3 * * * /usr/local/bin/projectx-backup.sh") | crontab -
+
     success "Автобэкапы настроены"
 }
 
 setup_monitoring() {
     log "Настройка Healthcheck..."
+
     cat > /usr/local/bin/projectx-healthcheck.sh << 'EOF'
 #!/bin/bash
+
 CRASH_FILE="/opt/projectx-bot/.crash-count"
+HEARTBEAT_FILE="/opt/projectx-bot/.heartbeat"
+MAX_AGE=300
+
 if [ "$(systemctl is-enabled projectx-bot 2>/dev/null)" = "enabled" ] && ! systemctl is-active --quiet projectx-bot; then
     COUNT=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
-    if [ "$COUNT" -ge 5 ]; then exit 0; fi
+
+    if [ "$COUNT" -ge 5 ]; then
+        exit 0
+    fi
+
     systemctl start projectx-bot
     echo $((COUNT + 1)) > "$CRASH_FILE"
-else
-    rm -f "$CRASH_FILE"
+
+    exit 0
+fi
+
+if systemctl is-active --quiet projectx-bot; then
+    NOW=$(date +%s)
+    HB=""
+
+    if [ -f "$HEARTBEAT_FILE" ]; then
+        HB=$(awk '{print $1}' "$HEARTBEAT_FILE" 2>/dev/null)
+    fi
+
+    if [[ "$HB" =~ ^[0-9]+$ ]]; then
+        AGE=$((NOW - HB))
+
+        if [ "$AGE" -gt "$MAX_AGE" ]; then
+            COUNT=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
+
+            if [ "$COUNT" -ge 5 ]; then
+                exit 0
+            fi
+
+            systemctl restart projectx-bot
+            echo $((COUNT + 1)) > "$CRASH_FILE"
+        else
+            rm -f "$CRASH_FILE"
+        fi
+    fi
 fi
 EOF
+
     chmod +x /usr/local/bin/projectx-healthcheck.sh
+
     (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "*/5 * * * * /usr/local/bin/projectx-healthcheck.sh") | crontab -
+
     success "Healthcheck настроен"
 }
 
 start_bot() {
     log "Запуск бота..."
+
     systemctl start "$SERVICE_NAME"
-    
+
     local wait_count=0
-    local max_wait=30 
+    local max_wait=30
+
     while [ $wait_count -lt $max_wait ]; do
         sleep 1
+
         if systemctl is-active --quiet "$SERVICE_NAME"; then
             success "Бот успешно запущен!"
             return 0
         fi
+
         wait_count=$((wait_count + 1))
     done
 
     journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+
     rollback "start_bot" "Бот не смог запуститься"
 }
 
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v6.3 (Hardened)${NC}\n"
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v7.0 (Alembic + Hardened)${NC}
+"
+
     mkdir -p /var/log "$SNAPSHOT_DIR"
+
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 
     preflight_checks      || rollback "preflight_checks" "Pre-flight failed"
@@ -561,6 +772,7 @@ main() {
     setup_venv            || rollback "setup_venv" "Venv failed"
     setup_env             || rollback "setup_env" "Env failed"
     verify_permissions    || rollback "verify_permissions" "Permissions failed"
+    run_migrations        || rollback "run_migrations" "Alembic migrations failed"
     init_database         || rollback "init_database" "DB init failed"
     setup_systemd         || rollback "setup_systemd" "Systemd failed"
     setup_nginx_ssl       || rollback "setup_nginx_ssl" "Nginx failed"
@@ -572,12 +784,32 @@ main() {
 }
 
 case "${1:-}" in
-    --status)  systemctl status "$SERVICE_NAME" --no-pager | head -20 ;;
-    --logs)    journalctl -u "$SERVICE_NAME" -f ;;
-    --restart) systemctl restart "$SERVICE_NAME" ;;
-    --stop)    systemctl stop "$SERVICE_NAME" ;;
-    --start)   systemctl start "$SERVICE_NAME" ;;
-    --backup)  /usr/local/bin/projectx-backup.sh ;;
-    --help|-h) echo "Использование: ./deploy.sh [--status|--logs|--restart|--stop|--start|--backup]" ;;
-    *)         main ;;
+    --status)
+        systemctl status "$SERVICE_NAME" --no-pager | head -20
+        ;;
+    --logs)
+        journalctl -u "$SERVICE_NAME" -f
+        ;;
+    --restart)
+        systemctl restart "$SERVICE_NAME"
+        ;;
+    --stop)
+        systemctl stop "$SERVICE_NAME"
+        ;;
+    --start)
+        systemctl start "$SERVICE_NAME"
+        ;;
+    --backup)
+        /usr/local/bin/projectx-backup.sh
+        ;;
+    --migrate)
+        cd "$PROJECT_DIR"
+        runuser -u projectx -- "$VENV_DIR/bin/alembic" upgrade head
+        ;;
+    --help|-h)
+        echo "Использование: ./deploy.sh [--status|--logs|--restart|--stop|--start|--backup|--migrate]"
+        ;;
+    *)
+        main
+        ;;
 esac

@@ -52,14 +52,18 @@ from utils.telegram import render_hub, safe, send_hub_invoice
 router = Router()
 logger = logging.getLogger(__name__)
 
-
 PAYMENT_MANUAL_REVIEW_TEXT = (
-    "💳 <b>Оплата получена</b>\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "Мы проверяем платёж.\n"
+    "💳 <b>Оплата получена</b>
+"
+    "━━━━━━━━━━━━━━━━━━━━
+"
+    "Мы проверяем платёж.
+"
     "Если доступ не активировался в течение нескольких минут, "
-    "напишите в поддержку.\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
+    "напишите в поддержку.
+"
+    "━━━━━━━━━━━━━━━━━━━━
+"
     "<i>Обычно проверка занимает не более 5 минут.</i>"
 )
 
@@ -108,6 +112,20 @@ async def hub_menu_payment(
     await state.clear()
 
     if not db_user:
+        return
+
+    if session is None:
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="back_to_main_menu",
+        )
         return
 
     is_active = await _is_subscription_active(db_user)
@@ -208,6 +226,21 @@ async def show_tariff_showcase_callback(
     session: AsyncSession,
 ) -> None:
     await callback.answer()
+
+    if session is None:
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="back_to_main_menu",
+        )
+        return
+
     await _show_showcase(callback, session)
 
 
@@ -217,6 +250,20 @@ async def select_tariff_type(
     session: AsyncSession,
 ) -> None:
     await callback.answer()
+
+    if session is None:
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="payment_showcase",
+        )
+        return
 
     device_limit = int(callback.data.split(":")[1])
 
@@ -262,6 +309,20 @@ async def show_quick_renew(
 ) -> None:
     await callback.answer()
 
+    if session is None:
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="menu_subscription",
+        )
+        return
+
     tariffs = await get_active_tariffs(session)
 
     current_limit = db_user.device_limit
@@ -306,6 +367,20 @@ async def show_change_tariff(
 ) -> None:
     await callback.answer()
 
+    if session is None:
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="menu_subscription",
+        )
+        return
+
     tariffs = await get_active_tariffs(session)
 
     if not tariffs:
@@ -349,6 +424,22 @@ async def select_tariff(
     db_user=None,
     session: AsyncSession = None,
 ) -> None:
+    if session is None:
+        await callback.answer()
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await callback.answer()
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="payment_showcase",
+        )
+        return
+
     tariff_id = int(callback.data.split(":")[1])
 
     tariff = await get_tariff_by_id(session, tariff_id)
@@ -410,35 +501,42 @@ async def pay_stars(
     db_user=None,
     session: AsyncSession = None,
 ) -> None:
+    if session is None:
+        await callback.answer()
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await callback.answer()
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="menu_subscription",
+        )
+        return
+
+    tariff_id = int(callback.data.split(":")[1])
+
+    tariff = await get_tariff_by_id(session, tariff_id)
+
+    if not tariff or not db_user:
+        await callback.answer()
+        return
+
+    if not tariff.is_active:
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            texts.ERROR_TARIFF_UNAVAILABLE,
+            get_back_button(f"select_tariff:{tariff_id}"),
+        )
+        await callback.answer()
+        return
+
     try:
         await callback.answer("💳 Отправляю инвойс...")
-
-        tariff_id = int(callback.data.split(":")[1])
-
-        tariff = await get_tariff_by_id(session, tariff_id)
-
-        if not tariff or not db_user:
-            return
-
-        if not tariff.is_active:
-            await render_hub(
-                callback.bot,
-                callback.message.chat.id,
-                texts.ERROR_TARIFF_UNAVAILABLE,
-                get_back_button(f"select_tariff:{tariff_id}"),
-            )
-            return
-
-        if not await MaintenanceService.can_user_perform_action(
-            session,
-            callback.from_user.id,
-        ):
-            await _render_maintenance(
-                callback,
-                session,
-                back_to=f"select_tariff:{tariff_id}",
-            )
-            return
 
         payment = await create_payment(
             session=session,
@@ -534,7 +632,10 @@ async def process_pre_checkout(
     - сумма платежа совпадает с тарифом.
     """
 
-    async def _validate(pre_checkout_query: PreCheckoutQuery, db_session: AsyncSession):
+    async def _validate(
+        pre_checkout_query: PreCheckoutQuery,
+        db_session: AsyncSession,
+    ):
         payload = pre_checkout_query.invoice_payload
 
         if not payload or not payload.startswith("stars_payment:"):
@@ -928,6 +1029,22 @@ async def pay_sbp(
     state: FSMContext,
     session: AsyncSession = None,
 ) -> None:
+    if session is None:
+        await callback.answer()
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await callback.answer()
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="menu_subscription",
+        )
+        return
+
     try:
         await callback.answer("⏳ Создаю платеж...")
 
@@ -960,17 +1077,6 @@ async def pay_sbp(
             await callback.answer(
                 texts.ERROR_USER_NOT_FOUND,
                 show_alert=True,
-            )
-            return
-
-        if not await MaintenanceService.can_user_perform_action(
-            session,
-            callback.from_user.id,
-        ):
-            await _render_maintenance(
-                callback,
-                session,
-                back_to=f"select_tariff:{tariff_id}",
             )
             return
 

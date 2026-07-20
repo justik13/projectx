@@ -3,6 +3,7 @@ import logging
 from datetime import timedelta
 from typing import Optional
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.constants import (
@@ -10,7 +11,7 @@ from bot.constants import (
     PERMANENT_END_DATE,
 )
 from bot.middlewares.user_context import invalidate_user_cache
-from database.models import User
+from database.models import User, VPNProfile
 from database.repositories.profiles_repo import (
     get_user_profiles,
     get_user_profiles_count,
@@ -19,7 +20,6 @@ from database.repositories.servers_repo import get_server_by_id
 from database.repositories.users_repo import (
     create_user,
     get_user_by_telegram_id,
-    update_user,
 )
 from services.amnezia_client import AmneziaClient
 from utils.datetime_helpers import is_expired, now_utc
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class SubscriptionService:
+
     @staticmethod
     async def check_access(
         session: AsyncSession,
@@ -182,20 +183,29 @@ class SubscriptionService:
 
         now = now_utc()
 
-        current_end = (
-            user.subscription_end
-            if (
-                user.subscription_end
-                and user.subscription_end > now
-            )
-            else now
+        had_active_subscription = bool(
+            user.subscription_end and user.subscription_end > now
         )
 
-        new_end = (
-            PERMANENT_END_DATE
-            if days >= PERMANENT_SUBSCRIPTION_DAYS
-            else current_end + timedelta(days=days)
-        )
+        # Если days == 0 и активной подписки нет,
+        # не делаем подписку "активной до сейчас".
+        #
+        # Это нужно для сценария админской смены тарифа без продления:
+        # тариф/лимит можно поменять, но доступ не должен внезапно стать активным.
+        if days == 0 and not had_active_subscription:
+            new_end = user.subscription_end
+        else:
+            current_end = (
+                user.subscription_end
+                if had_active_subscription
+                else now
+            )
+
+            new_end = (
+                PERMANENT_END_DATE
+                if days >= PERMANENT_SUBSCRIPTION_DAYS
+                else current_end + timedelta(days=days)
+            )
 
         user.subscription_end = new_end
 
@@ -233,43 +243,77 @@ class SubscriptionService:
 
         invalidate_user_cache(telegram_id)
 
-        expires_ts = await SubscriptionService.get_expires_timestamp(
-            user,
+        # После изменения подписки синхронизируем статус устройств:
+        # - если доступ активен и пользователь не забанен — устройства активны;
+        # - если доступ неактивен или пользователь забанен — устройства неактивны.
+        await SubscriptionService._sync_access_state(session, user)
+
+        return user
+
+    @staticmethod
+    async def _sync_access_state(
+        session: AsyncSession,
+        user: User,
+    ) -> None:
+        """
+        Синхронизирует is_active у профилей в БД и статус на сервере.
+
+        Правила:
+        - если подписка активна и пользователь не забанен:
+          профили активны;
+        - если подписка истекла или пользователь забанен:
+          профили неактивны.
+
+        Это решает проблему, когда после оплаты профили оставались
+        is_active=false в БД, и traffic worker позже отключал доступ.
+        """
+        target_active = bool(
+            user.subscription_end
+            and not is_expired(user.subscription_end)
+            and not user.is_banned
         )
+
+        profiles = await get_user_profiles(session, user.id)
+
+        if not profiles:
+            return
+
+        profile_ids = [profile.id for profile in profiles]
+
+        await session.execute(
+            update(VPNProfile)
+            .where(VPNProfile.id.in_(profile_ids))
+            .values(is_active=target_active)
+        )
+
+        await session.flush()
+
+        expires_ts = (
+            await SubscriptionService.get_expires_timestamp(user)
+            if target_active
+            else None
+        )
+
+        target_status = "active" if target_active else "disabled"
 
         asyncio.create_task(
             SubscriptionService._sync_expires_to_servers(
                 user.id,
                 expires_ts,
+                target_status,
             )
         )
-
-        return user
 
     @staticmethod
     async def _sync_expires_to_servers(
         user_id: int,
         expires_ts: Optional[int],
+        target_status: str = "active",
     ):
         from database.connection import session_scope
 
         try:
             async with session_scope() as session:
-                user = await get_user_by_telegram_id(
-                    session,
-                    user_id,
-                )
-
-                if not user:
-                    return
-
-                target_status = "active"
-
-                if user.is_banned or is_expired(
-                    user.subscription_end
-                ):
-                    target_status = "disabled"
-
                 profiles = await get_user_profiles(
                     session,
                     user_id,
@@ -322,7 +366,7 @@ class SubscriptionService:
                     )
 
                     logger.info(
-                        "expiresAt sync: %s/%s servers updated "
+                        "Access state sync: %s/%s servers updated "
                         "for user_id=%s, status=%s",
                         success,
                         len(tasks),
@@ -332,7 +376,7 @@ class SubscriptionService:
 
         except Exception as e:
             logger.error(
-                "expiresAt sync failed for user_id=%s: %s",
+                "Access state sync failed for user_id=%s: %s",
                 user_id,
                 e,
                 exc_info=True,

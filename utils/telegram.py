@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 # Основной источник истины для hub message id теперь PostgreSQL.
 # Это нужно, чтобы после рестарта бота старые хабы всё равно удалялись.
 _hub_cache = TTLCache(maxsize=HUB_CACHE_MAX_SIZE, ttl=HUB_CACHE_TTL)
-
 _last_cleanup_time: float = 0.0
 _CLEANUP_INTERVAL = 3600.0
 
@@ -65,20 +64,39 @@ def _cleanup_render_locks(now: float) -> None:
         )
 
 
-async def _safe_delete_batch(bot, chat_id: int, msg_ids: List[int]):
+async def _safe_delete_batch(
+    bot,
+    chat_id: int,
+    msg_ids: List[int],
+) -> tuple[list[int], list[int]]:
+    """
+    Пытается удалить сообщения.
+
+    Возвращает:
+    - deleted_ids: успешно удалённые или уже отсутствующие сообщения;
+    - failed_ids: сообщения, которые не удалось удалить из-за временной ошибки.
+    """
+    deleted_ids: list[int] = []
+    failed_ids: list[int] = []
+
     for msg_id in msg_ids:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            deleted_ids.append(msg_id)
         except TelegramBadRequest as e:
             err_str = str(e).lower()
 
+            # Если сообщения уже нет или identifier невалиден,
+            # считаем его удалённым и убираем из хранилища.
             if (
                 "message to delete not found" in err_str
-                or "message can't be deleted" in err_str
+                or "message identifier is not valid" in err_str
                 or "chat not found" in err_str
+                or "message can't be deleted" in err_str
             ):
-                pass
+                deleted_ids.append(msg_id)
             else:
+                failed_ids.append(msg_id)
                 logger.warning(
                     "TelegramBadRequest on delete_message %s in %s: %s",
                     msg_id,
@@ -86,12 +104,15 @@ async def _safe_delete_batch(bot, chat_id: int, msg_ids: List[int]):
                     e,
                 )
         except Exception as e:
+            failed_ids.append(msg_id)
             logger.error(
                 "Unexpected error deleting message %s in %s: %s",
                 msg_id,
                 chat_id,
                 e,
             )
+
+    return deleted_ids, failed_ids
 
 
 def safe(value: Optional[str]) -> str:
@@ -104,7 +125,7 @@ def safe(value: Optional[str]) -> str:
 def _maybe_cleanup_cache() -> None:
     global _last_cleanup_time
 
-    now = asyncio.get_event_loop().time()
+    now = time.monotonic()
 
     if now - _last_cleanup_time < _CLEANUP_INTERVAL:
         return
@@ -136,7 +157,7 @@ async def _load_hub_ids_from_db(chat_id: int) -> List[int]:
     """
     Загружает сохранённые hub message id из PostgreSQL.
 
-    Если БД временно недоступна, используем in-memory fallback.
+    Если БД временно недоступна, возвращает пустой список.
     """
     cached = _hub_cache.get(chat_id)
 
@@ -147,10 +168,9 @@ async def _load_hub_ids_from_db(chat_id: int) -> List[int]:
         async with session_scope() as session:
             ids = await hub_repo.get_hub_message_ids(session, chat_id)
 
-            if ids:
-                _hub_cache[chat_id] = {"ids": list(ids)}
+            _hub_cache[chat_id] = {"ids": list(ids)}
 
-            return ids
+            return list(ids)
 
     except Exception as e:
         logger.warning(
@@ -159,7 +179,54 @@ async def _load_hub_ids_from_db(chat_id: int) -> List[int]:
             e,
         )
 
+        _hub_cache[chat_id] = {"ids": []}
+
         return []
+
+
+async def get_hub_ids(chat_id: int) -> List[int]:
+    """
+    Асинхронный публичный метод получения hub id.
+
+    Использовать во всех пользовательских сценариях.
+    """
+    return await _load_hub_ids_from_db(chat_id)
+
+
+def get_cached_hub_ids(chat_id: int) -> List[int]:
+    """
+    Синхронный хелпер только для совместимости.
+
+    Основной метод — async get_hub_ids().
+    """
+    cached = _hub_cache.get(chat_id)
+
+    if cached and "ids" in cached:
+        return list(cached["ids"])
+
+    return []
+
+
+def _add_id_to_memory(chat_id: int, message_id: int) -> None:
+    cached = _hub_cache.get(chat_id)
+
+    if cached and "ids" in cached:
+        if message_id not in cached["ids"]:
+            cached["ids"].append(message_id)
+    else:
+        _hub_cache[chat_id] = {"ids": [message_id]}
+
+
+def _remove_ids_from_memory(chat_id: int, message_ids: List[int]) -> None:
+    cached = _hub_cache.get(chat_id)
+
+    if not cached or "ids" not in cached:
+        return
+
+    old_set = set(message_ids)
+    cached["ids"] = [
+        mid for mid in cached["ids"] if mid not in old_set
+    ]
 
 
 async def _store_hub_id_in_db(chat_id: int, message_id: int) -> None:
@@ -176,25 +243,26 @@ async def _store_hub_id_in_db(chat_id: int, message_id: int) -> None:
             e,
         )
 
-    cached = _hub_cache.get(chat_id)
-
-    if cached and "ids" in cached:
-        if message_id not in cached["ids"]:
-            cached["ids"].append(message_id)
-    else:
-        _hub_cache[chat_id] = {"ids": [message_id]}
+    _add_id_to_memory(chat_id, message_id)
 
 
-async def _remove_hub_ids_from_db(chat_id: int, message_ids: List[int]) -> None:
+async def _remove_hub_ids_from_db(
+    chat_id: int,
+    message_ids: List[int],
+) -> None:
     """
-    Удаляет hub message id из PostgreSQL после удаления сообщений.
+    Удаляет hub message id из PostgreSQL.
     """
     if not message_ids:
         return
 
     try:
         async with session_scope() as session:
-            await hub_repo.remove_hub_message_ids(session, chat_id, message_ids)
+            await hub_repo.remove_hub_message_ids(
+                session,
+                chat_id,
+                message_ids,
+            )
     except Exception as e:
         logger.warning(
             "Failed to remove hub ids from DB for chat %s: %s",
@@ -202,43 +270,58 @@ async def _remove_hub_ids_from_db(chat_id: int, message_ids: List[int]) -> None:
             e,
         )
 
-    cached = _hub_cache.get(chat_id)
-
-    if cached and "ids" in cached:
-        old_set = set(message_ids)
-        cached["ids"] = [
-            mid for mid in cached["ids"] if mid not in old_set
-        ]
+    _remove_ids_from_memory(chat_id, message_ids)
 
 
-def get_cached_hub_ids(chat_id: int) -> List[int]:
+async def _delete_hub_messages(
+    bot,
+    chat_id: int,
+    msg_ids: List[int],
+) -> List[int]:
     """
-    Синхронный хелпер для мест, где нужно быстро получить текущие hub id.
+    Внутренний метод удаления хабов без блокировки.
 
-    Основной источник — PostgreSQL, но этот метод возвращает in-memory cache.
-    Cache заполняется во время render_hub / append_hub_*.
+    Используется внутри render_hub/send_hub_*, где блокировка уже взята.
     """
-    cached = _hub_cache.get(chat_id)
-
-    if cached and "ids" in cached:
-        return list(cached["ids"])
-
-    return []
-
-
-async def delete_hub_ids(bot, chat_id: int, msg_ids: List[int]):
     if not msg_ids:
-        return
+        return []
 
-    await _safe_delete_batch(bot, chat_id, msg_ids)
+    deleted_ids, failed_ids = await _safe_delete_batch(
+        bot,
+        chat_id,
+        msg_ids,
+    )
+
+    if deleted_ids:
+        await _remove_hub_ids_from_db(chat_id, deleted_ids)
+
+    if failed_ids:
+        logger.warning(
+            "Failed to delete %s hub messages in chat %s. "
+            "They will be retried on next hub render.",
+            len(failed_ids),
+            chat_id,
+        )
+
+    return failed_ids
+
+
+async def delete_hub_ids(bot, chat_id: int, msg_ids: List[int]) -> List[int]:
+    """
+    Публичный метод удаления хабов.
+
+    Берёт блокировку чата, чтобы не конкурировать с render_hub.
+    """
+    if not msg_ids:
+        return []
 
     lock = _get_hub_render_lock(chat_id)
 
     async with lock:
-        await _remove_hub_ids_from_db(chat_id, msg_ids)
+        return await _delete_hub_messages(bot, chat_id, msg_ids)
 
 
-async def clear_and_delete_hub(bot, chat_id: int):
+async def clear_and_delete_hub(bot, chat_id: int) -> None:
     _maybe_cleanup_cache()
 
     lock = _get_hub_render_lock(chat_id)
@@ -246,16 +329,8 @@ async def clear_and_delete_hub(bot, chat_id: int):
     async with lock:
         db_ids = await _load_hub_ids_from_db(chat_id)
 
-        cached = _hub_cache.get(chat_id)
-        cache_ids = cached["ids"] if cached and "ids" in cached else []
-
-        all_ids = list(dict.fromkeys(db_ids + cache_ids))
-
-        if all_ids:
-            await _safe_delete_batch(bot, chat_id, all_ids)
-            await _remove_hub_ids_from_db(chat_id, all_ids)
-
-        _hub_cache.pop(chat_id, None)
+        if db_ids:
+            await _delete_hub_messages(bot, chat_id, db_ids)
 
 
 async def render_hub(
@@ -292,8 +367,7 @@ async def render_hub(
         )
 
         if old_ids:
-            await _safe_delete_batch(bot, chat_id, old_ids)
-            await _remove_hub_ids_from_db(chat_id, old_ids)
+            await _delete_hub_messages(bot, chat_id, old_ids)
 
         await _store_hub_id_in_db(chat_id, msg.message_id)
 
@@ -324,8 +398,7 @@ async def send_hub_photo(
         )
 
         if old_ids:
-            await _safe_delete_batch(bot, chat_id, old_ids)
-            await _remove_hub_ids_from_db(chat_id, old_ids)
+            await _delete_hub_messages(bot, chat_id, old_ids)
 
         await _store_hub_id_in_db(chat_id, msg.message_id)
 
@@ -356,8 +429,7 @@ async def send_hub_document(
         )
 
         if old_ids:
-            await _safe_delete_batch(bot, chat_id, old_ids)
-            await _remove_hub_ids_from_db(chat_id, old_ids)
+            await _delete_hub_messages(bot, chat_id, old_ids)
 
         await _store_hub_id_in_db(chat_id, msg.message_id)
 
@@ -383,8 +455,7 @@ async def send_hub_invoice(
         msg = await bot.send_invoice(chat_id=chat_id, **kwargs)
 
         if old_ids:
-            await _safe_delete_batch(bot, chat_id, old_ids)
-            await _remove_hub_ids_from_db(chat_id, old_ids)
+            await _delete_hub_messages(bot, chat_id, old_ids)
 
         await _store_hub_id_in_db(chat_id, msg.message_id)
 

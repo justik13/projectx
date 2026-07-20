@@ -1,15 +1,16 @@
 import logging
 from contextlib import asynccontextmanager
+from typing import Awaitable, Callable
 
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
     create_async_engine,
+    async_sessionmaker,
+    AsyncSession,
 )
 
 from config.settings import get_settings
-from database.models import Base, MaintenanceMode, Tariff
+from database.models import Base, Tariff, MaintenanceMode
 
 _engine = None
 _sessionmaker = None
@@ -212,6 +213,51 @@ async def get_session() -> AsyncSession:
     return _sessionmaker()
 
 
+async def _run_post_commit_tasks(session: AsyncSession) -> None:
+    """
+    Выполняет задачи, которые должны запуститься только после commit.
+
+    Это используется для отправки алертов админам и клиентским уведомлениям,
+    чтобы они не отправлялись до того, как данные реально сохранены в БД.
+    """
+    tasks: list[Callable[[], Awaitable[None]]] = session.info.pop(
+        "post_commit_tasks",
+        [],
+    )
+
+    if not tasks:
+        return
+
+    for task in tasks:
+        try:
+            await task()
+        except Exception as e:
+            logging.error(
+                "Post-commit task failed: %s",
+                e,
+                exc_info=True,
+            )
+
+
+def queue_post_commit_task(
+    session: AsyncSession,
+    task: Callable[[], Awaitable[None]],
+) -> None:
+    """
+    Добавляет задачу в очередь выполнения после commit.
+
+    Пример:
+        queue_post_commit_task(
+            session,
+            lambda: send_alert_to_admins(...),
+        )
+    """
+    if "post_commit_tasks" not in session.info:
+        session.info["post_commit_tasks"] = []
+
+    session.info["post_commit_tasks"].append(task)
+
+
 @asynccontextmanager
 async def session_scope():
     session = await get_session()
@@ -219,8 +265,10 @@ async def session_scope():
     try:
         yield session
         await session.commit()
+        await _run_post_commit_tasks(session)
     except Exception:
         await session.rollback()
+        session.info.pop("post_commit_tasks", None)
         raise
     finally:
         await session.close()

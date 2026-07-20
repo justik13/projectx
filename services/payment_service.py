@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from bot.middlewares.user_context import invalidate_user_cache
 from config.settings import get_settings
+from database.connection import queue_post_commit_task
 from database.models import Payment
 from database.repositories.payments_repo import (
     create_payment,
@@ -32,7 +33,6 @@ _notified_paid_after_cancel: set[int] = set()
 _alerted_manual_review: set[int] = set()
 
 _redis_client: aioredis.Redis | None = None
-
 
 MANUAL_REVIEW_REASONS = {
     "banned_or_deleted": "Пользователь заблокирован или удалён",
@@ -95,7 +95,413 @@ def _expected_payment_amount(payment: Payment) -> Decimal | None:
     return Decimal(str(payment.tariff.price_rub))
 
 
+def _build_payment_snapshot(payment: Payment) -> dict:
+    """
+    Создаёт безопасный snapshot платежа для отправки алертов
+    после commit.
+
+    Важно:
+    - snapshot не содержит SQLAlchemy-объекты;
+    - его можно использовать в post-commit задачах;
+    - личные данные минимизированы.
+    """
+    user = payment.user
+    tariff = payment.tariff
+
+    tariff_name = "—"
+
+    if tariff:
+        tariff_name = (
+            f"{tariff.duration_days} дн. / "
+            f"{tariff.device_limit} устр."
+        )
+
+    return {
+        "payment_id": payment.id,
+        "user_telegram_id": user.telegram_id if user else None,
+        "username": (
+            f"@{user.username}"
+            if user and user.username
+            else "—"
+        ),
+        "amount": str(payment.amount),
+        "currency": payment.currency,
+        "tariff_name": tariff_name,
+        "payment_method": payment.payment_method or "—",
+        "external_id": payment.external_id or "—",
+    }
+
+
+async def _send_alert_to_admins(
+    message: str,
+    keyboard=None,
+) -> None:
+    """
+    Отправляет алерт админам.
+
+    Используется только в post-commit задачах, чтобы не отправлять
+    уведомления до фактического сохранения данных в БД.
+    """
+    from services.workers.heartbeat import get_bot_ref
+
+    bot = get_bot_ref()
+
+    if bot is None:
+        logger.error(
+            "Admin alert SKIPPED: bot_ref is None. "
+            "Message: %s",
+            message[:200],
+        )
+        return
+
+    settings = get_settings()
+    admin_ids = settings.ADMIN_IDS
+
+    if not admin_ids:
+        return
+
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(
+                admin_id,
+                message,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to send admin alert to %s: %s",
+                admin_id,
+                e,
+            )
+
+
+async def _send_manual_review_alert_now(
+    snapshot: dict,
+    reason: str,
+    source: str,
+) -> None:
+    """
+    Отправляет алерт о платеже, который требует ручной проверки.
+    """
+    global _alerted_manual_review
+
+    payment_id = snapshot.get("payment_id")
+
+    if payment_id is None:
+        return
+
+    alert_key = payment_id
+
+    if alert_key in _alerted_manual_review:
+        return
+
+    _alerted_manual_review.add(alert_key)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    reason_text = MANUAL_REVIEW_REASONS.get(reason, reason)
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="✅ Выдать подписку",
+        callback_data=f"admin_manual_grant:{payment_id}",
+    )
+
+    user_telegram_id = snapshot.get("user_telegram_id")
+
+    builder.button(
+        text="👤 Профиль клиента",
+        callback_data=(
+            f"admin_user_card:{user_telegram_id}"
+            if user_telegram_id
+            else "admin_menu"
+        ),
+    )
+
+    builder.adjust(1, 1)
+
+    keyboard = builder.as_markup()
+
+    message = (
+        f"⚠️ <b>Платёж требует ручной проверки</b>
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+"
+        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>
+"
+        f"👤 <b>Клиент:</b> "
+        f"<code>{user_telegram_id or '—'}</code> "
+        f"({snapshot.get('username', '—')})
+"
+        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}
+"
+        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
+        f"{snapshot.get('currency', '—')}
+"
+        f"🧩 <b>Причина:</b> {reason_text}
+"
+        f"📍 <b>Источник:</b> <code>{source}</code>
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+"
+        f"<i>Доступ не выдан автоматически.</i>"
+    )
+
+    await _send_alert_to_admins(message, keyboard)
+
+
+async def _send_paid_after_cancel_alert_now(
+    snapshot: dict,
+) -> None:
+    """
+    Отправляет админам алерт о ситуации, когда оплата пришла
+    после отмены платежа.
+    """
+    global _alerted_paid_after_cancel
+
+    payment_id = snapshot.get("payment_id")
+
+    if payment_id is None:
+        return
+
+    if payment_id in _alerted_paid_after_cancel:
+        return
+
+    _alerted_paid_after_cancel.add(payment_id)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="✅ Выдать подписку",
+        callback_data=f"admin_manual_grant:{payment_id}",
+    )
+
+    user_telegram_id = snapshot.get("user_telegram_id")
+
+    builder.button(
+        text="👤 Профиль клиента",
+        callback_data=(
+            f"admin_user_card:{user_telegram_id}"
+            if user_telegram_id
+            else "admin_menu"
+        ),
+    )
+
+    builder.adjust(1, 1)
+
+    keyboard = builder.as_markup()
+
+    message = (
+        f"⚠️ <b>Оплата после отмены</b>
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+"
+        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>
+"
+        f"👤 <b>Клиент:</b> "
+        f"<code>{user_telegram_id or '—'}</code> "
+        f"({snapshot.get('username', '—')})
+"
+        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}
+"
+        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
+        f"{snapshot.get('currency', '—')}
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+"
+        f"<i>Деньги поступили, но платёж был ранее отменён.
+"
+        f"Клиент уведомлён автоматически.
+"
+        f"Выберите действие:</i>"
+    )
+
+    await _send_alert_to_admins(message, keyboard)
+
+
+async def _notify_client_paid_after_cancel_now(
+    snapshot: dict,
+) -> None:
+    """
+    Уведомляет клиента, что оплата получена, но платёж был ранее
+    отменён, поэтому доступ не выдан автоматически.
+    """
+    global _notified_paid_after_cancel
+
+    payment_id = snapshot.get("payment_id")
+    user_telegram_id = snapshot.get("user_telegram_id")
+
+    if payment_id is None or user_telegram_id is None:
+        return
+
+    if payment_id in _notified_paid_after_cancel:
+        return
+
+    _notified_paid_after_cancel.add(payment_id)
+
+    from aiogram.exceptions import TelegramForbiddenError
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from services.workers.heartbeat import get_bot_ref
+
+    bot = get_bot_ref()
+
+    if bot is None:
+        logger.error(
+            "Client notification SKIPPED: bot_ref is None. "
+            "Payment %s",
+            payment_id,
+        )
+        return
+
+    settings = get_settings()
+    support_username = settings.SUPPORT_USERNAME.lstrip("@")
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="💬 Написать в поддержку",
+        url=f"https://t.me/{support_username}",
+    )
+
+    builder.button(
+        text="🏠 В главное меню",
+        callback_data="back_to_main_menu",
+    )
+
+    builder.adjust(1, 1)
+
+    keyboard = builder.as_markup()
+
+    message = (
+        f"💳 <b>Мы получили вашу оплату</b>
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+"
+        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
+        f"{snapshot.get('currency', '—')}
+"
+        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}
+"
+        f"🆔 <b>Платёж:</b> <code>{payment_id}</code>
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+"
+        f"Ранее в боте была нажата кнопка «Отменить», "
+        f"поэтому доступ не активировался автоматически.
+"
+        f"Напишите нам — решим за 2 минуты."
+    )
+
+    try:
+        await bot.send_message(
+            user_telegram_id,
+            message,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+
+        logger.info(
+            "Paid-after-cancel notification sent to user %s "
+            "for payment %s",
+            user_telegram_id,
+            payment_id,
+        )
+
+    except TelegramForbiddenError:
+        logger.info(
+            "Paid-after-cancel notification: user %s blocked the bot",
+            user_telegram_id,
+        )
+
+        try:
+            from database.connection import session_scope
+            from database.repositories.users_repo import (
+                mark_user_bot_blocked,
+            )
+
+            async with session_scope() as session:
+                await mark_user_bot_blocked(
+                    session,
+                    user_telegram_id,
+                )
+
+        except Exception as e:
+            logger.error(
+                "Failed to mark user %s as bot_blocked: %s",
+                user_telegram_id,
+                e,
+            )
+
+    except Exception as e:
+        logger.error(
+            "Failed to send paid-after-cancel notification to "
+            "user %s: %s",
+            user_telegram_id,
+            e,
+        )
+
+
+async def _send_chargeback_alert_now(
+    snapshot: dict,
+    transaction_id: str,
+) -> None:
+    """
+    Отправляет админам алерт о chargeback.
+    """
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    payment_id = snapshot.get("payment_id")
+    user_telegram_id = snapshot.get("user_telegram_id")
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="👤 Профиль пользователя",
+        callback_data=(
+            f"admin_user_card:{user_telegram_id}"
+            if user_telegram_id
+            else "admin_menu"
+        ),
+    )
+
+    builder.adjust(1)
+
+    keyboard = builder.as_markup()
+
+    message = (
+        f"🚨 <b>Возврат средств</b>
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+"
+        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>
+"
+        f"👤 <b>Пользователь:</b> "
+        f"<code>{user_telegram_id or '—'}</code> "
+        f"({snapshot.get('username', '—')})
+"
+        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}
+"
+        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
+        f"{snapshot.get('currency', '—')}
+"
+        f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+"
+        f"<i>Доступ отозван. Устройства удалены.
+"
+        f"Реферальные бонусы откатаны.</i>"
+    )
+
+    await _send_alert_to_admins(message, keyboard)
+
+
 class PaymentService:
+
     @staticmethod
     async def handle_successful_payment(
         session: AsyncSession,
@@ -113,7 +519,7 @@ class PaymentService:
         6. Только затем выдаём доступ.
 
         Если что-то не так, платёж переводится в requires_manual_review,
-        а админ получает алерт.
+        а админ получает алерт после commit.
         """
         redis = await _get_redis()
 
@@ -123,6 +529,7 @@ class PaymentService:
             return False, "not_found"
 
         user_lock_key = f"lock:payment_bonus:{payment_obj.user_id}"
+
         redis_lock = redis.lock(
             user_lock_key,
             timeout=30,
@@ -157,14 +564,34 @@ class PaymentService:
                         return True, "already_processed"
 
                     if payment.status == "cancelled":
-                        await _alert_paid_after_cancel(
+                        snapshot = _build_payment_snapshot(payment)
+
+                        await AuditService.log_action(
                             session,
-                            payment_id,
+                            admin_id=0,
+                            action="PAID_AFTER_CANCEL",
+                            target_type="Payment",
+                            target_id=payment_id,
+                            details=(
+                                f"user="
+                                f"{snapshot.get('user_telegram_id')}, "
+                                f"amount={snapshot.get('amount')} "
+                                f"{snapshot.get('currency')}"
+                            ),
                         )
 
-                        await _notify_client_paid_after_cancel(
+                        queue_post_commit_task(
                             session,
-                            payment_id,
+                            lambda s=snapshot: (
+                                _send_paid_after_cancel_alert_now(s)
+                            ),
+                        )
+
+                        queue_post_commit_task(
+                            session,
+                            lambda s=snapshot: (
+                                _notify_client_paid_after_cancel_now(s)
+                            ),
                         )
 
                         return True, "paid_after_cancel"
@@ -183,6 +610,39 @@ class PaymentService:
                         )
                         return False, "manual_review"
 
+                    if payment.status == "failed":
+                        payment.status = "requires_manual_review"
+                        payment.manual_review_reason = "status_failed"
+
+                        await session.flush()
+
+                        snapshot = _build_payment_snapshot(payment)
+
+                        await AuditService.log_action(
+                            session,
+                            admin_id=0,
+                            action="PAYMENT_MANUAL_REVIEW",
+                            target_type="Payment",
+                            target_id=payment_id,
+                            details=(
+                                "reason=status_failed, "
+                                "source=handle_successful_payment"
+                            ),
+                        )
+
+                        queue_post_commit_task(
+                            session,
+                            lambda s=snapshot: (
+                                _send_manual_review_alert_now(
+                                    s,
+                                    "status_failed",
+                                    "handle_successful_payment",
+                                )
+                            ),
+                        )
+
+                        return False, "manual_review"
+
                     user = payment.user
                     tariff = payment.tariff
 
@@ -198,7 +658,9 @@ class PaymentService:
                         manual_review_reason = "inactive_tariff"
 
                     else:
-                        expected_amount = _expected_payment_amount(payment)
+                        expected_amount = _expected_payment_amount(
+                            payment
+                        )
 
                         if expected_amount is None:
                             manual_review_reason = "amount_missing"
@@ -217,15 +679,35 @@ class PaymentService:
 
                     if manual_review_reason:
                         payment.status = "requires_manual_review"
-                        payment.manual_review_reason = manual_review_reason
+                        payment.manual_review_reason = (
+                            manual_review_reason
+                        )
 
                         await session.flush()
 
-                        await _send_manual_review_alert(
+                        snapshot = _build_payment_snapshot(payment)
+
+                        await AuditService.log_action(
                             session,
-                            payment_id,
-                            manual_review_reason,
-                            source="handle_successful_payment",
+                            admin_id=0,
+                            action="PAYMENT_MANUAL_REVIEW",
+                            target_type="Payment",
+                            target_id=payment_id,
+                            details=(
+                                f"reason={manual_review_reason}, "
+                                f"source=handle_successful_payment"
+                            ),
+                        )
+
+                        queue_post_commit_task(
+                            session,
+                            lambda s=snapshot, r=manual_review_reason: (
+                                _send_manual_review_alert_now(
+                                    s,
+                                    r,
+                                    "handle_successful_payment",
+                                )
+                            ),
                         )
 
                         return False, "manual_review"
@@ -260,11 +742,29 @@ class PaymentService:
 
                         await session.flush()
 
-                        await _send_manual_review_alert(
+                        snapshot = _build_payment_snapshot(payment)
+
+                        await AuditService.log_action(
                             session,
-                            payment_id,
-                            "device_limit_exceeded",
-                            source="handle_successful_payment_extend",
+                            admin_id=0,
+                            action="PAYMENT_MANUAL_REVIEW",
+                            target_type="Payment",
+                            target_id=payment_id,
+                            details=(
+                                "reason=device_limit_exceeded, "
+                                "source=handle_successful_payment_extend"
+                            ),
+                        )
+
+                        queue_post_commit_task(
+                            session,
+                            lambda s=snapshot: (
+                                _send_manual_review_alert_now(
+                                    s,
+                                    "device_limit_exceeded",
+                                    "handle_successful_payment_extend",
+                                )
+                            ),
                         )
 
                         return False, "manual_review"
@@ -282,11 +782,29 @@ class PaymentService:
 
                         await session.flush()
 
-                        await _send_manual_review_alert(
+                        snapshot = _build_payment_snapshot(payment)
+
+                        await AuditService.log_action(
                             session,
-                            payment_id,
-                            "status_failed",
-                            source="handle_successful_payment_extend",
+                            admin_id=0,
+                            action="PAYMENT_MANUAL_REVIEW",
+                            target_type="Payment",
+                            target_id=payment_id,
+                            details=(
+                                "reason=status_failed, "
+                                "source=handle_successful_payment_extend"
+                            ),
+                        )
+
+                        queue_post_commit_task(
+                            session,
+                            lambda s=snapshot: (
+                                _send_manual_review_alert_now(
+                                    s,
+                                    "status_failed",
+                                    "handle_successful_payment_extend",
+                                )
+                            ),
                         )
 
                         return False, "manual_review"
@@ -324,34 +842,35 @@ class PaymentService:
 
                     user.last_payment_at = now_utc()
 
-                invalidate_user_cache(user.telegram_id)
+                    invalidate_user_cache(user.telegram_id)
 
-                try:
-                    await AuditService.log_action(
-                        session,
-                        admin_id=0,
-                        action="PAYMENT_SUCCESS",
-                        target_type="Payment",
-                        target_id=payment_id,
-                        details=(
-                            f"user={user.telegram_id}, "
-                            f"amount={payment.amount} {payment.currency}"
-                        ),
+                    try:
+                        await AuditService.log_action(
+                            session,
+                            admin_id=0,
+                            action="PAYMENT_SUCCESS",
+                            target_type="Payment",
+                            target_id=payment_id,
+                            details=(
+                                f"user={user.telegram_id}, "
+                                f"amount={payment.amount} "
+                                f"{payment.currency}"
+                            ),
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            "Failed to log payment success to audit: %s",
+                            e,
+                        )
+
+                    logger.info(
+                        "Payment %s processed successfully for user %s",
+                        payment_id,
+                        user.telegram_id,
                     )
 
-                except Exception as e:
-                    logger.error(
-                        "Failed to log payment success to audit: %s",
-                        e,
-                    )
-
-                logger.info(
-                    "Payment %s processed successfully for user %s",
-                    payment_id,
-                    user.telegram_id,
-                )
-
-                return True, "success"
+                    return True, "success"
 
             except Exception as e:
                 logger.error(
@@ -511,25 +1030,25 @@ class PaymentService:
 
                 user.last_payment_at = now_utc()
 
-            invalidate_user_cache(user.telegram_id)
+                invalidate_user_cache(user.telegram_id)
 
-            try:
-                await AuditService.log_action(
-                    session,
-                    admin_id=admin_id,
-                    action="MANUAL_GRANT",
-                    target_type="Payment",
-                    target_id=payment_id,
-                    details=(
-                        f"Admin {admin_id} manually granted payment "
-                        f"{payment_id} for user {user.telegram_id}"
-                    ),
-                )
+                try:
+                    await AuditService.log_action(
+                        session,
+                        admin_id=admin_id,
+                        action="MANUAL_GRANT",
+                        target_type="Payment",
+                        target_id=payment_id,
+                        details=(
+                            f"Admin {admin_id} manually granted payment "
+                            f"{payment_id} for user {user.telegram_id}"
+                        ),
+                    )
 
-            except Exception as e:
-                logger.error("force_grant: audit failed: %s", e)
+                except Exception as e:
+                    logger.error("force_grant: audit failed: %s", e)
 
-            return True, "ok"
+                return True, "ok"
 
         except Exception as e:
             logger.error(
@@ -696,14 +1215,32 @@ class PaymentService:
                 return True, "already_processed"
 
             if payment.status == "cancelled":
-                await _alert_paid_after_cancel(
+                snapshot = _build_payment_snapshot(payment)
+
+                await AuditService.log_action(
                     session,
-                    payment.id,
+                    admin_id=0,
+                    action="PAID_AFTER_CANCEL",
+                    target_type="Payment",
+                    target_id=payment.id,
+                    details=(
+                        f"transaction={transaction_id}, "
+                        f"user={payment.user_id}"
+                    ),
                 )
 
-                await _notify_client_paid_after_cancel(
+                queue_post_commit_task(
                     session,
-                    payment.id,
+                    lambda s=snapshot: (
+                        _send_paid_after_cancel_alert_now(s)
+                    ),
+                )
+
+                queue_post_commit_task(
+                    session,
+                    lambda s=snapshot: (
+                        _notify_client_paid_after_cancel_now(s)
+                    ),
                 )
 
                 return True, "paid_after_cancel"
@@ -736,7 +1273,7 @@ class PaymentService:
                     transaction_id,
                 )
 
-                await _set_manual_review(
+                await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_missing",
@@ -755,7 +1292,7 @@ class PaymentService:
                     transaction_id,
                 )
 
-                await _set_manual_review(
+                await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_mismatch",
@@ -774,7 +1311,7 @@ class PaymentService:
                     transaction_id,
                 )
 
-                await _set_manual_review(
+                await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_mismatch",
@@ -797,7 +1334,7 @@ class PaymentService:
                     payment.id,
                 )
 
-                await _set_manual_review(
+                await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "payload_mismatch",
@@ -831,14 +1368,32 @@ class PaymentService:
                     payment.id,
                 )
 
-                await _set_manual_review(
+                snapshot = _build_payment_snapshot(payment)
+
+                await AuditService.log_action(
                     session,
-                    payment.id,
-                    "cancel_after_completed",
-                    source="platega_callback",
+                    admin_id=0,
+                    action="PAYMENT_CANCEL_AFTER_COMPLETED",
+                    target_type="Payment",
+                    target_id=payment.id,
+                    details=(
+                        f"transaction={transaction_id}, "
+                        f"user={payment.user_id}"
+                    ),
                 )
 
-                return True, "manual_review"
+                queue_post_commit_task(
+                    session,
+                    lambda s=snapshot: (
+                        _send_manual_review_alert_now(
+                            s,
+                            "cancel_after_completed",
+                            "platega_callback",
+                        )
+                    ),
+                )
+
+                return True, "cancel_after_completed"
 
             payment.status = "cancelled"
 
@@ -865,153 +1420,11 @@ class PaymentService:
             return True, "success"
 
         elif status == "CHARGEBACKED":
-            if payment.status == "refunded":
-                logger.info(
-                    "Payment provider callback: payment %s already "
-                    "refunded",
-                    payment.id,
-                )
-                return True, "already_processed"
-
-            payment.status = "refunded"
-            payment.manual_review_reason = None
-
-            user = payment.user
-
-            if user:
-                current_time = now_utc()
-
-                # Отзываем доступ.
-                user.subscription_end = current_time
-                user.current_tariff_id = None
-                user.device_limit = 0
-
-                # Откатываем реферальные бонусы.
-                if user.referred_by:
-                    try:
-                        referrer = await get_user_by_telegram_id(
-                            session,
-                            user.referred_by,
-                        )
-
-                        if referrer:
-                            payments = await get_user_payments(
-                                session,
-                                user.id,
-                            )
-
-                            successful_payments = [
-                                p
-                                for p in payments
-                                if p.status == "completed"
-                            ]
-
-                            is_first_payment = (
-                                len(successful_payments) <= 1
-                            )
-
-                            tariff = payment.tariff
-
-                            if (
-                                tariff
-                                and tariff.duration_days >= 30
-                            ):
-                                if is_first_payment:
-                                    bonus_referrer = 3
-                                else:
-                                    bonus_referrer = 1
-
-                                if (
-                                    referrer.referral_days
-                                    and referrer.referral_days
-                                    >= bonus_referrer
-                                ):
-                                    referrer.referral_days -= (
-                                        bonus_referrer
-                                    )
-
-                                # Не вычитаем дни из вечной подписки.
-                                if (
-                                    referrer.subscription_end
-                                    and referrer.subscription_end
-                                    > current_time
-                                    and referrer.subscription_end.year
-                                    < 2100
-                                ):
-                                    referrer.subscription_end = (
-                                        referrer.subscription_end
-                                        - timedelta(
-                                            days=bonus_referrer,
-                                        )
-                                    )
-
-                                logger.info(
-                                    "Chargeback: rolled back referral "
-                                    "bonus for referrer %s",
-                                    referrer.telegram_id,
-                                )
-
-                    except Exception as e:
-                        logger.error(
-                            "Chargeback: failed to rollback referral "
-                            "bonuses: %s",
-                            e,
-                            exc_info=True,
-                        )
-
-                # Удаляем устройства пользователя.
-                try:
-                    await ProfileDeletionService.delete_profiles_for_user(
-                        session,
-                        user.id,
-                        reason="chargeback_delete",
-                        background=True,
-                    )
-
-                except Exception as e:
-                    logger.error(
-                        "Chargeback: failed to delete profiles "
-                        "for user %s: %s",
-                        user.id,
-                        e,
-                        exc_info=True,
-                    )
-
-                invalidate_user_cache(user.telegram_id)
-
-                logger.warning(
-                    "CHARGEBACK processed: user %s, payment %s. "
-                    "Access revoked and devices deleted.",
-                    user.telegram_id,
-                    payment.id,
-                )
-
-            try:
-                await AuditService.log_action(
-                    session,
-                    admin_id=0,
-                    action="PAYMENT_CHARGEBACK",
-                    target_type="Payment",
-                    target_id=payment.id,
-                    details=(
-                        f"Payment provider chargeback: "
-                        f"transaction={transaction_id}, "
-                        f"user={payment.user_id}"
-                    ),
-                )
-
-            except Exception as e:
-                logger.error(
-                    "Failed to log chargeback to audit: %s",
-                    e,
-                )
-
-            await _send_chargeback_alert(
-                payment,
+            return await PaymentService._process_chargeback(
+                session,
+                payment.id,
                 transaction_id,
             )
-
-            return True, "success"
 
         logger.warning(
             "Unknown payment provider status: %s",
@@ -1060,6 +1473,24 @@ class PaymentService:
         status = status_data.get("status")
 
         if status == "CONFIRMED":
+            callback_amount = status_data.get("amount")
+
+            if callback_amount is not None:
+                callback_decimal = _to_decimal(callback_amount)
+
+                if (
+                    callback_decimal is None
+                    or payment.amount != callback_decimal
+                ):
+                    await PaymentService._set_manual_review(
+                        session,
+                        payment.id,
+                        "amount_mismatch",
+                        source="check_platega_payment",
+                    )
+
+                    return False, "manual_review"
+
             success, result_code = (
                 await PaymentService.handle_successful_payment(
                     session,
@@ -1081,7 +1512,7 @@ class PaymentService:
                         target_type="Payment",
                         target_id=payment.id,
                         details=(
-                            f"check_platega_payment: status=CANCELED, "
+                            "check_platega_payment: status=CANCELED, "
                             f"user={payment.user_id}"
                         ),
                     )
@@ -1095,190 +1526,67 @@ class PaymentService:
 
             return False, "cancelled"
 
+        elif status == "CHARGEBACKED":
+            return await PaymentService._process_chargeback(
+                session,
+                payment.id,
+                payment.external_id,
+            )
+
         return False, "pending"
 
+    @staticmethod
+    async def _set_manual_review(
+        session: AsyncSession,
+        payment_id: int,
+        reason: str,
+        source: str,
+    ) -> tuple[bool, str]:
+        """
+        Переводит платёж в статус requires_manual_review.
 
-async def _set_manual_review(
-    session: AsyncSession,
-    payment_id: int,
-    reason: str,
-    source: str,
-) -> tuple[bool, str]:
-    """
-    Переводит платёж в статус requires_manual_review.
-
-    Используется, когда платёж нельзя безопасно обработать автоматически.
-    """
-    stmt = (
-        update(Payment)
-        .where(
-            Payment.id == payment_id,
-            Payment.status.in_(
-                [
-                    "pending",
-                    "failed",
-                    "cancelled",
-                ]
-            ),
+        Используется, когда платёж нельзя безопасно обработать
+        автоматически.
+        """
+        stmt = (
+            update(Payment)
+            .where(
+                Payment.id == payment_id,
+                Payment.status.in_(
+                    [
+                        "pending",
+                        "failed",
+                        "cancelled",
+                    ]
+                ),
+            )
+            .values(
+                status="requires_manual_review",
+                manual_review_reason=reason,
+            )
         )
-        .values(
-            status="requires_manual_review",
-            manual_review_reason=reason,
-        )
-    )
 
-    result = await session.execute(stmt)
-    await session.flush()
+        result = await session.execute(stmt)
+        await session.flush()
 
-    if result.rowcount == 0:
-        current = await session.get(Payment, payment_id)
+        if result.rowcount == 0:
+            current = await session.get(Payment, payment_id)
 
-        if current and current.status == "completed":
-            return True, "already_processed"
+            if current and current.status == "completed":
+                return True, "already_processed"
 
-        if current and current.status == "requires_manual_review":
-            return True, "manual_review"
+            if current and current.status == "requires_manual_review":
+                return True, "manual_review"
 
-        return False, current.status if current else "not_found"
+            return False, current.status if current else "not_found"
 
-    await _send_manual_review_alert(
-        session,
-        payment_id,
-        reason,
-        source=source,
-    )
-
-    return True, "manual_review"
-
-
-async def _send_manual_review_alert(
-    session: AsyncSession,
-    payment_id: int,
-    reason: str,
-    source: str,
-) -> None:
-    global _alerted_manual_review
-
-    alert_key = payment_id
-
-    if alert_key in _alerted_manual_review:
-        return
-
-    _alerted_manual_review.add(alert_key)
-
-    from services.workers.heartbeat import get_bot_ref
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-    bot = get_bot_ref()
-
-    if bot is None:
-        logger.error(
-            "Manual review alert SKIPPED: bot_ref is None. "
-            "Payment %s, reason=%s",
-            payment_id,
-            reason,
-        )
-        return
-
-    try:
         payment = await get_payment_by_id(
             session,
             payment_id,
         )
 
-    except Exception:
-        payment = None
+        snapshot = _build_payment_snapshot(payment)
 
-    if not payment:
-        return
-
-    settings = get_settings()
-    admin_ids = settings.ADMIN_IDS
-
-    if not admin_ids:
-        return
-
-    user = payment.user
-    tariff = payment.tariff
-
-    reason_text = MANUAL_REVIEW_REASONS.get(
-        reason,
-        reason,
-    )
-
-    username = (
-        f"@{user.username}"
-        if user and user.username
-        else "—"
-    )
-
-    tariff_name = "—"
-
-    if tariff:
-        tariff_name = (
-            f"{tariff.duration_days} дн. / "
-            f"{tariff.device_limit} устр."
-        )
-
-    builder = InlineKeyboardBuilder()
-
-    builder.button(
-        text="✅ Выдать подписку",
-        callback_data=f"admin_manual_grant:{payment.id}",
-    )
-
-    builder.button(
-        text="👤 Профиль клиента",
-        callback_data=(
-            f"admin_user_card:{user.telegram_id}"
-            if user
-            else "admin_menu"
-        ),
-    )
-
-    builder.adjust(1, 1)
-
-    keyboard = builder.as_markup()
-
-    alert_msg = (
-        f"⚠️ <b>Платёж требует ручной проверки</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Платёж ID:</b> <code>{payment.id}</code>\n"
-        f"👤 <b>Клиент:</b> "
-        f"<code>{user.telegram_id if user else '—'}</code> "
-        f"({username})\n"
-        f"💎 <b>Тариф:</b> {tariff_name}\n"
-        f"💰 <b>Сумма:</b> {payment.amount} {payment.currency}\n"
-        f"🧩 <b>Причина:</b> {reason_text}\n"
-        f"📍 <b>Источник:</b> <code>{source}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Доступ не выдан автоматически.</i>"
-    )
-
-    for admin_id in admin_ids:
-        try:
-            await bot.send_message(
-                admin_id,
-                alert_msg,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
-
-            logger.info(
-                "Manual review alert sent to admin %s "
-                "for payment %s",
-                admin_id,
-                payment.id,
-            )
-
-        except Exception as e:
-            logger.error(
-                "Failed to send manual review alert to admin %s: %s",
-                admin_id,
-                e,
-            )
-
-    try:
         await AuditService.log_action(
             session,
             admin_id=0,
@@ -1286,373 +1594,197 @@ async def _send_manual_review_alert(
             target_type="Payment",
             target_id=payment_id,
             details=(
-                f"reason={reason}, source={source}, "
-                f"user={user.telegram_id if user else '—'}"
+                f"reason={reason}, source={source}"
             ),
         )
 
-    except Exception as e:
-        logger.error(
-            "Failed to log PAYMENT_MANUAL_REVIEW: %s",
-            e,
-        )
-
-
-async def _alert_paid_after_cancel(
-    session: AsyncSession,
-    payment_id: int,
-) -> None:
-    global _alerted_paid_after_cancel
-
-    if payment_id in _alerted_paid_after_cancel:
-        return
-
-    _alerted_paid_after_cancel.add(payment_id)
-
-    from services.workers.heartbeat import get_bot_ref
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-    bot = get_bot_ref()
-
-    if bot is None:
-        logger.error(
-            "Paid-after-cancel alert SKIPPED: bot_ref is None. "
-            "Payment %s",
-            payment_id,
-        )
-        return
-
-    try:
-        payment = await get_payment_by_id(
+        queue_post_commit_task(
             session,
-            payment_id,
+            lambda s=snapshot, r=reason, src=source: (
+                _send_manual_review_alert_now(s, r, src)
+            ),
         )
 
-    except Exception:
-        payment = None
+        return True, "manual_review"
 
-    if not payment:
-        return
-
-    settings = get_settings()
-    admin_ids = settings.ADMIN_IDS
-
-    if not admin_ids:
-        return
-
-    user = payment.user
-    tariff = payment.tariff
-
-    username = (
-        f"@{user.username}"
-        if user and user.username
-        else "—"
-    )
-
-    tariff_name = "—"
-
-    if tariff:
-        tariff_name = (
-            f"{tariff.duration_days} дн. / "
-            f"{tariff.device_limit} устр."
-        )
-
-    builder = InlineKeyboardBuilder()
-
-    builder.button(
-        text="✅ Выдать подписку",
-        callback_data=f"admin_manual_grant:{payment.id}",
-    )
-
-    builder.button(
-        text="👤 Профиль клиента",
-        callback_data=(
-            f"admin_user_card:{user.telegram_id}"
-            if user
-            else "admin_menu"
-        ),
-    )
-
-    builder.adjust(1, 1)
-
-    keyboard = builder.as_markup()
-
-    alert_msg = (
-        f"⚠️ <b>Оплата после отмены!</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Платёж ID:</b> <code>{payment.id}</code>\n"
-        f"👤 <b>Клиент:</b> "
-        f"<code>{user.telegram_id if user else '—'}</code> "
-        f"({username})\n"
-        f"💎 <b>Тариф:</b> {tariff_name}\n"
-        f"💰 <b>Сумма:</b> {payment.amount} {payment.currency}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Деньги поступили, но платёж был ранее отменён клиентом.\n"
-        f"Клиент уведомлён автоматически.\n"
-        f"Выберите действие:</i>"
-    )
-
-    for admin_id in admin_ids:
+    @staticmethod
+    async def _process_chargeback(
+        session: AsyncSession,
+        payment_id: int,
+        transaction_id: str,
+    ) -> tuple[bool, str]:
         try:
-            await bot.send_message(
-                admin_id,
-                alert_msg,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
+            async with session.begin_nested():
+                payment = await get_payment_by_id_for_update(
+                    session,
+                    payment_id,
+                )
 
-            logger.info(
-                "Paid-after-cancel alert sent to admin %s "
-                "for payment %s",
-                admin_id,
-                payment.id,
-            )
+                if not payment:
+                    return False, "not_found"
+
+                if payment.status == "refunded":
+                    logger.info(
+                        "Payment provider callback: payment %s already "
+                        "refunded",
+                        payment.id,
+                    )
+                    return True, "already_processed"
+
+                payment.status = "refunded"
+                payment.manual_review_reason = None
+
+                await session.flush()
+
+                user = payment.user
+
+                if user:
+                    current_time = now_utc()
+
+                    # Отзываем доступ.
+                    user.subscription_end = current_time
+                    user.current_tariff_id = None
+                    user.device_limit = 0
+
+                    await session.flush()
+
+                    # Откатываем реферальные бонусы.
+                    if user.referred_by:
+                        try:
+                            referrer = await get_user_by_telegram_id(
+                                session,
+                                user.referred_by,
+                            )
+
+                            if referrer:
+                                payments = await get_user_payments(
+                                    session,
+                                    user.id,
+                                )
+
+                                successful_payments = [
+                                    p
+                                    for p in payments
+                                    if p.status == "completed"
+                                ]
+
+                                is_first_payment = (
+                                    len(successful_payments) <= 1
+                                )
+
+                                tariff = payment.tariff
+
+                                if (
+                                    tariff
+                                    and tariff.duration_days >= 30
+                                ):
+                                    if is_first_payment:
+                                        bonus_referrer = 3
+                                    else:
+                                        bonus_referrer = 1
+
+                                    if (
+                                        referrer.referral_days
+                                        and referrer.referral_days
+                                        >= bonus_referrer
+                                    ):
+                                        referrer.referral_days -= (
+                                            bonus_referrer
+                                        )
+
+                                    # Не вычитаем дни из вечной подписки.
+                                    if (
+                                        referrer.subscription_end
+                                        and referrer.subscription_end
+                                        > current_time
+                                        and referrer.subscription_end.year
+                                        < 2100
+                                    ):
+                                        referrer.subscription_end = (
+                                            referrer.subscription_end
+                                            - timedelta(
+                                                days=bonus_referrer,
+                                            )
+                                        )
+
+                                    logger.info(
+                                        "Chargeback: rolled back referral "
+                                        "bonus for referrer %s",
+                                        referrer.telegram_id,
+                                    )
+
+                        except Exception as e:
+                            logger.error(
+                                "Chargeback: failed to rollback referral "
+                                "bonuses: %s",
+                                e,
+                                exc_info=True,
+                            )
+
+                    # Удаляем устройства пользователя.
+                    try:
+                        await ProfileDeletionService.delete_profiles_for_user(
+                            session,
+                            user.id,
+                            reason="chargeback_delete",
+                            background=True,
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            "Chargeback: failed to delete profiles "
+                            "for user %s: %s",
+                            user.id,
+                            e,
+                            exc_info=True,
+                        )
+
+                    invalidate_user_cache(user.telegram_id)
+
+                    logger.warning(
+                        "CHARGEBACK processed: user %s, payment %s. "
+                        "Access revoked and devices deleted.",
+                        user.telegram_id,
+                        payment.id,
+                    )
+
+                snapshot = _build_payment_snapshot(payment)
+
+                try:
+                    await AuditService.log_action(
+                        session,
+                        admin_id=0,
+                        action="PAYMENT_CHARGEBACK",
+                        target_type="Payment",
+                        target_id=payment.id,
+                        details=(
+                            f"Payment provider chargeback: "
+                            f"transaction={transaction_id}, "
+                            f"user={payment.user_id}"
+                        ),
+                    )
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to log chargeback to audit: %s",
+                        e,
+                    )
+
+                queue_post_commit_task(
+                    session,
+                    lambda s=snapshot, tid=transaction_id: (
+                        _send_chargeback_alert_now(s, tid)
+                    ),
+                )
+
+                return True, "success"
 
         except Exception as e:
             logger.error(
-                "Failed to send paid-after-cancel alert to admin %s: %s",
-                admin_id,
+                "Chargeback processing failed for payment %s: %s",
+                payment_id,
                 e,
+                exc_info=True,
             )
 
-    try:
-        await AuditService.log_action(
-            session,
-            admin_id=0,
-            action="PAID_AFTER_CANCEL",
-            target_type="Payment",
-            target_id=payment_id,
-            details=(
-                f"user={user.telegram_id if user else '—'}, "
-                f"amount={payment.amount} {payment.currency}"
-            ),
-        )
-
-    except Exception as e:
-        logger.error("Failed to log PAID_AFTER_CANCEL: %s", e)
-
-
-async def _notify_client_paid_after_cancel(
-    session: AsyncSession,
-    payment_id: int,
-) -> None:
-    global _notified_paid_after_cancel
-
-    if payment_id in _notified_paid_after_cancel:
-        return
-
-    _notified_paid_after_cancel.add(payment_id)
-
-    from services.workers.heartbeat import get_bot_ref
-    from aiogram.exceptions import TelegramForbiddenError
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-    bot = get_bot_ref()
-
-    if bot is None:
-        logger.error(
-            "Client notification SKIPPED: bot_ref is None. "
-            "Payment %s",
-            payment_id,
-        )
-        return
-
-    try:
-        payment = await get_payment_by_id(
-            session,
-            payment_id,
-        )
-
-    except Exception:
-        payment = None
-
-    if not payment or not payment.user:
-        return
-
-    user = payment.user
-    tariff = payment.tariff
-
-    if user.is_banned:
-        logger.info(
-            "Client notification skipped: user %s is banned",
-            user.telegram_id,
-        )
-        return
-
-    settings = get_settings()
-    support_username = settings.SUPPORT_USERNAME.lstrip("@")
-
-    tariff_name = "—"
-
-    if tariff:
-        tariff_name = (
-            f"{tariff.duration_days} дн. / "
-            f"{tariff.device_limit} устр."
-        )
-
-    msg = (
-        f"💳 <b>Мы получили вашу оплату</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Сумма:</b> {payment.amount} {payment.currency}\n"
-        f"💎 <b>Тариф:</b> {tariff_name}\n"
-        f"🆔 <b>Платёж:</b> <code>{payment.id}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Ранее в боте была нажата кнопка «Отменить», "
-        f"поэтому доступ не активировался автоматически.\n"
-        f"Напишите нам — решим за 2 минуты."
-    )
-
-    builder = InlineKeyboardBuilder()
-
-    builder.button(
-        text="💬 Написать в поддержку",
-        url=f"https://t.me/{support_username}",
-    )
-
-    builder.adjust(1)
-
-    try:
-        await bot.send_message(
-            user.telegram_id,
-            msg,
-            reply_markup=builder.as_markup(),
-            parse_mode="HTML",
-        )
-
-        logger.info(
-            "Paid-after-cancel notification sent to user %s "
-            "for payment %s",
-            user.telegram_id,
-            payment.id,
-        )
-
-    except TelegramForbiddenError:
-        logger.info(
-            "Paid-after-cancel notification: user %s blocked the bot",
-            user.telegram_id,
-        )
-
-        try:
-            from database.repositories.users_repo import (
-                mark_user_bot_blocked,
-            )
-
-            await mark_user_bot_blocked(
-                session,
-                user.telegram_id,
-            )
-
-        except Exception:
-            pass
-
-    except Exception as e:
-        logger.error(
-            "Failed to send paid-after-cancel notification to "
-            "user %s: %s",
-            user.telegram_id,
-            e,
-        )
-
-    try:
-        await AuditService.log_action(
-            session,
-            admin_id=0,
-            action="CLIENT_NOTIFIED_PAID_AFTER_CANCEL",
-            target_type="Payment",
-            target_id=payment_id,
-            details=(
-                f"user={user.telegram_id}, "
-                f"support=@{support_username}"
-            ),
-        )
-
-    except Exception as e:
-        logger.error("Failed to log CLIENT_NOTIFIED: %s", e)
-
-
-async def _send_chargeback_alert(
-    payment: Payment,
-    transaction_id: str,
-) -> None:
-    from services.workers.heartbeat import get_bot_ref
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-    bot = get_bot_ref()
-
-    if bot is None:
-        logger.error(
-            "Chargeback alert SKIPPED: bot_ref is None. "
-            "Payment %s, user %s, transaction=%s",
-            payment.id,
-            payment.user_id,
-            transaction_id,
-        )
-        return
-
-    settings = get_settings()
-    admin_ids = settings.ADMIN_IDS
-
-    if not admin_ids:
-        logger.warning("Chargeback alert skipped: ADMIN_IDS is empty")
-        return
-
-    user = payment.user
-    tariff = payment.tariff
-
-    username = (
-        f"@{user.username}"
-        if user and user.username
-        else "—"
-    )
-
-    tariff_name = (
-        f"{tariff.duration_days} дн. / {tariff.device_limit} устр."
-        if tariff
-        else "—"
-    )
-
-    builder = InlineKeyboardBuilder()
-
-    builder.button(
-        text="👤 Профиль пользователя",
-        callback_data=(
-            f"admin_user_card:{user.telegram_id}"
-            if user
-            else "admin_menu"
-        ),
-    )
-
-    builder.adjust(1)
-
-    keyboard = builder.as_markup()
-
-    alert_msg = (
-        f"🚨 <b>Возврат средств</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Платёж ID:</b> <code>{payment.id}</code>\n"
-        f"👤 <b>Пользователь:</b> "
-        f"<code>{user.telegram_id if user else '—'}</code> "
-        f"({username})\n"
-        f"💎 <b>Тариф:</b> {tariff_name}\n"
-        f"💰 <b>Сумма:</b> <b>{payment.amount} {payment.currency}</b>\n"
-        f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Доступ отозван. Устройства удалены.\n"
-        f"Реферальные бонусы откатаны.</i>"
-    )
-
-    for admin_id in admin_ids:
-        try:
-            await bot.send_message(
-                admin_id,
-                alert_msg,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
-
-        except Exception as e:
-            logger.error(
-                "Failed to send chargeback alert to admin %s: %s",
-                admin_id,
-                e,
-            )
+            return False, "error"
