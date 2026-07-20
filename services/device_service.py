@@ -1,31 +1,35 @@
-import uuid
-import re
-import logging
 import asyncio
+import logging
+import re
+import uuid
 from datetime import date
 
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services.amnezia_client import AmneziaClient
-from services.subscription import SubscriptionService
-from services.audit_service import AuditService
-from services.slots_cache import get_real_peer_count
+import redis.asyncio as aioredis
+
+from bot.constants import AMNEZIA_PROTOCOL, DEVICE_DAILY_LIMIT
+from config.settings import get_settings
+from database.models import (
+    PendingAPIDeletion,
+    User,
+    VPNProfile,
+)
 from database.repositories.profiles_repo import (
     create_profile,
+    delete_profile,
     get_user_profiles_count,
 )
 from database.repositories.servers_repo import get_server_by_id
-from database.repositories.users_repo import get_user_by_telegram_id
-from database.models import User, VPNProfile
-from bot.constants import AMNEZIA_PROTOCOL, DEVICE_DAILY_LIMIT
-from utils.vpn_parser import is_valid_vpn_uri
+from services.amnezia_client import AmneziaClient
+from services.audit_service import AuditService
+from services.slots_cache import get_real_peer_count
+from services.subscription import SubscriptionService
 from utils.admin import is_admin
-from utils.datetime_helpers import now_msk
-from config.settings import get_settings
-
-import redis.asyncio as aioredis
+from utils.datetime_helpers import now_msk, now_utc
+from utils.vpn_parser import is_valid_vpn_uri
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +40,16 @@ _redis_client: aioredis.Redis | None = None
 
 async def _get_redis() -> aioredis.Redis:
     global _redis_client
+
     if _redis_client is None:
         settings = get_settings()
+
         _redis_client = aioredis.from_url(
             settings.REDIS_URL,
             decode_responses=True,
             socket_timeout=5.0,
         )
+
     return _redis_client
 
 
@@ -72,29 +79,34 @@ _user_locks: dict[int, asyncio.Lock] = {}
 def _get_user_lock(user_id: int) -> asyncio.Lock:
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
+
     return _user_locks[user_id]
 
 
 def _is_same_day_msk(
-    stored_date: date | None, now_msk_date: date,
+    stored_date: date | None,
+    now_msk_date: date,
 ) -> bool:
     if stored_date is None:
         return False
+
     return stored_date == now_msk_date
 
 
 async def _get_server_profiles_count(
-    session: AsyncSession, server_id: int,
+    session: AsyncSession,
+    server_id: int,
 ) -> int:
     stmt = select(func.count(VPNProfile.id)).where(
         VPNProfile.server_id == server_id,
     )
+
     result = await session.execute(stmt)
+
     return result.scalar_one() or 0
 
 
 class DeviceService:
-
     @staticmethod
     async def create_device(
         session: AsyncSession,
@@ -103,87 +115,128 @@ class DeviceService:
         device_name: str,
     ) -> VPNProfile:
         server = await get_server_by_id(session, server_id)
+
         if not server or server.protocol != AMNEZIA_PROTOCOL:
             logger.warning(
-                f"create_device: invalid server {server_id} "
-                f"or protocol mismatch"
+                "create_device: invalid server %s "
+                "or protocol mismatch",
+                server_id,
             )
+
             raise ServerUnavailable("Invalid server or protocol")
 
         if not server.is_active:
             logger.warning(
-                f"create_device: server {server.name} "
-                f"(id={server.id}) is disabled"
+                "create_device: server %s (id=%s) is disabled",
+                server.name,
+                server.id,
             )
+
             raise ServerUnavailable("Server is disabled by admin")
 
         redis = await _get_redis()
+
         lock_key = f"lock:create_device:server:{server.id}"
+
         redis_lock = redis.lock(
-            lock_key, timeout=30, blocking_timeout=5,
+            lock_key,
+            timeout=30,
+            blocking_timeout=5,
         )
+
+        acquired = False
 
         try:
             acquired = await redis_lock.acquire()
+
             if not acquired:
                 logger.warning(
-                    f"create_device: failed to acquire Redis lock "
-                    f"for server {server.id}"
+                    "create_device: failed to acquire Redis lock "
+                    "for server %s",
+                    server.id,
                 )
+
                 raise ServerUnavailable("Server is busy, try again")
 
             local_count = await _get_server_profiles_count(
-                session, server.id,
+                session,
+                server.id,
             )
+
             free_slots = server.max_clients - local_count
 
             if free_slots <= 0:
                 logger.warning(
-                    f"create_device: server {server.name} is full "
-                    f"(local_count={local_count}/"
-                    f"{server.max_clients})"
+                    "create_device: server %s is full "
+                    "(local_count=%s/%s)",
+                    server.name,
+                    local_count,
+                    server.max_clients,
                 )
+
                 raise ServerUnavailable("Server is full")
 
             if free_slots < CRITICAL_SLOTS_THRESHOLD:
                 logger.info(
-                    f"create_device: critical zone on "
-                    f"{server.name}, checking API for accuracy "
-                    f"(local free={free_slots}"
-                    f"<{CRITICAL_SLOTS_THRESHOLD})"
+                    "create_device: critical zone on %s, "
+                    "checking API for accuracy (local free=%s<%s)",
+                    server.name,
+                    free_slots,
+                    CRITICAL_SLOTS_THRESHOLD,
                 )
+
                 real_count = await get_real_peer_count(
-                    server, force_refresh=True,
+                    server,
+                    force_refresh=True,
                 )
-                if (
-                    real_count != -1
-                    and real_count >= server.max_clients
-                ):
+
+                if real_count == -1:
                     logger.warning(
-                        f"create_device: server {server.name} "
-                        f"is full (api_count={real_count}/"
-                        f"{server.max_clients})"
+                        "create_device: cannot verify real peer count "
+                        "for server %s in critical zone. "
+                        "Blocking creation to avoid overfill.",
+                        server.name,
                     )
+
+                    raise ServerUnavailable(
+                        "Cannot verify server slots, try later",
+                    )
+
+                if real_count >= server.max_clients:
+                    logger.warning(
+                        "create_device: server %s is full "
+                        "(api_count=%s/%s)",
+                        server.name,
+                        real_count,
+                        server.max_clients,
+                    )
+
                     raise ServerUnavailable("Server is full")
 
             lock = _get_user_lock(user.id)
+
             async with lock:
                 result = await session.execute(
                     select(User)
                     .where(User.telegram_id == user.telegram_id)
                     .with_for_update()
                 )
+
                 user = result.scalar_one_or_none()
+
                 if not user:
                     raise ServerUnavailable("User disappeared")
 
                 if not is_admin(user.telegram_id):
                     now_msk_date = now_msk().date()
+
                     if not _is_same_day_msk(
-                        user.last_creation_date, now_msk_date,
+                        user.last_creation_date,
+                        now_msk_date,
                     ):
                         user.device_creations_today = 0
                         user.last_creation_date = now_msk_date
+
                         await session.flush()
 
                     if (
@@ -191,10 +244,11 @@ class DeviceService:
                         >= DEVICE_DAILY_LIMIT
                     ):
                         logger.warning(
-                            f"create_device: user "
-                            f"{user.telegram_id} exceeded "
-                            f"daily limit"
+                            "create_device: user %s exceeded "
+                            "daily limit",
+                            user.telegram_id,
                         )
+
                         try:
                             await AuditService.log_action(
                                 session,
@@ -210,18 +264,23 @@ class DeviceService:
                             )
                         except Exception as audit_error:
                             logger.error(
-                                f"Failed to log "
-                                f"DEVICE_CREATE_BLOCKED: "
-                                f"{audit_error}"
+                                "Failed to log "
+                                "DEVICE_CREATE_BLOCKED: %s",
+                                audit_error,
                             )
+
                         raise DailyLimitExceeded(
                             "Daily limit exceeded",
                         )
 
                 short_hash = uuid.uuid4().hex[:4]
+
                 clean_device_name = re.sub(
-                    r'[^a-zA-Z0-9]', '', device_name,
+                    r"[^a-zA-Z0-9]",
+                    "",
+                    device_name,
                 )[:10]
+
                 if not clean_device_name:
                     clean_device_name = "Device"
 
@@ -237,17 +296,17 @@ class DeviceService:
                 )
 
                 client = AmneziaClient(
-                    server.api_url, server.api_key,
+                    server.api_url,
+                    server.api_key,
                 )
+
                 api_result = await client.create_user(
                     client_name=client_name,
                     expires_at=expires_ts,
                 )
 
                 if not api_result:
-                    raise ServerUnavailable(
-                        "API create_user failed",
-                    )
+                    raise ServerUnavailable("API create_user failed")
 
                 peer_id = api_result.id
                 raw_config = api_result.config
@@ -255,26 +314,30 @@ class DeviceService:
                 if not is_valid_vpn_uri(raw_config):
                     logger.error(
                         "create_device: API returned invalid "
-                        "vpn:// URI. Rolling back."
+                        "configuration URI. Rolling back."
                     )
+
                     try:
                         await client.delete_user(
                             client_id=peer_id,
                         )
                     except Exception as rollback_error:
                         logger.error(
-                            f"Failed to rollback invalid "
-                            f"config: {rollback_error}"
+                            "Failed to rollback invalid config: %s",
+                            rollback_error,
                         )
-                    raise InvalidConfig("Invalid vpn:// URI")
+
+                    raise InvalidConfig("Invalid configuration URI")
 
                 try:
                     async with session.begin_nested():
                         profiles_count = (
                             await get_user_profiles_count(
-                                session, user.id,
+                                session,
+                                user.id,
                             )
                         )
+
                         if profiles_count >= user.device_limit:
                             raise DeviceLimitExceeded(
                                 "Device limit reached",
@@ -307,8 +370,8 @@ class DeviceService:
                             )
                         except Exception as audit_error:
                             logger.warning(
-                                f"Failed to log DEVICE_CREATED: "
-                                f"{audit_error}"
+                                "Failed to log DEVICE_CREATED: %s",
+                                audit_error,
                             )
 
                         return profile
@@ -320,26 +383,32 @@ class DeviceService:
                         )
                     except Exception as rollback_error:
                         logger.error(
-                            f"Failed to rollback API client "
-                            f"after limit check: "
-                            f"{rollback_error}"
+                            "Failed to rollback API client "
+                            "after limit check: %s",
+                            rollback_error,
                         )
+
                     raise
 
                 except IntegrityError as e:
                     await session.rollback()
+
                     logger.error(
-                        f"create_device: IntegrityError: {e}"
+                        "create_device: IntegrityError: %s",
+                        e,
                     )
+
                     try:
                         await client.delete_user(
                             client_id=peer_id,
                         )
                     except Exception as rollback_error:
                         logger.error(
-                            f"Failed to rollback after "
-                            f"IntegrityError: {rollback_error}"
+                            "Failed to rollback after "
+                            "IntegrityError: %s",
+                            rollback_error,
                         )
+
                     raise
 
                 except (
@@ -352,49 +421,90 @@ class DeviceService:
 
                 except Exception as e:
                     await session.rollback()
+
                     logger.error(
-                        f"create_device: DB error: {e}",
+                        "create_device: DB error: %s",
+                        e,
                         exc_info=True,
                     )
+
                     raise ServerUnavailable(f"DB error: {e}")
 
         finally:
-            try:
-                await redis_lock.release()
-            except Exception:
-                pass
+            if acquired:
+                try:
+                    await redis_lock.release()
+                except Exception:
+                    pass
 
     @staticmethod
     async def delete_device(
-        session: AsyncSession, profile: VPNProfile,
+        session: AsyncSession,
+        profile: VPNProfile,
     ) -> bool:
-        from database.repositories.profiles_repo import (
-            delete_profile,
+        server = await get_server_by_id(
+            session,
+            profile.server_id,
         )
 
-        server = await get_server_by_id(
-            session, profile.server_id,
-        )
         if not server:
             logger.error(
-                f"delete_device: server "
-                f"{profile.server_id} not found"
+                "delete_device: server %s not found for profile %s. "
+                "Deleting profile from DB only.",
+                profile.server_id,
+                profile.id,
             )
-            return False
 
-        client = AmneziaClient(server.api_url, server.api_key)
+            try:
+                await delete_profile(session, profile)
+
+                return True
+            except Exception as e:
+                await session.rollback()
+
+                logger.error(
+                    "delete_device: failed to delete profile %s "
+                    "from DB: %s",
+                    profile.id,
+                    e,
+                )
+
+                return False
+
+        client = AmneziaClient(
+            server.api_url,
+            server.api_key,
+        )
+
         deleted = await client.delete_user(
             client_id=profile.peer_id,
         )
 
         if not deleted:
             logger.warning(
-                f"delete_device: API delete_user returned False "
-                f"for peer_id={profile.peer_id[:16]}... "
-                f"(peer may already be deleted on API or API "
-                f"unavailable). Proceeding with DB deletion. "
-                f"Cleanup worker will remove orphaned peers."
+                "delete_device: API delete_user returned False "
+                "for peer_id=%s... (peer may already be deleted "
+                "or API unavailable). Proceeding with DB deletion. "
+                "Queuing pending API deletion.",
+                profile.peer_id[:16],
             )
+
+            if server.api_url and server.api_key:
+                pending = PendingAPIDeletion(
+                    server_name=server.name,
+                    api_url=server.api_url,
+                    api_key=server.api_key,
+                    peer_id=profile.peer_id,
+                    client_name=(
+                        f"tg_{profile.user_id}_{profile.id}"
+                    ),
+                    reason="device_delete_api_failed",
+                    attempts=1,
+                    last_attempt_at=now_utc(),
+                    last_error="API delete_user returned False",
+                )
+
+                session.add(pending)
 
         try:
             async with session.begin_nested():
@@ -403,12 +513,7 @@ class DeviceService:
                 try:
                     await AuditService.log_action(
                         session,
-                        admin_id=(
-                            profile.user.telegram_id
-                            if hasattr(profile, 'user')
-                            and profile.user
-                            else 0
-                        ),
+                        admin_id=profile.user_id,
                         action="DEVICE_DELETED",
                         target_type="VPNProfile",
                         target_id=profile.id,
@@ -419,16 +524,19 @@ class DeviceService:
                     )
                 except Exception as audit_error:
                     logger.warning(
-                        f"Failed to log DEVICE_DELETED: "
-                        f"{audit_error}"
+                        "Failed to log DEVICE_DELETED: %s",
+                        audit_error,
                     )
 
-                return True
+            return True
 
         except Exception as e:
             await session.rollback()
+
             logger.error(
-                f"delete_device: DB error: {e}",
+                "delete_device: DB error: %s",
+                e,
                 exc_info=True,
             )
+
             return False

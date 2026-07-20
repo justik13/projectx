@@ -3,6 +3,7 @@ from .throttling import ThrottlingMiddleware
 from .db_session import DBSessionMiddleware
 from .clean_chat import CleanChatMiddleware
 from .action_lock import ActionLockMiddleware
+from .private_chat import PrivateChatMiddleware
 from .correlation import (
     CorrelationMiddleware,
     CorrelationFilter,
@@ -16,6 +17,7 @@ __all__ = [
     "DBSessionMiddleware",
     "CleanChatMiddleware",
     "ActionLockMiddleware",
+    "PrivateChatMiddleware",
     "CorrelationMiddleware",
     "CorrelationFilter",
     "get_current_request_id",
