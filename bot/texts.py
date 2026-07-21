@@ -505,6 +505,7 @@ AUDIT_ACTIONS = {
     "DELETE_SERVER": "🗑 Удалил сервер",
     "ADD_SERVER": "➕ Добавил сервер",
     "TOGGLE_SERVER": "🔄 Переключил сервер",
+    "EDIT_SERVER": "✏️ Изменил сервер",
     "DELETE_TARIFF": "🗑 Удалил тариф",
     "ADD_TARIFF": "➕ Добавил тариф",
     "EDIT_TARIFF": "✏️ Изменил тариф",

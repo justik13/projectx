@@ -8,14 +8,19 @@ from .notifications import subscription_notifications_loop
 from .cleanup import cleanup_dangling_peers_loop
 from .payments import stale_payments_checker_loop
 from .heartbeat import heartbeat_loop, set_bot_ref
+
 from config.settings import get_settings
+
 
 logger = logging.getLogger(__name__)
 
+
 shutdown_event = asyncio.Event()
+
 
 _worker_tasks: dict[str, asyncio.Task] = {}
 _supervisor_task: asyncio.Task | None = None
+
 
 _SUPERVISOR_CHECK_INTERVAL = 15.0
 _MAX_WORKER_RESTARTS = 10
@@ -74,11 +79,13 @@ async def _send_worker_crash_alert(
                     message,
                     parse_mode="HTML",
                 )
+
             except Exception:
                 pass
 
     except Exception as e:
         logger.error("Failed to send worker crash alert: %s", e)
+
 
 async def _send_supervisor_crash_alert(
     bot: Bot,
@@ -103,6 +110,7 @@ async def _send_supervisor_crash_alert(
                     message,
                     parse_mode="HTML",
                 )
+
             except Exception:
                 pass
 
@@ -115,14 +123,18 @@ async def _supervise_workers(bot: Bot):
     Supervisor фоновых воркеров.
 
     Если воркер падает:
+
     1. Пишем critical log.
     2. Отправляем алерт админам.
     3. Перезапускаем воркер.
 
     Если воркер упал слишком много раз подряд:
+
     - останавливаем перезапуски;
-    - отправляем критический алерт.
+    - отправляем критический алерт;
+    - убираем задачу из _worker_tasks, чтобы не спамить.
     """
+
     restart_counts: dict[str, int] = {}
 
     logger.info("Worker supervisor started")
@@ -133,7 +145,9 @@ async def _supervise_workers(bot: Bot):
                 shutdown_event.wait(),
                 timeout=_SUPERVISOR_CHECK_INTERVAL,
             )
+
             break
+
         except asyncio.TimeoutError:
             pass
 
@@ -147,19 +161,24 @@ async def _supervise_workers(bot: Bot):
             factory = _WORKER_FACTORIES.get(worker_name)
 
             if factory is None:
+                _worker_tasks.pop(worker_name, None)
+                continue
+
+            if task.cancelled():
+                logger.info(
+                    "Worker %s was cancelled, removing from supervisor",
+                    worker_name,
+                )
+
+                _worker_tasks.pop(worker_name, None)
+
                 continue
 
             error_text = "unknown"
 
-            if task.cancelled():
-                logger.info(
-                    "Worker %s was cancelled, not restarting",
-                    worker_name,
-                )
-                continue
-
             try:
                 exc = task.exception()
+
             except Exception as e:
                 exc = e
 
@@ -172,11 +191,16 @@ async def _supervise_workers(bot: Bot):
                 error_text,
             )
 
-            await _send_worker_crash_alert(bot, worker_name, error_text)
+            await _send_worker_crash_alert(
+                bot,
+                worker_name,
+                error_text,
+            )
 
             restart_counts[worker_name] = (
                 restart_counts.get(worker_name, 0) + 1
             )
+
             count = restart_counts[worker_name]
 
             if count > _MAX_WORKER_RESTARTS:
@@ -206,6 +230,7 @@ async def _supervise_workers(bot: Bot):
                                 critical_message,
                                 parse_mode="HTML",
                             )
+
                         except Exception:
                             pass
 
@@ -214,6 +239,12 @@ async def _supervise_workers(bot: Bot):
                         "Failed to send critical worker alert: %s",
                         e,
                     )
+
+                # ВАЖНО:
+                # убираем задачу, чтобы supervisor не отправлял
+                # повторные алерты каждые 15 секунд.
+                _worker_tasks.pop(worker_name, None)
+                restart_counts.pop(worker_name, None)
 
                 continue
 
@@ -231,7 +262,9 @@ async def _supervise_workers(bot: Bot):
                     shutdown_event.wait(),
                     timeout=backoff,
                 )
+
                 break
+
             except asyncio.TimeoutError:
                 pass
 
@@ -270,8 +303,10 @@ async def start_background_workers(bot: Bot) -> list[asyncio.Task]:
 
         try:
             exc = task.exception()
+
         except asyncio.CancelledError:
             return
+
         except Exception as e:
             exc = e
 
@@ -308,8 +343,10 @@ async def stop_background_workers():
 
         try:
             await _supervisor_task
+
         except asyncio.CancelledError:
             pass
+
         except Exception as e:
             logger.error("Error while stopping supervisor: %s", e)
 

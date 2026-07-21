@@ -4,6 +4,9 @@ import os
 import socket
 from urllib.parse import urlparse
 
+from aiohttp.resolver import DefaultResolver
+
+
 _BLOCKED_HOSTNAMES = {
     "169.254.169.254",
     "metadata.google.internal",
@@ -22,6 +25,7 @@ _LOCAL_HOSTNAMES = {
 def _env_truthy(value: str | None) -> bool:
     if value is None:
         return False
+
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -35,42 +39,143 @@ def _allow_local_https() -> bool:
     return _env_truthy(raw)
 
 
-def _is_dangerous_ip(ip) -> bool:
-    if ip.is_private:
+def allow_local_networks() -> bool:
+    """
+    Используется в aiohttp resolver.
+
+    Для production рекомендуется:
+
+        ALLOW_LOCAL_HTTP=false
+        ALLOW_LOCAL_HTTPS=false
+
+    Тогда любые private/loopback/metadata адреса будут запрещены
+    даже при DNS rebinding.
+    """
+    return _allow_local_http() or _allow_local_https()
+
+
+def _host_is_localish(hostname: str) -> bool:
+    """
+    Возвращает True только если хост явно выглядит как локальный:
+
+    - localhost;
+    - 127.0.0.1;
+    - ::1;
+    - 0.0.0.0;
+    - прямой private/loopback IP.
+
+    Metadata/link-local адреса НЕ считаются разрешёнными локальными.
+    """
+    h = (hostname or "").lower().strip().strip("[]")
+
+    if not h:
+        return False
+
+    if h in _LOCAL_HOSTNAMES:
         return True
 
-    if ip.is_loopback:
-        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
 
-    if ip.is_link_local:
-        return True
+    if ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        return False
 
-    if ip.is_reserved:
-        return True
+    return ip.is_loopback or ip.is_private or ip.is_unspecified
 
-    if ip.is_multicast:
-        return True
 
-    if ip.is_unspecified:
-        return True
+def is_ip_allowed(ip, *, allow_local: bool = False) -> bool:
+    """
+    Проверяет, разрешено ли подключаться к IP.
 
+    Важно:
+    - link-local заблокирован всегда, даже если allow_local=True;
+    - reserved/multicast заблокированы всегда;
+    - private/loopback/unspecified разрешены только если allow_local=True.
+    """
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        return _is_dangerous_ip(ip.ipv4_mapped)
+        ip = ip.ipv4_mapped
 
-    return False
+    if ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        return False
+
+    if ip.is_loopback or ip.is_private or ip.is_unspecified:
+        return allow_local
+
+    return True
 
 
-async def _resolved_ips_are_safe(hostname: str) -> bool:
+def _is_dangerous_ip(ip) -> bool:
+    return not is_ip_allowed(ip, allow_local=False)
+
+
+class SafeResolver(DefaultResolver):
+    """
+    Resolver для aiohttp, который не даёт подключиться к опасным IP.
+
+    Это закрывает DNS rebinding:
+    даже если домен сначала резолвился в белый IP,
+    но при фактическом подключении вернулся private/metadata IP,
+    подключение будет заблокировано.
+    """
+
+    def __init__(self, *, allow_local: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.allow_local = allow_local
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        host_lower = (host or "").lower()
+
+        if host_lower in _BLOCKED_HOSTNAMES:
+            raise OSError(f"Blocked hostname: {host}")
+
+        records = await super().resolve(host, port=port, family=family)
+
+        # Разрешаем local IP только если:
+        # 1) глобально разрешены локальные сети;
+        # 2) хост явно выглядит локальным.
+        #
+        # Это защищает от DNS rebinding вида:
+        # api.example.com -> 127.0.0.1
+        allow_for_host = self.allow_local and _host_is_localish(host)
+
+        safe_records = []
+
+        for record in records:
+            try:
+                ip = ipaddress.ip_address(record["host"])
+            except ValueError:
+                continue
+
+            if is_ip_allowed(ip, allow_local=allow_for_host):
+                safe_records.append(record)
+
+        if not safe_records:
+            raise OSError(
+                f"Unsafe or forbidden address resolved for host: {host}"
+            )
+
+        return safe_records
+
+
+async def _resolved_ips_are_safe(hostname: str, *, allow_local: bool = False) -> bool:
+    effective_allow_local = allow_local and _host_is_localish(hostname)
+
     try:
         loop = asyncio.get_running_loop()
+
         addr_info = await asyncio.wait_for(
             loop.getaddrinfo(hostname, None),
             timeout=5.0,
         )
+
     except asyncio.TimeoutError:
         return False
+
     except socket.gaierror:
         return False
+
     except Exception:
         return False
 
@@ -85,7 +190,7 @@ async def _resolved_ips_are_safe(hostname: str) -> bool:
         except ValueError:
             return False
 
-        if _is_dangerous_ip(ip):
+        if not is_ip_allowed(ip, allow_local=effective_allow_local):
             return False
 
     return True
@@ -94,6 +199,7 @@ async def _resolved_ips_are_safe(hostname: str) -> bool:
 async def is_safe_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
+
         hostname = parsed.hostname
         scheme = (parsed.scheme or "").lower()
 
@@ -108,12 +214,14 @@ async def is_safe_url(url: str) -> bool:
         if hostname in _BLOCKED_HOSTNAMES:
             return False
 
+        allow_local_https = _allow_local_https()
+
         if hostname in _LOCAL_HOSTNAMES:
             if scheme == "http":
                 return _allow_local_http()
 
             if scheme == "https":
-                return _allow_local_https()
+                return allow_local_https
 
             return False
 
@@ -124,11 +232,18 @@ async def is_safe_url(url: str) -> bool:
         # Прямой IP-адрес.
         try:
             ip = ipaddress.ip_address(hostname)
-            return not _is_dangerous_ip(ip)
         except ValueError:
             pass
+        else:
+            return is_ip_allowed(
+                ip,
+                allow_local=allow_local_https and _host_is_localish(hostname),
+            )
 
-        return await _resolved_ips_are_safe(hostname)
+        return await _resolved_ips_are_safe(
+            hostname,
+            allow_local=allow_local_https,
+        )
 
     except Exception:
         return False

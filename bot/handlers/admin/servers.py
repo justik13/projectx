@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from urllib.parse import urlsplit, urlunsplit
 from bot import texts
 from bot.keyboards import get_admin_server_card_keyboard, get_back_button
 from bot.keyboards.admin.servers import get_server_delete_confirm_keyboard
@@ -49,6 +49,36 @@ URL_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+def normalize_api_url(url: str) -> str:
+    """
+    Нормализует API URL:
+
+    - убирает trailing slash;
+    - приводит scheme и host к нижнему регистру;
+    - сохраняет порт и путь.
+
+    Пример:
+
+        HTTP://Example.com:4001/  ->  http://example.com:4001
+    """
+
+    url = url.strip()
+
+    parts = urlsplit(url)
+
+    scheme = parts.scheme.lower()
+    netloc = parts.netloc.lower()
+    path = parts.path.rstrip("/")
+
+    return urlunsplit(
+        (
+            scheme,
+            netloc,
+            path,
+            parts.query,
+            parts.fragment,
+        )
+    )
 
 async def _build_servers_list_text_and_kb(
     servers,
@@ -328,6 +358,7 @@ async def process_add_server(
             texts.ERROR_TEXT_REQUIRED,
             get_back_button("admin_servers"),
         )
+
         return
 
     if message.text.startswith("/"):
@@ -339,10 +370,10 @@ async def process_add_server(
             texts.ERROR_OPERATION_CANCELLED,
             get_back_button("admin_servers"),
         )
+
         return
 
     data = await state.get_data()
-
     step = data.get("step")
 
     if step == "name":
@@ -355,6 +386,7 @@ async def process_add_server(
                 texts.ERROR_NAME_TOO_LONG.format(max=255),
                 get_back_button("admin_servers"),
             )
+
             return
 
         await state.update_data(name=name, step="flag")
@@ -367,8 +399,20 @@ async def process_add_server(
         )
 
     elif step == "flag":
+        country_flag = message.text.strip()
+
+        if len(country_flag) > 10:
+            await render_hub(
+                message.bot,
+                message.chat.id,
+                "⚠️ Флаг слишком длинный (макс. 10 символов).",
+                get_back_button("admin_servers"),
+            )
+
+            return
+
         await state.update_data(
-            country_flag=message.text.strip(),
+            country_flag=country_flag,
             step="api_url",
         )
 
@@ -380,7 +424,7 @@ async def process_add_server(
         )
 
     elif step == "api_url":
-        api_url = message.text.strip()
+        api_url = normalize_api_url(message.text)
 
         if len(api_url) > 500:
             await render_hub(
@@ -389,6 +433,7 @@ async def process_add_server(
                 texts.ERROR_URL_TOO_LONG.format(max=500),
                 get_back_button("admin_servers"),
             )
+
             return
 
         if not URL_REGEX.match(api_url):
@@ -399,6 +444,7 @@ async def process_add_server(
                 get_back_button("admin_servers"),
                 parse_mode="HTML",
             )
+
             return
 
         if not await is_safe_url(api_url):
@@ -411,6 +457,7 @@ async def process_add_server(
                 get_back_button("admin_servers"),
                 parse_mode="HTML",
             )
+
             return
 
         existing = await get_server_by_api_url(session, api_url)
@@ -449,6 +496,7 @@ async def process_add_server(
                 texts.ERROR_API_KEY_SHORT.format(min=8),
                 get_back_button("admin_servers"),
             )
+
             return
 
         await state.update_data(api_key=api_key)
@@ -516,7 +564,6 @@ async def process_add_server(
             return
 
         api_max_peers = server_info.get_effective_max_peers()
-
         api_server_name = server_info.name or all_data["name"]
 
         existing = await get_server_by_api_url(
@@ -598,7 +645,7 @@ async def _show_server_card(
         id=server.id,
         status=status,
         protocol=server.protocol,
-        api_url=server.api_url,
+        api_url=safe(server.api_url),
         max_clients=server.max_clients,
     )
 
@@ -611,6 +658,7 @@ async def _show_server_card(
             ),
             parse_mode="HTML",
         )
+
     except TelegramBadRequest as e:
         logger.debug(f"_show_server_card edit_text failed: {e}")
 
@@ -977,6 +1025,7 @@ async def start_edit_server_flag(
             texts.ERROR_ACCESS_DENIED,
             show_alert=True,
         )
+
         return
 
     await state.clear()
@@ -990,6 +1039,7 @@ async def start_edit_server_flag(
             texts.ERROR_SERVER_NOT_FOUND,
             show_alert=True,
         )
+
         return
 
     current_flag = server.country_flag or "🌍"
@@ -1003,7 +1053,7 @@ async def start_edit_server_flag(
 
     await callback.message.edit_text(
         texts.ADMIN_SERVER_FLAG_PROMPT_EDIT.format(
-            current_flag=current_flag,
+            current_flag=safe(current_flag),
         ),
         reply_markup=get_back_button(
             f"admin_server_card:{server_id}"
@@ -1028,6 +1078,7 @@ async def process_edit_server_flag(
             texts.ERROR_TEXT_REQUIRED,
             get_back_button("admin_servers"),
         )
+
         return
 
     if message.text.startswith("/"):
@@ -1039,6 +1090,7 @@ async def process_edit_server_flag(
             texts.ERROR_OPERATION_CANCELLED,
             get_back_button("admin_servers"),
         )
+
         return
 
     data = await state.get_data()
@@ -1068,6 +1120,7 @@ async def process_edit_server_flag(
             "⚠️ Флаг слишком длинный (макс. 10 символов):",
             get_back_button("admin_servers"),
         )
+
         return
 
     await update_server(
@@ -1076,10 +1129,19 @@ async def process_edit_server_flag(
         country_flag=new_flag,
     )
 
+    await AuditService.log_action(
+        session,
+        message.from_user.id,
+        "EDIT_SERVER",
+        "Server",
+        server_id,
+        f"flag -> {new_flag}",
+    )
+
     await render_hub(
         message.bot,
         message.chat.id,
-        texts.ADMIN_SERVER_FLAG_UPDATED.format(flag=new_flag),
+        texts.ADMIN_SERVER_FLAG_UPDATED.format(flag=safe(new_flag)),
         get_back_button(
             f"admin_server_card:{server_id}"
         ),
@@ -1110,6 +1172,7 @@ async def process_edit_server_name(
             texts.ERROR_TEXT_REQUIRED,
             get_back_button("admin_servers"),
         )
+
         return
 
     if message.text.startswith("/"):
@@ -1121,6 +1184,7 @@ async def process_edit_server_name(
             texts.ERROR_OPERATION_CANCELLED,
             get_back_button("admin_servers"),
         )
+
         return
 
     data = await state.get_data()
@@ -1150,12 +1214,22 @@ async def process_edit_server_name(
             texts.ERROR_NAME_TOO_LONG.format(max=255),
             get_back_button("admin_servers"),
         )
+
         return
 
     await update_server(
         session,
         server,
         name=new_name,
+    )
+
+    await AuditService.log_action(
+        session,
+        message.from_user.id,
+        "EDIT_SERVER",
+        "Server",
+        server_id,
+        f"name -> {new_name}",
     )
 
     await render_hub(

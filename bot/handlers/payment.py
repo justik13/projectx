@@ -1216,11 +1216,13 @@ async def check_payment_status(
 
     try:
         payment_id = int(callback.data.split(":")[1])
+
     except (ValueError, IndexError):
         await callback.answer(
             "Некорректный платёж",
             show_alert=True,
         )
+
         return
 
     if not db_user or not session:
@@ -1228,6 +1230,7 @@ async def check_payment_status(
             texts.ERROR_ACCESS_DENIED,
             show_alert=True,
         )
+
         return
 
     payment_simple = await get_payment_by_id_simple(
@@ -1240,6 +1243,7 @@ async def check_payment_status(
             "Платёж не найден",
             show_alert=True,
         )
+
         return
 
     if payment_simple.user_id != db_user.id:
@@ -1247,6 +1251,7 @@ async def check_payment_status(
             texts.ERROR_ACCESS_DENIED,
             show_alert=True,
         )
+
         return
 
     success, result_code = await PaymentService.check_platega_payment(
@@ -1299,6 +1304,7 @@ async def check_payment_status(
 
     elif result_code == "paid_after_cancel":
         settings = get_settings()
+
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
 
         payment = await get_payment_by_id(session, payment_id)
@@ -1341,6 +1347,7 @@ async def check_payment_status(
 
     elif result_code == "manual_review":
         settings = get_settings()
+
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
 
         builder = InlineKeyboardBuilder()
@@ -1374,6 +1381,12 @@ async def check_payment_status(
     elif result_code == "refunded":
         await callback.answer(
             "❌ Платёж был возвращён.",
+            show_alert=True,
+        )
+
+    elif result_code == "cancelled":
+        await callback.answer(
+            "❌ Платёж отменён.",
             show_alert=True,
         )
 

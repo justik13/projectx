@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from utils.telegram import render_hub, send_hub_photo, safe
 from aiogram.filters import StateFilter
 from aiogram import Router, F
 from aiogram.exceptions import (
@@ -26,7 +27,6 @@ from database.repositories.users_repo import mark_user_bot_blocked
 from services.audit_service import AuditService
 from utils.admin import is_admin
 from utils.datetime_helpers import now_utc
-from utils.telegram import render_hub, send_hub_photo
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -125,6 +125,7 @@ async def process_broadcast_message(
             texts.ERROR_TEXT_OR_MEDIA,
             get_back_button("admin_menu"),
         )
+
         return
 
     media_id = None
@@ -132,6 +133,7 @@ async def process_broadcast_message(
 
     if message.photo:
         media_id = message.photo[-1].file_id
+
     elif message.document:
         media_id = message.document.file_id
 
@@ -150,6 +152,7 @@ async def process_broadcast_message(
                 reply_markup=get_broadcast_confirm_keyboard(),
                 parse_mode="HTML",
             )
+
         elif media_id and content_type == "document":
             from utils.telegram import send_hub_document
 
@@ -161,6 +164,7 @@ async def process_broadcast_message(
                 reply_markup=get_broadcast_confirm_keyboard(),
                 parse_mode="HTML",
             )
+
         else:
             await render_hub(
                 message.bot,
@@ -182,7 +186,7 @@ async def process_broadcast_message(
         await render_hub(
             message.bot,
             message.chat.id,
-            texts.ERROR_VALIDATION.format(error=e),
+            texts.ERROR_VALIDATION.format(error=safe(str(e))),
             get_back_button("admin_menu"),
         )
 
@@ -379,7 +383,7 @@ async def _send_broadcast_to_users_with_resume(
                 )
 
             if not batch:
-                    break
+                break
 
             for internal_id, uid in batch:
                 if stop_event and stop_event.is_set():

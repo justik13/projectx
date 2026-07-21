@@ -477,7 +477,11 @@ setup_env() {
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
     write_env_var "DB_ENCRYPTION_KEY" "$DB_KEY"
-    write_env_var "DATABASE_URL" "postgresql+asyncpg://projectx:${DB_PASSWORD}@localhost:${PG_PORT}/projectx_bot"
+    local DB_PASSWORD_ENC
+
+    DB_PASSWORD_ENC=$(printf '%s' "$DB_PASSWORD" | python3 -c 'import sys, urllib.parse; print(urllib.parse.quote_plus(sys.stdin.read()))')
+
+    write_env_var "DATABASE_URL" "postgresql+asyncpg://projectx:${DB_PASSWORD_ENC}@localhost:${PG_PORT}/projectx_bot"
     write_env_var "REDIS_URL" "redis://localhost:6379/0"
     write_env_var "REDIS_KEY_PREFIX" "projectx_bot:"
 

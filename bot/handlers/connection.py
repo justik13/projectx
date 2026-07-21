@@ -478,6 +478,7 @@ async def show_config(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
+
     profile = await get_profile_by_id(session, profile_id)
 
     if not profile or not db_user or profile.user_id != db_user.id:
@@ -485,6 +486,7 @@ async def show_config(
             texts.ERROR_ACCESS_DENIED,
             show_alert=True,
         )
+
         return
 
     has_access = await SubscriptionService.check_access(
@@ -497,9 +499,18 @@ async def show_config(
             "⚠️ Доступ неактивен. Продлите подписку.",
             show_alert=True,
         )
+
         return
 
     raw_config = profile.raw_config or ""
+
+    if not raw_config:
+        await callback.answer(
+            "⚠️ Конфигурация недоступна. Обратитесь в поддержку.",
+            show_alert=True,
+        )
+
+        return
 
     # Если ключ слишком длинный, Telegram не отправит его как текст.
     # Отправляем его файлом.
@@ -529,6 +540,7 @@ async def show_config(
             reply_markup=get_back_button(f"manage_device:{profile.id}"),
             parse_mode="HTML",
         )
+
         return
 
     await render_hub(
@@ -560,6 +572,7 @@ async def download_conf(
             texts.ERROR_ACCESS_DENIED,
             show_alert=True,
         )
+
         return
 
     has_access = await SubscriptionService.check_access(
@@ -572,6 +585,7 @@ async def download_conf(
             "⚠️ Доступ неактивен. Продлите подписку.",
             show_alert=True,
         )
+
         return
 
     await callback.answer("⏳ Генерирую файлы...")
@@ -582,7 +596,21 @@ async def download_conf(
         if c.isalnum() or c in (" ", "_", "-")
     ).strip() or "client"
 
-    decoded = decode_vpn_uri_to_json(profile.raw_config)
+    raw_config = profile.raw_config or ""
+
+    if not raw_config:
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            texts.DOWNLOAD_CONF_FALLBACK.format(
+                device_name=safe(profile.device_name),
+            ),
+            get_back_button(f"manage_device:{profile.id}"),
+        )
+
+        return
+
+    decoded = decode_vpn_uri_to_json(raw_config)
 
     if decoded is None:
         await render_hub(
@@ -593,6 +621,7 @@ async def download_conf(
             ),
             get_back_button(f"manage_device:{profile.id}"),
         )
+
         return
 
     vpn_content = build_vpn_file_from_dict(decoded)
@@ -607,11 +636,12 @@ async def download_conf(
             ),
             get_back_button(f"manage_device:{profile.id}"),
         )
+
         return
 
     vpn_file = BufferedInputFile(
         vpn_content.encode("utf-8"),
-        filename=f"{safe_device_name}.amnezia",
+        filename=f"{safe_device_name}.vpn",
     )
 
     conf_file = BufferedInputFile(

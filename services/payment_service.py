@@ -514,6 +514,7 @@ class PaymentService:
         Обрабатывает успешный платёж.
 
         Безопасная логика:
+
         1. Блокируем строку платежа.
         2. Проверяем статус.
         3. Проверяем пользователя.
@@ -524,22 +525,26 @@ class PaymentService:
         Если что-то не так, платёж переводится в
         requires_manual_review, а админ получает алерт.
         """
-        redis = await _get_redis()
 
         payment_obj = await session.get(Payment, payment_id)
 
         if not payment_obj:
             return False, "not_found"
 
-        user_lock_key = f"lock:payment_bonus:{payment_obj.user_id}"
-
-        redis_lock = redis.lock(
-            user_lock_key,
-            timeout=30,
-            blocking_timeout=15,
-        )
+        redis_lock = None
+        acquired = False
 
         try:
+            redis = await _get_redis()
+
+            user_lock_key = f"lock:payment_bonus:{payment_obj.user_id}"
+
+            redis_lock = redis.lock(
+                user_lock_key,
+                timeout=30,
+                blocking_timeout=15,
+            )
+
             acquired = await redis_lock.acquire()
 
             if not acquired:
@@ -549,355 +554,371 @@ class PaymentService:
                     payment_id,
                 )
 
-            try:
-                async with session.begin_nested():
-                    payment = await get_payment_by_id_for_update(
-                        session,
+        except Exception as e:
+            logger.warning(
+                "Payment %s: Redis unavailable for bonus lock: %s. "
+                "Continuing with DB row lock only.",
+                payment_id,
+                e,
+            )
+
+            redis_lock = None
+            acquired = False
+
+        try:
+            async with session.begin_nested():
+                payment = await get_payment_by_id_for_update(
+                    session,
+                    payment_id,
+                )
+
+                if not payment:
+                    return False, "not_found"
+
+                if payment.status == "completed":
+                    logger.info(
+                        "Payment %s already completed "
+                        "(idempotent)",
                         payment_id,
                     )
 
-                    if not payment:
-                        return False, "not_found"
+                    return True, "already_processed"
 
-                    if payment.status == "completed":
-                        logger.info(
-                            "Payment %s already completed "
-                            "(idempotent)",
-                            payment_id,
-                        )
-                        return True, "already_processed"
+                if payment.status == "cancelled":
+                    snapshot = _build_payment_snapshot(payment)
 
-                    if payment.status == "cancelled":
-                        snapshot = _build_payment_snapshot(payment)
+                    await AuditService.log_action(
+                        session,
+                        admin_id=0,
+                        action="PAID_AFTER_CANCEL",
+                        target_type="Payment",
+                        target_id=payment_id,
+                        details=(
+                            f"user="
+                            f"{snapshot.get('user_telegram_id')}, "
+                            f"amount={snapshot.get('amount')} "
+                            f"{snapshot.get('currency')}"
+                        ),
+                    )
 
-                        await AuditService.log_action(
-                            session,
-                            admin_id=0,
-                            action="PAID_AFTER_CANCEL",
-                            target_type="Payment",
-                            target_id=payment_id,
-                            details=(
-                                f"user="
-                                f"{snapshot.get('user_telegram_id')}, "
-                                f"amount={snapshot.get('amount')} "
-                                f"{snapshot.get('currency')}"
-                            ),
-                        )
+                    queue_post_commit_task(
+                        session,
+                        lambda s=snapshot: (
+                            _send_paid_after_cancel_alert_now(s)
+                        ),
+                    )
 
-                        queue_post_commit_task(
-                            session,
-                            lambda s=snapshot: (
-                                _send_paid_after_cancel_alert_now(s)
-                            ),
-                        )
+                    queue_post_commit_task(
+                        session,
+                        lambda s=snapshot: (
+                            _notify_client_paid_after_cancel_now(s)
+                        ),
+                    )
 
-                        queue_post_commit_task(
-                            session,
-                            lambda s=snapshot: (
-                                _notify_client_paid_after_cancel_now(s)
-                            ),
-                        )
+                    return True, "paid_after_cancel"
 
-                        return True, "paid_after_cancel"
+                if payment.status == "refunded":
+                    logger.warning(
+                        "Payment %s is refunded, cannot grant "
+                        "access",
+                        payment_id,
+                    )
 
-                    if payment.status == "refunded":
-                        logger.warning(
-                            "Payment %s is refunded, cannot grant "
-                            "access",
-                            payment_id,
-                        )
-                        return False, "refunded"
+                    return False, "refunded"
 
-                    if payment.status == "requires_manual_review":
-                        logger.info(
-                            "Payment %s already in manual review",
-                            payment_id,
-                        )
-                        return False, "manual_review"
+                if payment.status == "requires_manual_review":
+                    logger.info(
+                        "Payment %s already in manual review",
+                        payment_id,
+                    )
 
-                    if payment.status == "failed":
-                        payment.status = "requires_manual_review"
-                        payment.manual_review_reason = "status_failed"
+                    return False, "manual_review"
 
-                        await session.flush()
-
-                        snapshot = _build_payment_snapshot(payment)
-
-                        await AuditService.log_action(
-                            session,
-                            admin_id=0,
-                            action="PAYMENT_MANUAL_REVIEW",
-                            target_type="Payment",
-                            target_id=payment_id,
-                            details=(
-                                "reason=status_failed, "
-                                "source=handle_successful_payment"
-                            ),
-                        )
-
-                        queue_post_commit_task(
-                            session,
-                            lambda s=snapshot: (
-                                _send_manual_review_alert_now(
-                                    s,
-                                    "status_failed",
-                                    "handle_successful_payment",
-                                )
-                            ),
-                        )
-
-                        return False, "manual_review"
-
-                    user = payment.user
-                    tariff = payment.tariff
-
-                    manual_review_reason = None
-
-                    if not user or not tariff:
-                        manual_review_reason = (
-                            "missing_tariff_or_user"
-                        )
-
-                    elif user.is_deleted or user.is_banned:
-                        manual_review_reason = "banned_or_deleted"
-
-                    elif not tariff.is_active:
-                        manual_review_reason = "inactive_tariff"
-
-                    else:
-                        expected_amount = (
-                            _expected_payment_amount(payment)
-                        )
-
-                        if expected_amount is None:
-                            manual_review_reason = "amount_missing"
-
-                        elif payment.amount != expected_amount:
-                            manual_review_reason = "amount_mismatch"
-
-                            logger.error(
-                                "Payment %s amount mismatch: "
-                                "stored=%s, expected=%s, currency=%s",
-                                payment_id,
-                                payment.amount,
-                                expected_amount,
-                                payment.currency,
-                            )
-
-                    if manual_review_reason:
-                        payment.status = "requires_manual_review"
-                        payment.manual_review_reason = (
-                            manual_review_reason
-                        )
-
-                        await session.flush()
-
-                        snapshot = _build_payment_snapshot(payment)
-
-                        await AuditService.log_action(
-                            session,
-                            admin_id=0,
-                            action="PAYMENT_MANUAL_REVIEW",
-                            target_type="Payment",
-                            target_id=payment_id,
-                            details=(
-                                f"reason={manual_review_reason}, "
-                                f"source=handle_successful_payment"
-                            ),
-                        )
-
-                        queue_post_commit_task(
-                            session,
-                            lambda s=snapshot, r=manual_review_reason: (
-                                _send_manual_review_alert_now(
-                                    s,
-                                    r,
-                                    "handle_successful_payment",
-                                )
-                            ),
-                        )
-
-                        return False, "manual_review"
-
-                    # Помечаем платёж как completed.
-                    payment.status = "completed"
-                    payment.paid_at = now_utc()
+                if payment.status == "failed":
+                    payment.status = "requires_manual_review"
+                    payment.manual_review_reason = "status_failed"
 
                     await session.flush()
 
-                    # Выдаём доступ.
-                    try:
-                        await SubscriptionService.extend_subscription(
-                            session,
-                            user.telegram_id,
-                            tariff.duration_days,
-                            new_device_limit=tariff.device_limit,
-                            new_tariff_id=tariff.id,
-                        )
+                    snapshot = _build_payment_snapshot(payment)
 
-                    except ValueError as e:
-                        logger.error(
-                            "Payment %s: subscription extend "
-                            "failed: %s",
-                            payment_id,
-                            e,
-                        )
-
-                        payment.status = "requires_manual_review"
-                        payment.manual_review_reason = (
-                            "device_limit_exceeded"
-                        )
-
-                        await session.flush()
-
-                        snapshot = _build_payment_snapshot(payment)
-
-                        await AuditService.log_action(
-                            session,
-                            admin_id=0,
-                            action="PAYMENT_MANUAL_REVIEW",
-                            target_type="Payment",
-                            target_id=payment_id,
-                            details=(
-                                "reason=device_limit_exceeded, "
-                                "source=handle_successful_payment_extend"
-                            ),
-                        )
-
-                        queue_post_commit_task(
-                            session,
-                            lambda s=snapshot: (
-                                _send_manual_review_alert_now(
-                                    s,
-                                    "device_limit_exceeded",
-                                    "handle_successful_payment_extend",
-                                )
-                            ),
-                        )
-
-                        return False, "manual_review"
-
-                    except Exception as e:
-                        logger.error(
-                            "Payment %s: unexpected extend error: %s",
-                            payment_id,
-                            e,
-                            exc_info=True,
-                        )
-
-                        payment.status = "requires_manual_review"
-                        payment.manual_review_reason = "status_failed"
-
-                        await session.flush()
-
-                        snapshot = _build_payment_snapshot(payment)
-
-                        await AuditService.log_action(
-                            session,
-                            admin_id=0,
-                            action="PAYMENT_MANUAL_REVIEW",
-                            target_type="Payment",
-                            target_id=payment_id,
-                            details=(
-                                "reason=status_failed, "
-                                "source=handle_successful_payment_extend"
-                            ),
-                        )
-
-                        queue_post_commit_task(
-                            session,
-                            lambda s=snapshot: (
-                                _send_manual_review_alert_now(
-                                    s,
-                                    "status_failed",
-                                    "handle_successful_payment_extend",
-                                )
-                            ),
-                        )
-
-                        return False, "manual_review"
-
-                    # Реферальные бонусы.
-                    payments = await get_user_payments(
+                    await AuditService.log_action(
                         session,
-                        user.id,
+                        admin_id=0,
+                        action="PAYMENT_MANUAL_REVIEW",
+                        target_type="Payment",
+                        target_id=payment_id,
+                        details=(
+                            "reason=status_failed, "
+                            "source=handle_successful_payment"
+                        ),
                     )
 
-                    successful_payments = [
-                        p
-                        for p in payments
-                        if p.status == "completed"
-                    ]
-
-                    is_first_payment = len(successful_payments) == 1
-
-                    if user.referred_by:
-                        try:
-                            await ReferralService.process_bonus(
-                                session,
-                                user.telegram_id,
-                                user.referred_by,
-                                is_first_payment=is_first_payment,
-                                duration_days=tariff.duration_days,
+                    queue_post_commit_task(
+                        session,
+                        lambda s=snapshot: (
+                            _send_manual_review_alert_now(
+                                s,
+                                "status_failed",
+                                "handle_successful_payment",
                             )
+                        ),
+                    )
 
-                        except Exception as e:
-                            logger.warning(
-                                "Referral bonus failed for payment "
-                                "%s: %s",
-                                payment_id,
-                                e,
-                            )
+                    return False, "manual_review"
 
-                    user.last_payment_at = now_utc()
+                user = payment.user
+                tariff = payment.tariff
 
-                    invalidate_user_cache(user.telegram_id)
+                manual_review_reason = None
 
-                    try:
-                        await AuditService.log_action(
-                            session,
-                            admin_id=0,
-                            action="PAYMENT_SUCCESS",
-                            target_type="Payment",
-                            target_id=payment_id,
-                            details=(
-                                f"user={user.telegram_id}, "
-                                f"amount={payment.amount} "
-                                f"{payment.currency}"
-                            ),
-                        )
+                if not user or not tariff:
+                    manual_review_reason = (
+                        "missing_tariff_or_user"
+                    )
 
-                    except Exception as e:
+                elif user.is_deleted or user.is_banned:
+                    manual_review_reason = "banned_or_deleted"
+
+                elif not tariff.is_active:
+                    manual_review_reason = "inactive_tariff"
+
+                else:
+                    expected_amount = (
+                        _expected_payment_amount(payment)
+                    )
+
+                    if expected_amount is None:
+                        manual_review_reason = "amount_missing"
+
+                    elif payment.amount != expected_amount:
+                        manual_review_reason = "amount_mismatch"
+
                         logger.error(
-                            "Failed to log payment success to "
-                            "audit: %s",
-                            e,
+                            "Payment %s amount mismatch: "
+                            "stored=%s, expected=%s, currency=%s",
+                            payment_id,
+                            payment.amount,
+                            expected_amount,
+                            payment.currency,
                         )
 
-                    logger.info(
-                        "Payment %s processed successfully for "
-                        "user %s",
-                        payment_id,
-                        user.telegram_id,
+                if manual_review_reason:
+                    payment.status = "requires_manual_review"
+                    payment.manual_review_reason = (
+                        manual_review_reason
                     )
 
-                    return True, "success"
+                    await session.flush()
 
-            except Exception as e:
-                logger.error(
-                    "Failed to process payment %s: %s",
-                    payment_id,
-                    e,
-                    exc_info=True,
+                    snapshot = _build_payment_snapshot(payment)
+
+                    await AuditService.log_action(
+                        session,
+                        admin_id=0,
+                        action="PAYMENT_MANUAL_REVIEW",
+                        target_type="Payment",
+                        target_id=payment_id,
+                        details=(
+                            f"reason={manual_review_reason}, "
+                            f"source=handle_successful_payment"
+                        ),
+                    )
+
+                    queue_post_commit_task(
+                        session,
+                        lambda s=snapshot, r=manual_review_reason: (
+                            _send_manual_review_alert_now(
+                                s,
+                                r,
+                                "handle_successful_payment",
+                            )
+                        ),
+                    )
+
+                    return False, "manual_review"
+
+                # Помечаем платёж как completed.
+                payment.status = "completed"
+                payment.paid_at = now_utc()
+
+                await session.flush()
+
+                # Выдаём доступ.
+                try:
+                    await SubscriptionService.extend_subscription(
+                        session,
+                        user.telegram_id,
+                        tariff.duration_days,
+                        new_device_limit=tariff.device_limit,
+                        new_tariff_id=tariff.id,
+                    )
+
+                except ValueError as e:
+                    logger.error(
+                        "Payment %s: subscription extend "
+                        "failed: %s",
+                        payment_id,
+                        e,
+                    )
+
+                    payment.status = "requires_manual_review"
+                    payment.manual_review_reason = (
+                        "device_limit_exceeded"
+                    )
+
+                    await session.flush()
+
+                    snapshot = _build_payment_snapshot(payment)
+
+                    await AuditService.log_action(
+                        session,
+                        admin_id=0,
+                        action="PAYMENT_MANUAL_REVIEW",
+                        target_type="Payment",
+                        target_id=payment_id,
+                        details=(
+                            "reason=device_limit_exceeded, "
+                            "source=handle_successful_payment_extend"
+                        ),
+                    )
+
+                    queue_post_commit_task(
+                        session,
+                        lambda s=snapshot: (
+                            _send_manual_review_alert_now(
+                                s,
+                                "device_limit_exceeded",
+                                "handle_successful_payment_extend",
+                            )
+                        ),
+                    )
+
+                    return False, "manual_review"
+
+                except Exception as e:
+                    logger.error(
+                        "Payment %s: unexpected extend error: %s",
+                        payment_id,
+                        e,
+                        exc_info=True,
+                    )
+
+                    payment.status = "requires_manual_review"
+                    payment.manual_review_reason = "status_failed"
+
+                    await session.flush()
+
+                    snapshot = _build_payment_snapshot(payment)
+
+                    await AuditService.log_action(
+                        session,
+                        admin_id=0,
+                        action="PAYMENT_MANUAL_REVIEW",
+                        target_type="Payment",
+                        target_id=payment_id,
+                        details=(
+                            "reason=status_failed, "
+                            "source=handle_successful_payment_extend"
+                        ),
+                    )
+
+                    queue_post_commit_task(
+                        session,
+                        lambda s=snapshot: (
+                            _send_manual_review_alert_now(
+                                s,
+                                "status_failed",
+                                "handle_successful_payment_extend",
+                            )
+                        ),
+                    )
+
+                    return False, "manual_review"
+
+                # Реферальные бонусы.
+                payments = await get_user_payments(
+                    session,
+                    user.id,
                 )
 
-                return False, "error"
+                successful_payments = [
+                    p
+                    for p in payments
+                    if p.status == "completed"
+                ]
+
+                is_first_payment = len(successful_payments) == 1
+
+                if user.referred_by:
+                    try:
+                        await ReferralService.process_bonus(
+                            session,
+                            user.telegram_id,
+                            user.referred_by,
+                            is_first_payment=is_first_payment,
+                            duration_days=tariff.duration_days,
+                        )
+
+                    except Exception as e:
+                        logger.warning(
+                            "Referral bonus failed for payment "
+                            "%s: %s",
+                            payment_id,
+                            e,
+                        )
+
+                user.last_payment_at = now_utc()
+
+                invalidate_user_cache(user.telegram_id)
+
+                try:
+                    await AuditService.log_action(
+                        session,
+                        admin_id=0,
+                        action="PAYMENT_SUCCESS",
+                        target_type="Payment",
+                        target_id=payment_id,
+                        details=(
+                            f"user={user.telegram_id}, "
+                            f"amount={payment.amount} "
+                            f"{payment.currency}"
+                        ),
+                    )
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to log payment success to "
+                        "audit: %s",
+                        e,
+                    )
+
+                logger.info(
+                    "Payment %s processed successfully for "
+                    "user %s",
+                    payment_id,
+                    user.telegram_id,
+                )
+
+                return True, "success"
+
+        except Exception as e:
+            logger.error(
+                "Failed to process payment %s: %s",
+                payment_id,
+                e,
+                exc_info=True,
+            )
+
+            return False, "error"
 
         finally:
-            try:
-                await redis_lock.release()
-            except Exception:
-                pass
+            if redis_lock is not None and acquired:
+                try:
+                    await redis_lock.release()
+
+                except Exception:
+                    pass
 
     @staticmethod
     async def force_grant_payment(
@@ -1092,19 +1113,23 @@ class PaymentService:
         Создаёт платёж через платёжную систему.
 
         Важно:
+
         - сумма в БД хранится как Decimal;
         - описание платежа не содержит личных ID;
         - payload содержит только ID платежа;
         - при ошибке провайдера платёж остаётся в БД со статусом failed.
         """
+
         settings = get_settings()
 
         decimal_amount = _to_decimal(amount)
+
         if decimal_amount is None:
             logger.error(
                 "create_platega_payment: invalid amount %s",
                 amount,
             )
+
             return None, None
 
         payment = await create_payment(
@@ -1116,17 +1141,21 @@ class PaymentService:
         )
 
         description = f"Payment #{payment.id}"
+
         clean_username = bot_username.lstrip("@")
 
         return_url = settings.PLATEGA_RETURN_URL.format(
             bot_username=clean_username,
         )
+
         failed_url = settings.PLATEGA_FAILED_URL.format(
             bot_username=clean_username,
         )
+
         payload = f"payment_{payment.id}"
 
         client = PlategaClient()
+
         transaction = await client.create_transaction(
             amount=float(decimal_amount),
             currency="RUB",
@@ -1141,6 +1170,7 @@ class PaymentService:
 
             try:
                 await session.flush()
+
             except Exception:
                 pass
 
@@ -1157,6 +1187,7 @@ class PaymentService:
                         f"payment provider create_transaction failed"
                     ),
                 )
+
             except Exception as e:
                 logger.error(
                     "Failed to log payment failure to audit: %s",
@@ -1165,7 +1196,17 @@ class PaymentService:
 
             return None, None
 
-        payment.external_id = transaction.get("transactionId")
+        external_id = (
+            transaction.get("transactionId")
+            or transaction.get("id")
+        )
+
+        payment.external_id = (
+            str(external_id)
+            if external_id is not None
+            else None
+        )
+
         payment.payment_url = transaction.get("redirect")
         payment.payment_method = transaction.get(
             "paymentMethod",

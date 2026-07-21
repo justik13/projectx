@@ -16,9 +16,12 @@ from services.audit_service import AuditService
 from services.payment_service import PaymentService
 from utils.datetime_helpers import now_utc
 
+
 logger = logging.getLogger("BackgroundWorker")
 
+
 _alerted_stale_payments: set[int] = set()
+
 
 # Короткая стартовая задержка вместо длительного ожидания.
 PAYMENTS_START_DELAY = 60.0
@@ -34,8 +37,6 @@ async def stale_payments_checker_loop(
 ):
     settings = get_settings()
 
-    # Короткий initial delay, чтобы после деплоя/рестарта
-    # проверка зависших платежей начиналась быстрее.
     try:
         await asyncio.wait_for(
             shutdown_event.wait(),
@@ -71,6 +72,7 @@ async def stale_payments_checker_loop(
                 break
 
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
+
             continue
 
         try:
@@ -78,6 +80,7 @@ async def stale_payments_checker_loop(
                 shutdown_event.wait(),
                 timeout=STALE_PAYMENT_THRESHOLD,
             )
+
             break
 
         except asyncio.TimeoutError:
@@ -108,10 +111,17 @@ async def _process_stale_payments(bot: Bot, settings):
         stale_payments = result.scalars().all()
 
         for payment in stale_payments:
-            if (
-                payment.external_id
-                and payment.payment_method == "SBPQR"
-            ):
+            # ВАЖНО:
+            #
+            # Раньше проверка была:
+            #   payment.payment_method == "SBPQR"
+            #
+            # Но Platega может вернуть paymentMethod как int,
+            # например 2. Тогда зависший платёж не проверялся бы.
+            #
+            # Поэтому внешние RUB-платежи определяем по:
+            #   external_id + currency == "RUB"
+            if payment.external_id and payment.currency == "RUB":
                 sbp_payment_ids.append(payment.id)
 
             elif payment.currency == "stars":
@@ -122,7 +132,7 @@ async def _process_stale_payments(bot: Bot, settings):
                 if payment.created_at < stars_threshold:
                     stars_payments_for_review.append(payment)
 
-    # Проверяем SBP-платежи через платёжную систему.
+    # Проверяем SBP/RUB-платежи через платёжную систему.
     for payment_id in sbp_payment_ids:
         try:
             async with session_scope() as session:
@@ -139,10 +149,7 @@ async def _process_stale_payments(bot: Bot, settings):
             )
 
     # Stars-платежи, которые не подтвердились за 24 часа,
-    # больше НЕ помечаются как failed автоматически.
-    #
-    # Они переводятся в requires_manual_review, чтобы админ
-    # мог проверить оплату и не потерять деньги.
+    # переводятся в requires_manual_review.
     if stars_payments_for_review:
         await _mark_stars_payments_manual_review(
             stars_payments_for_review,

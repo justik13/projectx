@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 from typing import Optional, List
-
+from utils.security import SafeResolver, allow_local_networks
 from pydantic import BaseModel, Field
 
 from bot.constants import (
@@ -219,6 +219,9 @@ async def get_http_session() -> aiohttp.ClientSession:
         connector = aiohttp.TCPConnector(
             limit=100,
             limit_per_host=API_CONCURRENCY_LIMIT,
+            resolver=SafeResolver(
+                allow_local=allow_local_networks(),
+            ),
         )
 
         timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
