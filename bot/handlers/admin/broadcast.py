@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-
+from aiogram.filters import StateFilter
 from aiogram import Router, F
 from aiogram.exceptions import (
     TelegramBadRequest,
@@ -300,15 +300,16 @@ async def _get_next_batch(
     Возвращает следующий batch получателей рассылки.
 
     Важно:
+    - используем внутренний User.id как cursor;
     - забаненные пользователи исключаются всегда;
     - удалённые пользователи исключаются всегда;
     - пользователи, заблокировавшие бота, исключаются всегда;
     - для audience=active дополнительно проверяется активная подписка.
     """
     stmt = (
-        select(User.telegram_id)
+        select(User.id, User.telegram_id)
         .where(
-            User.telegram_id > last_id,
+            User.id > last_id,
             User.is_deleted == False,
             User.is_bot_blocked == False,
             User.is_banned == False,
@@ -317,16 +318,14 @@ async def _get_next_batch(
 
     if audience == "active":
         current_time = now_utc()
-
         stmt = stmt.where(
             User.subscription_end > current_time,
         )
 
-    stmt = stmt.order_by(User.telegram_id).limit(limit)
+    stmt = stmt.order_by(User.id).limit(limit)
 
     result = await session.execute(stmt)
-
-    return [row[0] for row in result.all()]
+    return [(row[0], row[1]) for row in result.all()]
 
 
 async def _send_broadcast_to_users_with_resume(
@@ -380,9 +379,9 @@ async def _send_broadcast_to_users_with_resume(
                 )
 
             if not batch:
-                break
+                    break
 
-            for uid in batch:
+            for internal_id, uid in batch:
                 if stop_event and stop_event.is_set():
                     break
 
@@ -428,7 +427,7 @@ async def _send_broadcast_to_users_with_resume(
                     )
                     local_fail += 1
 
-                last_id = uid
+                last_id = internal_id
 
             async with session_scope() as session:
                 progress = await session.get(
@@ -656,8 +655,8 @@ async def _start_broadcast_process(
 
 
 @router.callback_query(
+    StateFilter(AdminStates.confirming_broadcast),
     F.data == "broadcast_send_all",
-    AdminStates.confirming_broadcast,
 )
 async def broadcast_to_all(
     callback: CallbackQuery,
@@ -680,8 +679,8 @@ async def broadcast_to_all(
 
 
 @router.callback_query(
+    StateFilter(AdminStates.confirming_broadcast),
     F.data == "broadcast_send_active",
-    AdminStates.confirming_broadcast,
 )
 async def broadcast_to_active(
     callback: CallbackQuery,

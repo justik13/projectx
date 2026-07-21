@@ -1410,7 +1410,6 @@ async def admin_sub_apply_reduce(
         return
 
     parts = callback.data.split(":")
-
     telegram_id = int(parts[1])
     days = int(parts[2])
 
@@ -1429,7 +1428,6 @@ async def admin_sub_apply_reduce(
         new_end = user.subscription_end - timedelta(days=days)
 
         user.subscription_end = new_end
-
         user.notified_3d = False
         user.notified_1d = False
         user.notified_2h = False
@@ -1440,6 +1438,11 @@ async def admin_sub_apply_reduce(
         user.notified_grace_12h = False
 
         await session.flush()
+
+        # Сразу синхронизируем статус устройств.
+        # Если подписка стала истёкшей, устройства должны быть
+        # отключены без ожидания traffic worker.
+        await SubscriptionService.sync_access_state(session, user)
 
         invalidate_user_cache(telegram_id)
 
@@ -1475,9 +1478,7 @@ async def admin_sub_apply_reduce(
             f"admin_sub_apply_reduce error: {e}",
             exc_info=True,
         )
-
         await session.rollback()
-
         await callback.answer(
             "❌ Ошибка при уменьшении",
             show_alert=True,

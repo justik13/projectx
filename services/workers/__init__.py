@@ -80,6 +80,35 @@ async def _send_worker_crash_alert(
     except Exception as e:
         logger.error("Failed to send worker crash alert: %s", e)
 
+async def _send_supervisor_crash_alert(
+    bot: Bot,
+    error_text: str,
+):
+    try:
+        settings = get_settings()
+
+        message = (
+            "🚨 <b>Supervisor фоновых воркеров упал</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Ошибка:</b> <code>{error_text}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>Требуется ручное вмешательство. "
+            "Воркеры могут больше не перезапускаться.</i>"
+        )
+
+        for admin_id in settings.ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    message,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error("Failed to send supervisor crash alert: %s", e)
+
 
 async def _supervise_workers(bot: Bot):
     """
@@ -234,6 +263,32 @@ async def start_background_workers(bot: Bot) -> list[asyncio.Task]:
         _supervise_workers(bot),
         name="worker_supervisor",
     )
+
+    def _supervisor_done_callback(task: asyncio.Task):
+        if task.cancelled():
+            return
+
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            exc = e
+
+        if exc:
+            logger.critical(
+                "Worker supervisor died unexpectedly: %s",
+                type(exc).__name__,
+            )
+
+            asyncio.create_task(
+                _send_supervisor_crash_alert(
+                    bot,
+                    type(exc).__name__,
+                )
+            )
+
+    _supervisor_task.add_done_callback(_supervisor_done_callback)
 
     logger.info(
         "Started %s background workers + supervisor",

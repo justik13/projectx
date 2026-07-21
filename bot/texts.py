@@ -514,6 +514,19 @@ AUDIT_ACTIONS = {
     "GRANT": "🎫 Выдал доступ",
     "DELETE_DEVICE": "🗑 Удалил устройство",
     "DEVICE_CREATE_BLOCKED": "🚫 Блокировка создания (daily limit)",
+    "DEVICE_CREATED": "📱 Создал устройство",
+    "DEVICE_DELETED": "🗑 Удалил устройство",
+    "PAYMENT_SUCCESS": "✅ Платёж обработан",
+    "PAYMENT_FAILED": "❌ Платёж не создан",
+    "PAYMENT_CANCELLED": "❌ Платёж отменён",
+    "PAYMENT_MANUAL_REVIEW": "🧪 Платёж отправлен на ручную проверку",
+    "PAYMENT_CHARGEBACK": "↩️ Chargeback",
+    "PAYMENT_CANCEL_AFTER_COMPLETED": "🚨 Отмена после completed",
+    "PAID_AFTER_CANCEL": "⚠️ Оплата после отмены",
+    "MANUAL_GRANT": "🎫 Ручная выдача",
+    "STARS_PAYMENT_MANUAL_REVIEW": "🧪 Stars-платёж на проверке",
+    "TOGGLE_MAINTENANCE": "🛠 Переключил техработы",
+    "PLATEGA_CALLBACK": "📥 Платёжный callback",
 }
 
 DASHBOARD_HEADER = (

@@ -9,8 +9,10 @@ _MAX_CACHE_SIZE = 5000
 _DEFAULT_TTL = 2.0
 _GLOBAL_THROTTLE_TTL = 0.3
 
+from aiogram import BaseMiddleware
 
-class ThrottlingMiddleware:
+
+class ThrottlingMiddleware(BaseMiddleware):
 
     def __init__(self):
         self._last_call = TTLCache(maxsize=_MAX_CACHE_SIZE, ttl=_DEFAULT_TTL)

@@ -116,11 +116,9 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     from bot.middlewares.correlation import get_current_request_id
 
     request_id = get_current_request_id()
-
     exception = event.exception
     error_type = type(exception).__name__
 
-    # Логируем санитизированный traceback, а не сырой текст исключения.
     try:
         tb_lines = traceback.format_exception(
             type(exception),
@@ -147,7 +145,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         )
 
     state = kwargs.get("state")
-
     if state:
         try:
             await state.clear()
@@ -196,6 +193,11 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             await event.update.message.answer(
                 texts.ERROR_TECHNICAL_MESSAGE,
                 parse_mode="HTML",
+            )
+        elif getattr(event.update, "pre_checkout_query", None):
+            await event.update.pre_checkout_query.answer(
+                ok=False,
+                error_message="Техническая ошибка. Попробуйте позже.",
             )
     except Exception:
         pass
@@ -435,6 +437,19 @@ async def main():
             await webhook_runner.cleanup()
 
         await close_http_session()
+
+        try:
+            from services.device_service import close_redis as close_device_redis
+            await close_device_redis()
+        except Exception as e:
+            logger.error("Failed to close device Redis: %s", e)
+
+        try:
+            from services.payment_service import close_redis as close_payment_redis
+            await close_payment_redis()
+        except Exception as e:
+            logger.error("Failed to close payment Redis: %s", e)
+
         await close_db()
 
         logger.info("Работа бота завершена")

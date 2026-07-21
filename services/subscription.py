@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from typing import Optional
-
+from database.connection import queue_post_commit_task
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 
 
 class SubscriptionService:
+
+    @staticmethod
+    async def sync_access_state(
+        session: AsyncSession,
+        user: User,
+    ) -> None:
+        """
+        Публичная обёртка для админских действий.
+        """
+        await SubscriptionService._sync_access_state(session, user)
+
 
     @staticmethod
     async def check_access(
@@ -260,8 +271,8 @@ class SubscriptionService:
         - если подписка истекла или пользователь забанен:
           профили неактивны.
 
-        Это решает проблему, когда после оплаты профили оставались
-        is_active=false в БД, и traffic worker позже отключал доступ.
+        Важно:
+        - API-синхронизация выполняется только после commit.
         """
         target_active = bool(
             user.subscription_end
@@ -270,7 +281,6 @@ class SubscriptionService:
         )
 
         profiles = await get_user_profiles(session, user.id)
-
         if not profiles:
             return
 
@@ -281,7 +291,6 @@ class SubscriptionService:
             .where(VPNProfile.id.in_(profile_ids))
             .values(is_active=target_active)
         )
-
         await session.flush()
 
         expires_ts = (
@@ -292,12 +301,15 @@ class SubscriptionService:
 
         target_status = "active" if target_active else "disabled"
 
-        asyncio.create_task(
-            SubscriptionService._sync_expires_to_servers(
-                user.id,
-                expires_ts,
-                target_status,
-            )
+        queue_post_commit_task(
+            session,
+            lambda uid=user.id, ts=expires_ts, st=target_status: (
+                SubscriptionService._sync_expires_to_servers(
+                    uid,
+                    ts,
+                    st,
+                )
+            ),
         )
 
     @staticmethod

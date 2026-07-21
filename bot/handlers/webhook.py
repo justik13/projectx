@@ -156,7 +156,6 @@ async def platega_webhook_handler(
                         f"amount={callback_data.amount}"
                     ),
                 )
-
             except Exception as e:
                 logger.error(
                     "[%s] Failed to log payment callback "
@@ -173,6 +172,7 @@ async def platega_webhook_handler(
                     payload=payload,
                     callback_amount=callback_data.amount,
                     callback_payload=callback_data.payload,
+                    callback_currency=callback_data.currency,
                 )
             )
 

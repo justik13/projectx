@@ -2,7 +2,9 @@ import asyncio
 import logging
 import re
 from datetime import timedelta
-
+from aiogram.filters import StateFilter
+from bot.constants import TELEGRAM_MESSAGE_LIMIT
+from utils.telegram import send_hub_document
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -476,7 +478,6 @@ async def show_config(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-
     profile = await get_profile_by_id(session, profile_id)
 
     if not profile or not db_user or profile.user_id != db_user.id:
@@ -498,12 +499,44 @@ async def show_config(
         )
         return
 
+    raw_config = profile.raw_config or ""
+
+    # Если ключ слишком длинный, Telegram не отправит его как текст.
+    # Отправляем его файлом.
+    if len(raw_config) > TELEGRAM_MESSAGE_LIMIT - 300:
+        safe_device_name = "".join(
+            c
+            for c in profile.device_name
+            if c.isalnum() or c in (" ", "_", "-")
+        ).strip() or "client"
+
+        key_file = BufferedInputFile(
+            raw_config.encode("utf-8"),
+            filename=f"{safe_device_name}_key.txt",
+        )
+
+        caption = (
+            f"🔑 <b>Ключ подключения для {safe(profile.device_name)}:</b>\n"
+            f"<i>Ключ слишком длинный для текстового сообщения, "
+            f"поэтому отправлен файлом.</i>"
+        )
+
+        await send_hub_document(
+            callback.bot,
+            callback.message.chat.id,
+            document=key_file,
+            caption=caption,
+            reply_markup=get_back_button(f"manage_device:{profile.id}"),
+            parse_mode="HTML",
+        )
+        return
+
     await render_hub(
         callback.bot,
         callback.message.chat.id,
         texts.DEVICE_SHOW_KEY.format(
             device_name=safe(profile.device_name),
-            raw_config=safe(profile.raw_config),
+            raw_config=safe(raw_config),
         ),
         get_back_button(f"manage_device:{profile.id}"),
     )
@@ -684,9 +717,42 @@ async def rename_device_process(
     message: Message,
     state: FSMContext,
     session: AsyncSession,
+    db_user: User | None = None,
 ):
     if not message.text or message.text.startswith("/"):
         await state.clear()
+        return
+
+    data = await state.get_data()
+    profile_id = data.get("profile_id")
+
+    profile = await get_profile_by_id(session, profile_id)
+
+    if not profile or not db_user or profile.user_id != db_user.id:
+        await state.clear()
+
+        await render_hub(
+            message.bot,
+            message.chat.id,
+            texts.ERROR_ACCESS_DENIED,
+            get_back_button("back_to_connections"),
+        )
+        return
+
+    has_access = await SubscriptionService.check_access(
+        session,
+        db_user.telegram_id,
+    )
+
+    if not has_access:
+        await state.clear()
+
+        await render_hub(
+            message.bot,
+            message.chat.id,
+            "⚠️ Доступ неактивен. Продлите подписку.",
+            get_back_button("back_to_connections"),
+        )
         return
 
     new_name = message.text.strip()
@@ -700,30 +766,22 @@ async def rename_device_process(
             message.bot,
             message.chat.id,
             texts.ERROR_INVALID_DEVICE_NAME,
-            get_back_button("back_to_connections"),
+            get_back_button(f"manage_device:{profile.id}"),
         )
         return
 
-    data = await state.get_data()
-
-    profile = await get_profile_by_id(
+    await update_profile(
         session,
-        data.get("profile_id"),
+        profile,
+        device_name=new_name,
     )
 
-    if profile:
-        await update_profile(
-            session,
-            profile,
-            device_name=new_name,
-        )
-
-        await render_hub(
-            message.bot,
-            message.chat.id,
-            f"✅ Устройство переименовано в <b>{safe(new_name)}</b>",
-            get_device_keyboard(profile.id),
-        )
+    await render_hub(
+        message.bot,
+        message.chat.id,
+        f"✅ Устройство переименовано в <b>{safe(new_name)}</b>",
+        get_device_keyboard(profile.id),
+    )
 
     await state.clear()
 
@@ -764,11 +822,21 @@ async def cancel_delete_device(
     callback: CallbackQuery,
     state: FSMContext,
     session: AsyncSession,
+    db_user: User | None = None,
 ):
-    await callback.answer("❌ Удаление отменено")
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
+    profile = await get_profile_by_id(session, profile_id)
+
+    if not profile or not db_user or profile.user_id != db_user.id:
+        await callback.answer(
+            texts.ERROR_ACCESS_DENIED,
+            show_alert=True,
+        )
+        return
+
+    await callback.answer("❌ Удаление отменено")
 
     await render_hub(
         callback.bot,
@@ -927,8 +995,8 @@ async def start_add_device(
 
 
 @router.callback_query(
+    StateFilter(DeviceCreationStates.choose_server),
     F.data.startswith("select_server:"),
-    DeviceCreationStates.choose_server,
 )
 async def select_server(
     callback: CallbackQuery,

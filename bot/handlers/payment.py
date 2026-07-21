@@ -93,6 +93,45 @@ async def _render_maintenance(
     )
 
 
+async def _check_tariff_change_allowed(
+    session: AsyncSession,
+    db_user,
+    tariff,
+) -> str | None:
+    """
+    Проверяет, можно ли пользователю купить/сменить тариф.
+
+    Запрещает:
+    - даунгрейд во время активной подписки;
+    - покупку тарифа, если устройств больше нового лимита.
+    """
+    new_limit = getattr(tariff, "device_limit", 2)
+
+    is_active = await _is_subscription_active(db_user)
+
+    if is_active:
+        current_limit = db_user.device_limit or 0
+
+        if new_limit < current_limit:
+            return texts.PAYMENT_DOWNGRADE_BLOCKED.format(
+                current_limit=current_limit,
+                new_limit=new_limit,
+                valid_until=format_datetime(db_user.subscription_end),
+            )
+
+    profiles_count = await get_user_profiles_count(
+        session,
+        db_user.id,
+    )
+
+    if profiles_count > new_limit:
+        return texts.PAYMENT_DOWNGRADE_BLOCKED_PROFILES.format(
+            profiles_count=profiles_count,
+            new_limit=new_limit,
+        )
+
+    return None
+
 @router.callback_query(F.data.in_(["menu_buy", "menu_subscription"]))
 async def hub_menu_payment(
     callback: CallbackQuery,
@@ -227,20 +266,22 @@ async def show_tariff_showcase_callback(
     await _show_showcase(callback, session)
 
 
-@router.callback_query(F.data.startswith("select_tariff_type:"))
-async def select_tariff_type(
+@router.callback_query(F.data.startswith("select_tariff:"))
+async def select_tariff(
     callback: CallbackQuery,
-    session: AsyncSession,
+    state: FSMContext,
+    db_user=None,
+    session: AsyncSession = None,
 ) -> None:
-    await callback.answer()
-
     if session is None:
+        await callback.answer()
         return
 
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
     ):
+        await callback.answer()
         await _render_maintenance(
             callback,
             session,
@@ -248,41 +289,52 @@ async def select_tariff_type(
         )
         return
 
-    device_limit = int(callback.data.split(":")[1])
+    tariff_id = int(callback.data.split(":")[1])
+    tariff = await get_tariff_by_id(session, tariff_id)
 
-    tariffs = await get_active_tariffs(session)
-
-    type_tariffs = [
-        tariff
-        for tariff in tariffs
-        if getattr(tariff, "device_limit", 2) == device_limit
-    ]
-
-    if not type_tariffs:
-        await render_hub(
-            callback.bot,
-            callback.message.chat.id,
-            texts.PAYMENT_NO_TARIFFS,
-            get_back_button("payment_showcase"),
+    if not tariff or not tariff.is_active:
+        await callback.answer(
+            texts.ERROR_TARIFF_UNAVAILABLE,
+            show_alert=True,
         )
         return
 
-    description = texts.PAYMENT_TARIFF_DESCRIPTION.get(
-        device_limit,
-        "",
+    device_limit = getattr(tariff, "device_limit", 2)
+
+    if db_user:
+        error_text = await _check_tariff_change_allowed(
+            session,
+            db_user,
+            tariff,
+        )
+
+        if error_text:
+            await render_hub(
+                callback.bot,
+                callback.message.chat.id,
+                error_text,
+                get_back_button("payment_change_tariff"),
+            )
+            await callback.answer()
+            return
+
+    tariff_name = get_tariff_display_name(device_limit)
+
+    text = texts.PAYMENT_CHECKOUT_TEXT.format(
+        tariff_name=tariff_name,
+        duration_days=tariff.duration_days,
+        price_rub=tariff.price_rub,
+        price_stars=tariff.price_stars,
     )
-
-    text = description + texts.PAYMENT_DURATION_HEADER
-
-    keyboard = get_tariff_duration_keyboard(type_tariffs)
 
     await render_hub(
         callback.bot,
         callback.message.chat.id,
         text,
-        keyboard,
+        get_payment_method_keyboard(tariff.id, device_limit),
     )
 
+    await callback.answer()
 
 @router.callback_query(F.data.in_(["payment_quick_renew", "payment_renew"]))
 async def show_quick_renew(
@@ -400,83 +452,6 @@ async def show_change_tariff(
     )
 
 
-@router.callback_query(F.data.startswith("select_tariff:"))
-async def select_tariff(
-    callback: CallbackQuery,
-    state: FSMContext,
-    db_user=None,
-    session: AsyncSession = None,
-) -> None:
-    if session is None:
-        await callback.answer()
-        return
-
-    if not await MaintenanceService.can_user_perform_action(
-        session,
-        callback.from_user.id,
-    ):
-        await callback.answer()
-        await _render_maintenance(
-            callback,
-            session,
-            back_to="payment_showcase",
-        )
-        return
-
-    tariff_id = int(callback.data.split(":")[1])
-
-    tariff = await get_tariff_by_id(session, tariff_id)
-
-    if not tariff or not tariff.is_active:
-        await callback.answer(
-            texts.ERROR_TARIFF_UNAVAILABLE,
-            show_alert=True,
-        )
-        return
-
-    device_limit = getattr(tariff, "device_limit", 2)
-
-    if db_user:
-        profiles_count = await get_user_profiles_count(
-            session,
-            db_user.id,
-        )
-
-        if profiles_count > device_limit:
-            text = texts.PAYMENT_DOWNGRADE_BLOCKED_PROFILES.format(
-                profiles_count=profiles_count,
-                new_limit=device_limit,
-            )
-
-            await render_hub(
-                callback.bot,
-                callback.message.chat.id,
-                text,
-                get_back_button("payment_change_tariff"),
-            )
-
-            await callback.answer()
-            return
-
-    tariff_name = get_tariff_display_name(device_limit)
-
-    text = texts.PAYMENT_CHECKOUT_TEXT.format(
-        tariff_name=tariff_name,
-        duration_days=tariff.duration_days,
-        price_rub=tariff.price_rub,
-        price_stars=tariff.price_stars,
-    )
-
-    await render_hub(
-        callback.bot,
-        callback.message.chat.id,
-        text,
-        get_payment_method_keyboard(tariff.id, device_limit),
-    )
-
-    await callback.answer()
-
-
 @router.callback_query(F.data.startswith("pay_stars:"))
 async def pay_stars(
     callback: CallbackQuery,
@@ -501,7 +476,6 @@ async def pay_stars(
         return
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff or not db_user:
@@ -513,6 +487,22 @@ async def pay_stars(
             callback.bot,
             callback.message.chat.id,
             texts.ERROR_TARIFF_UNAVAILABLE,
+            get_back_button(f"select_tariff:{tariff_id}"),
+        )
+        await callback.answer()
+        return
+
+    error_text = await _check_tariff_change_allowed(
+        session,
+        db_user,
+        tariff,
+    )
+
+    if error_text:
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            error_text,
             get_back_button(f"select_tariff:{tariff_id}"),
         )
         await callback.answer()
@@ -531,7 +521,6 @@ async def pay_stars(
 
         try:
             invoice_builder = InlineKeyboardBuilder()
-
             invoice_builder.row(
                 InlineKeyboardButton(
                     text="💳 Оплатить",
@@ -590,7 +579,6 @@ async def pay_stars(
 
     except Exception as e:
         logger.error(f"pay_stars error: {e}", exc_info=True)
-
         await callback.answer(
             "❌ Ошибка при создании платежа",
             show_alert=True,
@@ -1032,7 +1020,6 @@ async def pay_sbp(
         await callback.answer("⏳ Создаю платеж...")
 
         tariff_id = int(callback.data.split(":")[1])
-
         tariff = await get_tariff_by_id(session, tariff_id)
 
         if not tariff:
@@ -1060,6 +1047,21 @@ async def pay_sbp(
             await callback.answer(
                 texts.ERROR_USER_NOT_FOUND,
                 show_alert=True,
+            )
+            return
+
+        error_text = await _check_tariff_change_allowed(
+            session,
+            db_user,
+            tariff,
+        )
+
+        if error_text:
+            await render_hub(
+                callback.bot,
+                callback.message.chat.id,
+                error_text,
+                get_back_button(f"select_tariff:{tariff_id}"),
             )
             return
 
@@ -1104,12 +1106,104 @@ async def pay_sbp(
 
     except Exception as e:
         logger.error(f"pay_sbp error: {e}", exc_info=True)
-
         await callback.answer(
             "❌ Ошибка при создании платежа",
             show_alert=True,
         )
 
+@router.callback_query(F.data.startswith("select_tariff_type:"))
+async def select_tariff_type(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    db_user=None,
+) -> None:
+    await callback.answer()
+
+    if session is None:
+        return
+
+    if not await MaintenanceService.can_user_perform_action(
+        session,
+        callback.from_user.id,
+    ):
+        await _render_maintenance(
+            callback,
+            session,
+            back_to="payment_showcase",
+        )
+        return
+
+    device_limit = int(callback.data.split(":")[1])
+
+    # Дополнительная серверная проверка даунгрейда и лимита устройств.
+    if db_user:
+        is_active = await _is_subscription_active(db_user)
+
+        if is_active:
+            current_limit = db_user.device_limit or 0
+
+            if device_limit < current_limit:
+                await render_hub(
+                    callback.bot,
+                    callback.message.chat.id,
+                    texts.PAYMENT_DOWNGRADE_BLOCKED.format(
+                        current_limit=current_limit,
+                        new_limit=device_limit,
+                        valid_until=format_datetime(db_user.subscription_end),
+                    ),
+                    get_back_button("payment_change_tariff"),
+                )
+                return
+
+        profiles_count = await get_user_profiles_count(
+            session,
+            db_user.id,
+        )
+
+        if profiles_count > device_limit:
+            await render_hub(
+                callback.bot,
+                callback.message.chat.id,
+                texts.PAYMENT_DOWNGRADE_BLOCKED_PROFILES.format(
+                    profiles_count=profiles_count,
+                    new_limit=device_limit,
+                ),
+                get_back_button("payment_change_tariff"),
+            )
+            return
+
+    tariffs = await get_active_tariffs(session)
+
+    type_tariffs = [
+        tariff
+        for tariff in tariffs
+        if getattr(tariff, "device_limit", 2) == device_limit
+    ]
+
+    if not type_tariffs:
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            texts.PAYMENT_NO_TARIFFS,
+            get_back_button("payment_showcase"),
+        )
+        return
+
+    description = texts.PAYMENT_TARIFF_DESCRIPTION.get(
+        device_limit,
+        "",
+    )
+
+    text = description + texts.PAYMENT_DURATION_HEADER
+
+    keyboard = get_tariff_duration_keyboard(type_tariffs)
+
+    await render_hub(
+        callback.bot,
+        callback.message.chat.id,
+        text,
+        keyboard,
+    )
 
 @router.callback_query(F.data.startswith("check_payment:"))
 async def check_payment_status(

@@ -16,7 +16,7 @@ from bot.keyboards import get_admin_server_card_keyboard, get_back_button
 from bot.keyboards.admin.servers import get_server_delete_confirm_keyboard
 from bot.keyboards.admin.users import get_admin_confirm_action_keyboard
 from bot.states import AdminStates
-from database.connection import session_scope
+from database.connection import session_scope, queue_post_commit_task
 from database.models import PendingAPIDeletion, VPNProfile
 from database.repositories.servers_repo import (
     create_server,
@@ -909,16 +909,25 @@ async def confirm_delete_server(
     await _show_servers_list(callback, session, page=1)
 
     if profiles_data:
-        asyncio.create_task(
-            _delete_server_background(
-                callback.bot,
-                callback.from_user.id,
-                server_name,
-                profiles_data,
-                api_url,
-                api_key,
-                deleted_profiles,
-            )
+        queue_post_commit_task(
+            session,
+            lambda bot=callback.bot,
+                   admin_id=callback.from_user.id,
+                   srv_name=server_name,
+                   data=profiles_data,
+                   url=api_url,
+                   key=api_key,
+                   deleted=deleted_profiles: (
+                _delete_server_background(
+                    bot,
+                    admin_id,
+                    srv_name,
+                    data,
+                    url,
+                    key,
+                    deleted,
+                )
+            ),
         )
 
 

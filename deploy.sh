@@ -542,12 +542,17 @@ init_database() {
 
     cd "$PROJECT_DIR"
 
-    runuser -u projectx -- "$VENV_DIR/bin/python" -c "
+    if ! runuser -u projectx -- "$VENV_DIR/bin/python" -c "
 import asyncio
 from database.connection import init_db
 
 asyncio.run(init_db())
-" > /dev/null 2>&1 || warn "Инициализация отложена (выполнится при старте)"
+"; then
+        warn "Ошибка инициализации БД"
+        return 1
+    fi
+
+    success "БД инициализирована"
 }
 
 setup_systemd() {
@@ -654,14 +659,22 @@ setup_backup() {
 
     cat > /usr/local/bin/projectx-backup.sh << 'EOF'
 #!/bin/bash
+set -euo pipefail
+
 DIR="/root/backups/projectx"
 DATE=$(date +%Y%m%d_%H%M%S)
 
+mkdir -p "$DIR"
+
 if sudo -u postgres pg_dump -Fc projectx_bot | gzip > "$DIR/db_$DATE.sql.gz"; then
     echo "[$(date)] PostgreSQL backup created"
+else
+    echo "[$(date)] PostgreSQL backup FAILED" >&2
+    exit 1
 fi
 
-cp /opt/projectx-bot/.env "$DIR/env_$DATE.bak" && gzip "$DIR/env_$DATE.bak"
+cp /opt/projectx-bot/.env "$DIR/env_$DATE.bak"
+gzip "$DIR/env_$DATE.bak"
 
 find "$DIR" -type f -mtime +30 -delete
 EOF

@@ -1,10 +1,9 @@
-import asyncio
 import logging
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.connection import session_scope
+from database.connection import session_scope, queue_post_commit_task
 from database.models import (
     PendingAPIDeletion,
     Server,
@@ -29,7 +28,7 @@ class ProfileDeletionService:
 
     Логика:
     1. Профили удаляются из БД.
-    2. Удаление на сервере выполняется фоново.
+    2. Удаление на сервере выполняется только после commit.
     3. Если сервер недоступен или удаление не удалось,
        создаётся запись в pending_api_deletions.
     4. Фоновый cleanup позже повторит удаление.
@@ -43,14 +42,7 @@ class ProfileDeletionService:
         reason: str,
         background: bool = True,
     ) -> int:
-        """
-        Удаляет все профили пользователя из БД и ставит задачу
-        на удаление этих профилей на серверах.
-
-        Возвращает количество удалённых профилей.
-        """
         stmt = select(VPNProfile).where(VPNProfile.user_id == user_id)
-
         result = await session.execute(stmt)
         profiles = list(result.scalars().all())
 
@@ -72,12 +64,6 @@ class ProfileDeletionService:
         reason: str,
         background: bool = True,
     ) -> int:
-        """
-        Удаляет конкретный список профилей.
-
-        Используется, когда профили уже загружены в память,
-        например в cleanup-воркере или админском действии.
-        """
         if not profiles:
             return 0
 
@@ -97,7 +83,6 @@ class ProfileDeletionService:
         background: bool,
     ) -> int:
         server_ids = {profile.server_id for profile in profiles}
-
         servers_stmt = select(Server).where(Server.id.in_(server_ids))
         servers_result = await session.execute(servers_stmt)
 
@@ -155,11 +140,14 @@ class ProfileDeletionService:
             reason,
         )
 
-        if background and deletion_tasks:
-            asyncio.create_task(
-                ProfileDeletionService._delete_peers_on_api_background(
-                    deletion_tasks=deletion_tasks,
-                )
+        if deletion_tasks:
+            queue_post_commit_task(
+                session,
+                lambda tasks=deletion_tasks: (
+                    ProfileDeletionService._delete_peers_on_api_background(
+                        deletion_tasks=tasks,
+                    )
+                ),
             )
 
         return len(profiles)
@@ -168,17 +156,12 @@ class ProfileDeletionService:
     async def _delete_peers_on_api_background(
         deletion_tasks: list,
     ) -> None:
-        """
-        Пытается удалить пиры на серверах.
-
-        Если удаление не удалось, создаёт pending_api_deletions,
-        чтобы cleanup-воркер повторил попытку позже.
-        """
         if not deletion_tasks:
             return
 
-        semaphore = asyncio.Semaphore(20)
+        import asyncio
 
+        semaphore = asyncio.Semaphore(20)
         success_count = 0
         failed_tasks = []
 
@@ -232,9 +215,6 @@ class ProfileDeletionService:
     async def _queue_failed_api_deletions(
         failed_tasks: list,
     ) -> None:
-        """
-        Сохраняет неудалённые пиры в pending_api_deletions.
-        """
         try:
             async with session_scope() as session:
                 current_time = now_utc()
@@ -251,16 +231,15 @@ class ProfileDeletionService:
                         last_attempt_at=current_time,
                         last_error="Background API deletion failed",
                     )
-
                     session.add(pending)
 
                 await session.flush()
 
-            logger.warning(
-                "ProfileDeletionService: queued %s failed API deletions "
-                "for cleanup",
-                len(failed_tasks),
-            )
+                logger.warning(
+                    "ProfileDeletionService: queued %s failed API deletions "
+                    "for cleanup",
+                    len(failed_tasks),
+                )
 
         except Exception as e:
             logger.error(

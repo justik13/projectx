@@ -255,6 +255,8 @@ class AmneziaClient:
         self,
         method: str,
         path: str,
+        *,
+        not_found_as_success: bool = False,
         **kwargs,
     ) -> Optional[dict]:
         if not self.api_url:
@@ -270,22 +272,18 @@ class AmneziaClient:
                     self.api_url,
                     path,
                 )
-
                 self._key_error_logged = True
-
             return None
 
         url = f"{self.api_url}{path}"
 
         cb = _get_circuit_breaker(self.api_url)
-
         if not await cb.is_available():
             logger.debug(
                 "Circuit breaker OPEN for %s%s, skipping request",
                 self.api_url,
                 path,
             )
-
             return None
 
         limiter = _get_rate_limiter(self.api_url)
@@ -300,7 +298,6 @@ class AmneziaClient:
                     attempt + 1,
                     API_RETRY_COUNT + 1,
                 )
-
                 return None
 
             session = await get_http_session()
@@ -310,6 +307,7 @@ class AmneziaClient:
                     method,
                     url,
                     headers=self._headers,
+                    allow_redirects=False,
                     **kwargs,
                 ) as response:
                     if response.status == 204:
@@ -318,16 +316,26 @@ class AmneziaClient:
 
                     elif 200 <= response.status < 300:
                         await cb.record_success()
-
                         try:
                             return await response.json()
                         except aiohttp.ContentTypeError:
                             return None
 
+                    elif 300 <= response.status < 400:
+                        # Redirects запрещены.
+                        await cb.record_failure()
+                        logger.warning(
+                            "API %s%s returned redirect %s. "
+                            "Redirects are disabled.",
+                            self.api_url,
+                            path,
+                            response.status,
+                        )
+                        return None
+
                     elif response.status == 429:
                         if attempt < API_RETRY_COUNT:
                             backoff = 2 ** (attempt + 1)
-
                             logger.warning(
                                 "API %s%s returned 429, "
                                 "retrying in %ss",
@@ -335,7 +343,6 @@ class AmneziaClient:
                                 path,
                                 backoff,
                             )
-
                             await asyncio.sleep(backoff)
                             continue
 
@@ -345,15 +352,20 @@ class AmneziaClient:
                             self.api_url,
                             path,
                         )
-
                         return None
 
                     elif 400 <= response.status < 500:
+                        if (
+                            not_found_as_success
+                            and response.status == 404
+                        ):
+                            await cb.record_success()
+                            return {}
+
                         await cb.record_failure()
 
                         try:
                             error_text = await response.text()
-
                             logger.warning(
                                 "API %s%s returned %s "
                                 "(client error): %s",
@@ -373,7 +385,6 @@ class AmneziaClient:
                             and response.status >= 500
                         ):
                             backoff = 2 ** attempt
-
                             logger.warning(
                                 "API %s%s returned %s, "
                                 "retrying in %ss (attempt %s)",
@@ -383,12 +394,10 @@ class AmneziaClient:
                                 backoff,
                                 attempt + 1,
                             )
-
                             await asyncio.sleep(backoff)
                             continue
 
                         await cb.record_failure()
-
                         return None
 
             except (
@@ -397,7 +406,6 @@ class AmneziaClient:
             ) as e:
                 if attempt < API_RETRY_COUNT:
                     backoff = 2 ** attempt
-
                     logger.warning(
                         "Network error for %s%s: %s, "
                         "retrying in %ss (attempt %s)",
@@ -407,23 +415,19 @@ class AmneziaClient:
                         backoff,
                         attempt + 1,
                     )
-
                     await asyncio.sleep(backoff)
                 else:
                     await cb.record_failure()
-
                     logger.error(
                         "All retries exhausted for %s%s: %s",
                         self.api_url,
                         path,
                         type(e).__name__,
                     )
-
                     return None
 
             except Exception as e:
                 await cb.record_failure()
-
                 logger.error(
                     "Unexpected error for %s%s: %s: %s",
                     self.api_url,
@@ -431,7 +435,6 @@ class AmneziaClient:
                     type(e).__name__,
                     e,
                 )
-
                 return None
 
         return None
@@ -478,6 +481,7 @@ class AmneziaClient:
             "DELETE",
             "/clients",
             json=data,
+            not_found_as_success=True,
         )
 
         return result is not None

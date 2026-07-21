@@ -30,21 +30,33 @@ def _allow_local_http() -> bool:
     return _env_truthy(raw)
 
 
+def _allow_local_https() -> bool:
+    raw = os.getenv("ALLOW_LOCAL_HTTPS", "false")
+    return _env_truthy(raw)
+
+
 def _is_dangerous_ip(ip) -> bool:
     if ip.is_private:
         return True
+
     if ip.is_loopback:
         return True
+
     if ip.is_link_local:
         return True
+
     if ip.is_reserved:
         return True
+
     if ip.is_multicast:
         return True
+
     if ip.is_unspecified:
         return True
+
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         return _is_dangerous_ip(ip.ipv4_mapped)
+
     return False
 
 
@@ -67,12 +79,15 @@ async def _resolved_ips_are_safe(hostname: str) -> bool:
 
     for family, type_, proto, canonname, sockaddr in addr_info:
         ip_str = sockaddr[0]
+
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
             return False
+
         if _is_dangerous_ip(ip):
             return False
+
     return True
 
 
@@ -96,11 +111,17 @@ async def is_safe_url(url: str) -> bool:
         if hostname in _LOCAL_HOSTNAMES:
             if scheme == "http":
                 return _allow_local_http()
-            return True
 
+            if scheme == "https":
+                return _allow_local_https()
+
+            return False
+
+        # Внешний HTTP запрещён.
         if scheme == "http":
             return False
 
+        # Прямой IP-адрес.
         try:
             ip = ipaddress.ip_address(hostname)
             return not _is_dangerous_ip(ip)
@@ -108,5 +129,6 @@ async def is_safe_url(url: str) -> bool:
             pass
 
         return await _resolved_ips_are_safe(hostname)
+
     except Exception:
         return False

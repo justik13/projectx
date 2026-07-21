@@ -324,15 +324,26 @@ async def _process_pending_deletions():
 
         stmt = (
             select(PendingAPIDeletion)
-            .where(PendingAPIDeletion.attempts < MAX_PENDING_ATTEMPTS)
             .order_by(PendingAPIDeletion.created_at)
-            .limit(50)
+            .limit(200)
         )
-
         result = await session.execute(stmt)
         pending_deletions = result.scalars().all()
 
         for deletion in pending_deletions:
+            if deletion.attempts >= MAX_PENDING_ATTEMPTS:
+                pending_deletions_data.append(
+                    {
+                        "id": deletion.id,
+                        "expired": True,
+                        "attempts": deletion.attempts,
+                        "peer_id": deletion.peer_id,
+                        "server_name": deletion.server_name,
+                        "reason": deletion.reason,
+                    }
+                )
+                continue
+
             if deletion.last_attempt_at:
                 time_since_last = (
                     current_time - deletion.last_attempt_at
@@ -344,6 +355,7 @@ async def _process_pending_deletions():
             pending_deletions_data.append(
                 {
                     "id": deletion.id,
+                    "expired": False,
                     "attempts": deletion.attempts,
                     "api_url": deletion.api_url,
                     "api_key": deletion.api_key,
@@ -364,34 +376,29 @@ async def _process_pending_deletions():
     success_count = 0
     fail_count = 0
     expired_count = 0
+    expired_ids = []
 
     for deletion_data in pending_deletions_data:
         deletion_id = deletion_data["id"]
-        attempts = deletion_data["attempts"]
-        peer_id = deletion_data["peer_id"]
-        server_name = deletion_data["server_name"]
-        reason = deletion_data.get("reason") or "unknown"
 
-        if attempts >= MAX_PENDING_ATTEMPTS:
+        if deletion_data.get("expired"):
             expired_count += 1
-
-            async with session_scope() as session:
-                await session.execute(
-                    delete(PendingAPIDeletion).where(
-                        PendingAPIDeletion.id == deletion_id
-                    )
-                )
+            expired_ids.append(deletion_id)
 
             logger.warning(
                 "Pending deletion expired after %s attempts: "
                 "server=%s, peer=%s..., reason=%s",
-                attempts,
-                server_name,
-                peer_id[:16],
-                reason,
+                deletion_data["attempts"],
+                deletion_data["server_name"],
+                deletion_data["peer_id"][:16],
+                deletion_data.get("reason") or "unknown",
             )
-
             continue
+
+        attempts = deletion_data["attempts"]
+        peer_id = deletion_data["peer_id"]
+        server_name = deletion_data["server_name"]
+        reason = deletion_data.get("reason") or "unknown"
 
         client = AmneziaClient(
             deletion_data["api_url"],
@@ -403,7 +410,6 @@ async def _process_pending_deletions():
 
         try:
             deleted = await client.delete_user(client_id=peer_id)
-
         except Exception as e:
             error_text = f"{type(e).__name__}: {str(e)[:200]}"
 
@@ -416,7 +422,6 @@ async def _process_pending_deletions():
                         PendingAPIDeletion.id == deletion_id
                     )
                 )
-
                 success_count += 1
 
                 logger.info(
@@ -427,7 +432,6 @@ async def _process_pending_deletions():
                     attempts + 1,
                     reason,
                 )
-
             else:
                 await session.execute(
                     update(PendingAPIDeletion)
@@ -441,8 +445,15 @@ async def _process_pending_deletions():
                         ),
                     )
                 )
-
                 fail_count += 1
+
+    if expired_ids:
+        async with session_scope() as session:
+            await session.execute(
+                delete(PendingAPIDeletion).where(
+                    PendingAPIDeletion.id.in_(expired_ids)
+                )
+            )
 
     if success_count > 0 or fail_count > 0 or expired_count > 0:
         logger.info(
@@ -459,7 +470,6 @@ async def _process_pending_deletions():
             from config.settings import get_settings
 
             bot = get_bot_ref()
-
             if bot:
                 settings = get_settings()
 
