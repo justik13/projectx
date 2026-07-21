@@ -1,16 +1,11 @@
-import asyncio
 import logging
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation
 
-import redis.asyncio as aioredis
-from cachetools import TTLCache
-from sqlalchemy import select, update, func
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from bot.middlewares.user_context import invalidate_user_cache
-from config.settings import get_settings
 from database.connection import queue_post_commit_task
 from database.models import Payment
 from database.repositories.payments_repo import (
@@ -27,484 +22,25 @@ from services.referral_service import ReferralService
 from services.subscription import SubscriptionService
 from utils.datetime_helpers import now_utc
 
+from .alerts import (
+    _notify_client_paid_after_cancel_now,
+    _send_cancel_after_completed_alert_now,
+    _send_chargeback_alert_now,
+    _send_manual_review_alert_now,
+    _send_paid_after_cancel_alert_now,
+)
+from .common import (
+    MANUAL_GRANT_ALLOWED_STATUSES,
+    _build_payment_snapshot,
+    _expected_payment_amount,
+    _get_redis,
+    _to_decimal,
+)
+
 logger = logging.getLogger(__name__)
 
-_alerted_paid_after_cancel: TTLCache = TTLCache(
-    maxsize=100000,
-    ttl=86400,
-)
-_notified_paid_after_cancel: TTLCache = TTLCache(
-    maxsize=100000,
-    ttl=86400,
-)
-_alerted_manual_review: TTLCache = TTLCache(
-    maxsize=100000,
-    ttl=86400,
-)
-
-_redis_client: aioredis.Redis | None = None
-
-MANUAL_REVIEW_REASONS = {
-    "banned_or_deleted": "Пользователь заблокирован или удалён",
-    "inactive_tariff": "Тариф неактивен",
-    "amount_mismatch": "Сумма платежа не совпадает",
-    "amount_missing": "Не удалось получить сумму платежа",
-    "currency_mismatch": "Валюта платежа не совпадает",
-    "payload_mismatch": "Несовпадение идентификатора платежа",
-    "missing_tariff_or_user": "Не найден тариф или пользователь",
-    "device_limit_exceeded": "Превышен лимит устройств",
-    "stars_not_confirmed": "Платёж не подтверждён",
-    "status_failed": "Платёж находился в статусе failed",
-    "cancel_after_completed": "Отмена после успешной оплаты",
-}
-
-MANUAL_GRANT_ALLOWED_STATUSES = {
-    "pending",
-    "cancelled",
-    "failed",
-    "requires_manual_review",
-}
-
-
-async def _get_redis() -> aioredis.Redis:
-    global _redis_client
-
-    if _redis_client is None:
-        settings = get_settings()
-
-        _redis_client = aioredis.from_url(
-            settings.REDIS_URL,
-            decode_responses=True,
-            socket_timeout=5.0,
-        )
-
-    return _redis_client
-
-
-def _to_decimal(value) -> Decimal | None:
-    """
-    Безопасно конвертирует значение в Decimal.
-
-    Использовать для финансовых данных.
-    Никогда не использовать float-сравнения для денег.
-    """
-    if value is None:
-        return None
-
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-
-
-def _expected_payment_amount(payment: Payment) -> Decimal | None:
-    """
-    Возвращает ожидаемую сумму платежа по тарифу.
-
-    Для stars: tariff.price_stars.
-    Для рублей: tariff.price_rub.
-    """
-    if not payment.tariff:
-        return None
-
-    if payment.currency == "stars":
-        return Decimal(str(payment.tariff.price_stars))
-
-    return Decimal(str(payment.tariff.price_rub))
-
-
-def _build_payment_snapshot(payment: Payment) -> dict:
-    """
-    Создаёт безопасный snapshot платежа для отправки алертов
-    после commit.
-
-    Важно:
-    - snapshot не содержит SQLAlchemy-объекты;
-    - его можно использовать в post-commit задачах;
-    - личные данные минимизированы.
-    """
-    user = payment.user
-    tariff = payment.tariff
-
-    tariff_name = "—"
-
-    if tariff:
-        tariff_name = (
-            f"{tariff.duration_days} дн. / "
-            f"{tariff.device_limit} устр."
-        )
-
-    return {
-        "payment_id": payment.id,
-        "user_telegram_id": user.telegram_id if user else None,
-        "username": (
-            f"@{user.username}"
-            if user and user.username
-            else "—"
-        ),
-        "amount": str(payment.amount),
-        "currency": payment.currency,
-        "tariff_name": tariff_name,
-        "payment_method": payment.payment_method or "—",
-        "external_id": payment.external_id or "—",
-    }
-
-
-async def _send_alert_to_admins(
-    message: str,
-    keyboard=None,
-) -> bool:
-    """
-    Отправляет алерт админам.
-    Возвращает True, если отправлен хотя бы одному админу.
-    """
-    from services.workers.heartbeat import get_bot_ref
-
-    bot = get_bot_ref()
-    if bot is None:
-        logger.error(
-            "Admin alert SKIPPED: bot_ref is None. "
-            "Message: %s",
-            message[:200],
-        )
-        return False
-
-    settings = get_settings()
-    admin_ids = settings.ADMIN_IDS
-    if not admin_ids:
-        return False
-
-    sent = False
-
-    for admin_id in admin_ids:
-        try:
-            await bot.send_message(
-                admin_id,
-                message,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
-            sent = True
-        except Exception as e:
-            logger.error(
-                "Failed to send admin alert to %s: %s",
-                admin_id,
-                e,
-            )
-
-    return sent
-
-
-async def _send_manual_review_alert_now(
-    snapshot: dict,
-    reason: str,
-    source: str,
-) -> None:
-    """
-    Отправляет алерт о платеже, который требует ручной проверки.
-    """
-    payment_id = snapshot.get("payment_id")
-    if payment_id is None:
-        return
-
-    alert_key = payment_id
-    if alert_key in _alerted_manual_review:
-        return
-
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-    reason_text = MANUAL_REVIEW_REASONS.get(reason, reason)
-
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✅ Выдать подписку",
-        callback_data=f"admin_manual_grant:{payment_id}",
-    )
-
-    user_telegram_id = snapshot.get("user_telegram_id")
-    builder.button(
-        text="👤 Профиль клиента",
-        callback_data=(
-            f"admin_user_card:{user_telegram_id}"
-            if user_telegram_id
-            else "admin_menu"
-        ),
-    )
-    builder.adjust(1, 1)
-    keyboard = builder.as_markup()
-
-    message = (
-        f"⚠️ <b>Платёж требует ручной проверки</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>\n"
-        f"👤 <b>Клиент:</b> "
-        f"<code>{user_telegram_id or '—'}</code> "
-        f"({snapshot.get('username', '—')})\n"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
-        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}\n"
-        f"🧩 <b>Причина:</b> {reason_text}\n"
-        f"📍 <b>Источник:</b> <code>{source}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Доступ не выдан автоматически.</i>"
-    )
-
-    sent = await _send_alert_to_admins(message, keyboard)
-    if sent:
-        _alerted_manual_review[alert_key] = True
-
-
-async def _send_paid_after_cancel_alert_now(
-    snapshot: dict,
-) -> None:
-    """
-    Отправляет админам алерт о ситуации, когда оплата пришла
-    после отмены платежа.
-    """
-    payment_id = snapshot.get("payment_id")
-    if payment_id is None:
-        return
-
-    if payment_id in _alerted_paid_after_cancel:
-        return
-
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✅ Выдать подписку",
-        callback_data=f"admin_manual_grant:{payment_id}",
-    )
-
-    user_telegram_id = snapshot.get("user_telegram_id")
-    builder.button(
-        text="👤 Профиль клиента",
-        callback_data=(
-            f"admin_user_card:{user_telegram_id}"
-            if user_telegram_id
-            else "admin_menu"
-        ),
-    )
-    builder.adjust(1, 1)
-    keyboard = builder.as_markup()
-
-    message = (
-        f"⚠️ <b>Оплата после отмены</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>\n"
-        f"👤 <b>Клиент:</b> "
-        f"<code>{user_telegram_id or '—'}</code> "
-        f"({snapshot.get('username', '—')})\n"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
-        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Деньги поступили, но платёж был ранее отменён.\n"
-        f"Клиент уведомлён автоматически.\n"
-        f"Выберите действие:</i>"
-    )
-
-    sent = await _send_alert_to_admins(message, keyboard)
-    if sent:
-        _alerted_paid_after_cancel[payment_id] = True
-
-
-async def _notify_client_paid_after_cancel_now(
-    snapshot: dict,
-) -> None:
-    """
-    Уведомляет клиента, что оплата получена, но платёж был ранее
-    отменён, поэтому доступ не выдан автоматически.
-    """
-    payment_id = snapshot.get("payment_id")
-    user_telegram_id = snapshot.get("user_telegram_id")
-
-    if payment_id is None or user_telegram_id is None:
-        return
-
-    if payment_id in _notified_paid_after_cancel:
-        return
-
-    from aiogram.exceptions import TelegramForbiddenError
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    from services.workers.heartbeat import get_bot_ref
-
-    bot = get_bot_ref()
-    if bot is None:
-        logger.error(
-            "Client notification SKIPPED: bot_ref is None. "
-            "Payment %s",
-            payment_id,
-        )
-        return
-
-    settings = get_settings()
-    support_username = settings.SUPPORT_USERNAME.lstrip("@")
-
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="💬 Написать в поддержку",
-        url=f"https://t.me/{support_username}",
-    )
-    builder.button(
-        text="🏠 В главное меню",
-        callback_data="back_to_main_menu",
-    )
-    builder.adjust(1, 1)
-    keyboard = builder.as_markup()
-
-    message = (
-        f"💳 <b>Мы получили вашу оплату</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}\n"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
-        f"🆔 <b>Платёж:</b> <code>{payment_id}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Ранее в боте была нажата кнопка «Отменить», "
-        f"поэтому доступ не активировался автоматически.\n"
-        f"Напишите нам — решим за 2 минуты."
-    )
-
-    try:
-        await bot.send_message(
-            user_telegram_id,
-            message,
-            reply_markup=keyboard,
-            parse_mode="HTML",
-        )
-
-        _notified_paid_after_cancel[payment_id] = True
-
-        logger.info(
-            "Paid-after-cancel notification sent to user %s "
-            "for payment %s",
-            user_telegram_id,
-            payment_id,
-        )
-
-    except TelegramForbiddenError:
-        _notified_paid_after_cancel[payment_id] = True
-
-        logger.info(
-            "Paid-after-cancel notification: user %s blocked the bot",
-            user_telegram_id,
-        )
-
-        try:
-            from database.connection import session_scope
-            from database.repositories.users_repo import (
-                mark_user_bot_blocked,
-            )
-
-            async with session_scope() as session:
-                await mark_user_bot_blocked(
-                    session,
-                    user_telegram_id,
-                )
-        except Exception as e:
-            logger.error(
-                "Failed to mark user %s as bot_blocked: %s",
-                user_telegram_id,
-                e,
-            )
-
-    except Exception as e:
-        logger.error(
-            "Failed to send paid-after-cancel notification to "
-            "user %s: %s",
-            user_telegram_id,
-            e,
-        )
-
-
-async def _send_cancel_after_completed_alert_now(
-    snapshot: dict,
-    transaction_id: str,
-) -> None:
-    """
-    Критический алерт: пришёл CANCELED по уже completed платежу.
-    """
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-    payment_id = snapshot.get("payment_id")
-    user_telegram_id = snapshot.get("user_telegram_id")
-
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="👤 Профиль клиента",
-        callback_data=(
-            f"admin_user_card:{user_telegram_id}"
-            if user_telegram_id
-            else "admin_menu"
-        ),
-    )
-    builder.adjust(1)
-    keyboard = builder.as_markup()
-
-    message = (
-        f"🚨 <b>Критическая платёжная ситуация</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>\n"
-        f"👤 <b>Клиент:</b> "
-        f"<code>{user_telegram_id or '—'}</code> "
-        f"({snapshot.get('username', '—')})\n"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
-        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}\n"
-        f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Платёж уже был completed, но пришёл CANCELED.\n"
-        f"Требуется ручная проверка. Возможна отмена/chargeback.</i>"
-    )
-
-    await _send_alert_to_admins(message, keyboard)
-
-
-async def _send_chargeback_alert_now(
-    snapshot: dict,
-    transaction_id: str,
-) -> None:
-    """
-    Отправляет админам алерт о chargeback.
-    """
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-    payment_id = snapshot.get("payment_id")
-    user_telegram_id = snapshot.get("user_telegram_id")
-
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="👤 Профиль пользователя",
-        callback_data=(
-            f"admin_user_card:{user_telegram_id}"
-            if user_telegram_id
-            else "admin_menu"
-        ),
-    )
-    builder.adjust(1)
-    keyboard = builder.as_markup()
-
-    message = (
-        f"🚨 <b>Возврат средств</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Платёж ID:</b> <code>{payment_id}</code>\n"
-        f"👤 <b>Пользователь:</b> "
-        f"<code>{user_telegram_id or '—'}</code> "
-        f"({snapshot.get('username', '—')})\n"
-        f"💎 <b>Тариф:</b> {snapshot.get('tariff_name', '—')}\n"
-        f"💰 <b>Сумма:</b> {snapshot.get('amount', '—')} "
-        f"{snapshot.get('currency', '—')}\n"
-        f"🔗 <b>Transaction:</b> <code>{transaction_id}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Доступ отозван. Устройства удалены.\n"
-        f"Реферальные бонусы откатаны.</i>"
-    )
-
-    await _send_alert_to_admins(message, keyboard)
 
 class PaymentService:
-
     @staticmethod
     async def handle_successful_payment(
         session: AsyncSession,
@@ -514,7 +50,6 @@ class PaymentService:
         Обрабатывает успешный платёж.
 
         Безопасная логика:
-
         1. Блокируем строку платежа.
         2. Проверяем статус.
         3. Проверяем пользователя.
@@ -525,7 +60,6 @@ class PaymentService:
         Если что-то не так, платёж переводится в
         requires_manual_review, а админ получает алерт.
         """
-
         payment_obj = await session.get(Payment, payment_id)
 
         if not payment_obj:
@@ -537,7 +71,9 @@ class PaymentService:
         try:
             redis = await _get_redis()
 
-            user_lock_key = f"lock:payment_bonus:{payment_obj.user_id}"
+            user_lock_key = (
+                f"lock:payment_bonus:{payment_obj.user_id}"
+            )
 
             redis_lock = redis.lock(
                 user_lock_key,
@@ -581,7 +117,6 @@ class PaymentService:
                         "(idempotent)",
                         payment_id,
                     )
-
                     return True, "already_processed"
 
                 if payment.status == "cancelled":
@@ -623,7 +158,6 @@ class PaymentService:
                         "access",
                         payment_id,
                     )
-
                     return False, "refunded"
 
                 if payment.status == "requires_manual_review":
@@ -631,7 +165,6 @@ class PaymentService:
                         "Payment %s already in manual review",
                         payment_id,
                     )
-
                     return False, "manual_review"
 
                 if payment.status == "failed":
@@ -676,13 +209,10 @@ class PaymentService:
                     manual_review_reason = (
                         "missing_tariff_or_user"
                     )
-
                 elif user.is_deleted or user.is_banned:
                     manual_review_reason = "banned_or_deleted"
-
                 elif not tariff.is_active:
                     manual_review_reason = "inactive_tariff"
-
                 else:
                     expected_amount = (
                         _expected_payment_amount(payment)
@@ -690,7 +220,6 @@ class PaymentService:
 
                     if expected_amount is None:
                         manual_review_reason = "amount_missing"
-
                     elif payment.amount != expected_amount:
                         manual_review_reason = "amount_mismatch"
 
@@ -753,7 +282,6 @@ class PaymentService:
                         new_device_limit=tariff.device_limit,
                         new_tariff_id=tariff.id,
                     )
-
                 except ValueError as e:
                     logger.error(
                         "Payment %s: subscription extend "
@@ -859,7 +387,6 @@ class PaymentService:
                             is_first_payment=is_first_payment,
                             duration_days=tariff.duration_days,
                         )
-
                     except Exception as e:
                         logger.warning(
                             "Referral bonus failed for payment "
@@ -885,7 +412,6 @@ class PaymentService:
                             f"{payment.currency}"
                         ),
                     )
-
                 except Exception as e:
                     logger.error(
                         "Failed to log payment success to "
@@ -909,14 +435,12 @@ class PaymentService:
                 e,
                 exc_info=True,
             )
-
             return False, "error"
 
         finally:
             if redis_lock is not None and acquired:
                 try:
                     await redis_lock.release()
-
                 except Exception:
                     pass
 
@@ -942,12 +466,7 @@ class PaymentService:
         Также запрещено выдавать доступ заблокированному
         пользователю.
         """
-        allowed_statuses = {
-            "pending",
-            "cancelled",
-            "failed",
-            "requires_manual_review",
-        }
+        allowed_statuses = MANUAL_GRANT_ALLOWED_STATUSES
 
         try:
             async with session.begin_nested():
@@ -1000,7 +519,6 @@ class PaymentService:
                         new_device_limit=tariff.device_limit,
                         new_tariff_id=tariff.id,
                     )
-
                 except ValueError as e:
                     logger.error(
                         "force_grant: extend failed for payment "
@@ -1056,7 +574,6 @@ class PaymentService:
                             is_first_payment=is_first_payment,
                             duration_days=tariff.duration_days,
                         )
-
                     except Exception as e:
                         logger.warning(
                             "Referral bonus failed for manual "
@@ -1082,7 +599,6 @@ class PaymentService:
                             f"{user.telegram_id}"
                         ),
                     )
-
                 except Exception as e:
                     logger.error(
                         "force_grant: audit failed: %s",
@@ -1097,7 +613,6 @@ class PaymentService:
                 e,
                 exc_info=True,
             )
-
             return False, f"Ошибка БД: {e}"
 
     @staticmethod
@@ -1113,12 +628,12 @@ class PaymentService:
         Создаёт платёж через платёжную систему.
 
         Важно:
-
         - сумма в БД хранится как Decimal;
         - описание платежа не содержит личных ID;
         - payload содержит только ID платежа;
         - при ошибке провайдера платёж остаётся в БД со статусом failed.
         """
+        from config.settings import get_settings
 
         settings = get_settings()
 
@@ -1129,7 +644,6 @@ class PaymentService:
                 "create_platega_payment: invalid amount %s",
                 amount,
             )
-
             return None, None
 
         payment = await create_payment(
@@ -1170,7 +684,6 @@ class PaymentService:
 
             try:
                 await session.flush()
-
             except Exception:
                 pass
 
@@ -1187,7 +700,6 @@ class PaymentService:
                         f"payment provider create_transaction failed"
                     ),
                 )
-
             except Exception as e:
                 logger.error(
                     "Failed to log payment failure to audit: %s",
@@ -1208,6 +720,7 @@ class PaymentService:
         )
 
         payment.payment_url = transaction.get("redirect")
+
         payment.payment_method = transaction.get(
             "paymentMethod",
             "SBPQR",
@@ -1233,6 +746,7 @@ class PaymentService:
             )
             .where(Payment.external_id == transaction_id)
         )
+
         result = await session.execute(stmt)
         payment = result.scalar_one_or_none()
 
@@ -1282,6 +796,7 @@ class PaymentService:
                         _send_paid_after_cancel_alert_now(s)
                     ),
                 )
+
                 queue_post_commit_task(
                     session,
                     lambda s=snapshot: (
@@ -1294,6 +809,7 @@ class PaymentService:
             # Верификация суммы.
             if callback_amount is None:
                 client = PlategaClient()
+
                 status_data = await client.check_status(
                     transaction_id,
                 )
@@ -1303,6 +819,7 @@ class PaymentService:
                     and status_data.get("amount") is not None
                 ):
                     callback_amount = float(status_data["amount"])
+
                     logger.info(
                         "Payment provider callback: amount recovered "
                         "via API check_status: %s for transaction=%s",
@@ -1316,15 +833,18 @@ class PaymentService:
                     "and API verification failed for transaction=%s",
                     transaction_id,
                 )
+
                 await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_missing",
                     source="platega_callback",
                 )
+
                 return False, "manual_review"
 
             callback_decimal = _to_decimal(callback_amount)
+
             if callback_decimal is None:
                 logger.error(
                     "Payment provider callback: invalid callback "
@@ -1332,12 +852,14 @@ class PaymentService:
                     callback_amount,
                     transaction_id,
                 )
+
                 await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_mismatch",
                     source="platega_callback",
                 )
+
                 return False, "manual_review"
 
             if payment.amount != callback_decimal:
@@ -1349,12 +871,14 @@ class PaymentService:
                     payment.id,
                     transaction_id,
                 )
+
                 await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_mismatch",
                     source="platega_callback",
                 )
+
                 return False, "manual_review"
 
             # Верификация валюты.
@@ -1371,12 +895,14 @@ class PaymentService:
                         payment.id,
                         transaction_id,
                     )
+
                     await PaymentService._set_manual_review(
                         session,
                         payment.id,
                         "currency_mismatch",
                         source="platega_callback",
                     )
+
                     return False, "manual_review"
 
             expected_payload = f"payment_{payment.id}"
@@ -1393,12 +919,14 @@ class PaymentService:
                     callback_payload,
                     payment.id,
                 )
+
                 await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "payload_mismatch",
                     source="platega_callback",
                 )
+
                 return False, "manual_review"
 
             success, result_code = (
@@ -1407,6 +935,7 @@ class PaymentService:
                     payment.id,
                 )
             )
+
             return success, result_code
 
         elif status == "CANCELED":
@@ -1483,6 +1012,7 @@ class PaymentService:
             "Unknown payment provider status: %s",
             status,
         )
+
         return False, "error"
 
     @staticmethod
@@ -1514,6 +1044,7 @@ class PaymentService:
             return False, "invalid_status"
 
         client = PlategaClient()
+
         status_data = await client.check_status(
             payment.external_id,
         )
@@ -1525,6 +1056,7 @@ class PaymentService:
 
         if status == "CONFIRMED":
             callback_amount = status_data.get("amount")
+
             if callback_amount is not None:
                 callback_decimal = _to_decimal(callback_amount)
 
@@ -1538,9 +1070,11 @@ class PaymentService:
                         "amount_mismatch",
                         source="check_platega_payment",
                     )
+
                     return False, "manual_review"
 
             callback_currency = status_data.get("currency")
+
             if callback_currency:
                 callback_currency_norm = str(callback_currency).upper()
                 payment_currency_norm = str(payment.currency).upper()
@@ -1552,6 +1086,7 @@ class PaymentService:
                         "currency_mismatch",
                         source="check_platega_payment",
                     )
+
                     return False, "manual_review"
 
             success, result_code = (
@@ -1560,6 +1095,7 @@ class PaymentService:
                     payment.id,
                 )
             )
+
             return success, result_code
 
         elif status == "CANCELED":
@@ -1571,6 +1107,7 @@ class PaymentService:
                 )
 
                 snapshot = _build_payment_snapshot(payment)
+
                 transaction_id = payment.external_id or "—"
 
                 await AuditService.log_action(
@@ -1661,6 +1198,7 @@ class PaymentService:
         )
 
         result = await session.execute(stmt)
+
         await session.flush()
 
         if result.rowcount == 0:
@@ -1794,26 +1332,26 @@ class PaymentService:
                                         bonus_referrer
                                     )
 
-                                    # Не вычитаем дни из вечной подписки.
-                                    if (
+                                # Не вычитаем дни из вечной подписки.
+                                if (
+                                    referrer.subscription_end
+                                    and referrer.subscription_end
+                                    > current_time
+                                    and referrer.subscription_end.year
+                                    < 2100
+                                ):
+                                    referrer.subscription_end = (
                                         referrer.subscription_end
-                                        and referrer.subscription_end
-                                        > current_time
-                                        and referrer.subscription_end.year
-                                        < 2100
-                                    ):
-                                        referrer.subscription_end = (
-                                            referrer.subscription_end
-                                            - timedelta(
-                                                days=bonus_referrer,
-                                            )
+                                        - timedelta(
+                                            days=bonus_referrer,
                                         )
-
-                                    logger.info(
-                                        "Chargeback: rolled back "
-                                        "referrer bonus for %s",
-                                        referrer.telegram_id,
                                     )
+
+                                logger.info(
+                                    "Chargeback: rolled back "
+                                    "referrer bonus for %s",
+                                    referrer.telegram_id,
+                                )
 
                             # Откатываем бонус самого пользователя,
                             # если это была первая покупка.
@@ -1908,12 +1446,3 @@ class PaymentService:
                 exc_info=True,
             )
             return False, "error"
-        
-async def close_redis() -> None:
-    global _redis_client
-
-    if _redis_client is not None:
-        try:
-            await _redis_client.close()
-        finally:
-            _redis_client = None
