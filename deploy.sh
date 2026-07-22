@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 IFS=$'
-	'
+'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -22,6 +22,7 @@ SNAPSHOT_DIR="/root/.projectx-snapshots"
 ROLLBACK_LOG="/var/log/projectx-rollback.log"
 
 PG_PASS_FILE=""
+REDIS_PASSWORD=""
 
 log()     { echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] [INFO]${NC} $1" | tee -a "$LOG_FILE"; }
 success() { echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] [✓]${NC} $1" | tee -a "$LOG_FILE"; }
@@ -59,6 +60,19 @@ write_env_var() {
     value="${value//\`/\\\`}"
 
     echo "${key}='${value}'" >> "$PROJECT_DIR/.env"
+}
+
+update_redis_env_if_exists() {
+    if [[ -f "$PROJECT_DIR/.env" ]]; then
+        sed -i '/^REDIS_PASSWORD=/d' "$PROJECT_DIR/.env"
+        sed -i '/^REDIS_URL=/d' "$PROJECT_DIR/.env"
+
+        echo "REDIS_PASSWORD='${REDIS_PASSWORD}'" >> "$PROJECT_DIR/.env"
+        echo "REDIS_URL='redis://:${REDIS_PASSWORD}@localhost:6379/0'" >> "$PROJECT_DIR/.env"
+
+        chown projectx:projectx "$PROJECT_DIR/.env" 2>/dev/null || true
+        chmod 600 "$PROJECT_DIR/.env"
+    fi
 }
 
 rollback() {
@@ -118,7 +132,6 @@ preflight_checks() {
 
     local avail_kb
     avail_kb=$(df / | awk 'NR==2 {print $4}')
-
     local avail_gb=$((avail_kb / 1024 / 1024))
 
     if [ "$avail_gb" -lt 2 ]; then
@@ -184,7 +197,6 @@ setup_postgresql() {
     fi
 
     local wait_count=0
-
     while ! ss -tlnp | grep -qE ":${PG_PORT}\s"; do
         sleep 1
         wait_count=$((wait_count + 1))
@@ -207,8 +219,8 @@ setup_postgresql() {
 
         [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
 
-        printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
-
+        printf '%s
+' "$DB_PASSWORD" > "$PG_PASS_FILE"
         return
     fi
 
@@ -242,7 +254,8 @@ EOF
 
     success "Пользователь projectx и база projectx_bot созданы"
 
-    printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
+    printf '%s
+' "$DB_PASSWORD" > "$PG_PASS_FILE"
 }
 
 setup_redis() {
@@ -251,6 +264,18 @@ setup_redis() {
     if ! systemctl is-active --quiet redis-server; then
         systemctl start redis-server || true
         systemctl enable redis-server || true
+    fi
+
+    #
+    # Если в существующем .env уже есть REDIS_PASSWORD, переиспользуем его.
+    # Иначе генерируем новый пароль.
+    #
+    if [[ -f "$PROJECT_DIR/.env" ]]; then
+        REDIS_PASSWORD=$(grep '^REDIS_PASSWORD=' "$PROJECT_DIR/.env" 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    fi
+
+    if [[ -z "$REDIS_PASSWORD" ]]; then
+        REDIS_PASSWORD=$(openssl rand -hex 32)
     fi
 
     local redis_conf="/etc/redis/redis.conf"
@@ -263,6 +288,7 @@ setup_redis() {
         sed -i '/^maxmemory-policy /d' "$redis_conf"
         sed -i '/^save /d' "$redis_conf"
         sed -i '/^appendonly /d' "$redis_conf"
+        sed -i '/^requirepass /d' "$redis_conf"
 
         echo "" >> "$redis_conf"
         echo "# === ProjectX Bot Config ===" >> "$redis_conf"
@@ -271,6 +297,7 @@ setup_redis() {
         echo "maxmemory-policy allkeys-lru" >> "$redis_conf"
         echo 'save ""' >> "$redis_conf"
         echo "appendonly no" >> "$redis_conf"
+        echo "requirepass $REDIS_PASSWORD" >> "$redis_conf"
 
         chown redis:redis "$redis_conf"
         chmod 640 "$redis_conf"
@@ -280,14 +307,19 @@ setup_redis() {
         fi
     fi
 
+    #
+    # Если .env уже существует, сразу обновляем в нём Redis-пароль,
+    # даже если позже пользователь откажется перезаписывать .env целиком.
+    #
+    update_redis_env_if_exists
+
     local redis_check=0
 
     for i in $(seq 1 10); do
-        if redis-cli ping 2>/dev/null | grep -q "PONG"; then
+        if redis-cli -a "$REDIS_PASSWORD" ping 2>/dev/null | grep -q "PONG"; then
             redis_check=1
             break
         fi
-
         sleep 1
     done
 
@@ -295,7 +327,7 @@ setup_redis() {
         error "Redis не отвечает после настройки."
     fi
 
-    success "Redis настроен и запущен"
+    success "Redis настроен, запущен и защищён паролем"
 }
 
 verify_infrastructure() {
@@ -314,11 +346,11 @@ verify_infrastructure() {
 
     success "PostgreSQL слушает порт $PG_PORT"
 
-    if ! redis-cli ping 2>/dev/null | grep -q "PONG"; then
+    if ! redis-cli -a "$REDIS_PASSWORD" ping 2>/dev/null | grep -q "PONG"; then
         error "Redis не отвечает на ping."
     fi
 
-    success "Redis полностью функционален"
+    success "Redis полностью функционаен"
 }
 
 setup_firewall() {
@@ -341,7 +373,6 @@ setup_firewall() {
     fi
 
     mkdir -p "$SNAPSHOT_DIR"
-
     ufw status numbered > "$SNAPSHOT_DIR/ufw-before-$(date +%s).txt" 2>&1 || true
 
     if ! confirm "Применить правила UFW (SSH:$SSH_PORT, HTTP:80, HTTPS:443)?"; then
@@ -412,7 +443,6 @@ setup_env() {
     echo -e "${BLUE}[1/4]${NC} Telegram Bot Token"
     read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN
     echo ""
-
     [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
 
     echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
@@ -431,11 +461,9 @@ setup_env() {
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET
         echo ""
-
         [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET обязателен"
 
         read -p "Введите домен для callback: " PLATEGA_CALLBACK_DOMAIN
-
         [ -z "$PLATEGA_CALLBACK_DOMAIN" ] && error "Домен обязателен"
     fi
 
@@ -471,18 +499,24 @@ setup_env() {
         PG_PORT=5432
     fi
 
+    if [[ -z "${REDIS_PASSWORD:-}" ]]; then
+        REDIS_PASSWORD=$(openssl rand -hex 32)
+    fi
+
     : > "$PROJECT_DIR/.env"
 
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
     write_env_var "ADMIN_IDS" "$ADMIN_IDS"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
     write_env_var "DB_ENCRYPTION_KEY" "$DB_KEY"
-    local DB_PASSWORD_ENC
 
+    local DB_PASSWORD_ENC
     DB_PASSWORD_ENC=$(printf '%s' "$DB_PASSWORD" | python3 -c 'import sys, urllib.parse; print(urllib.parse.quote_plus(sys.stdin.read()))')
 
     write_env_var "DATABASE_URL" "postgresql+asyncpg://projectx:${DB_PASSWORD_ENC}@localhost:${PG_PORT}/projectx_bot"
-    write_env_var "REDIS_URL" "redis://localhost:6379/0"
+
+    write_env_var "REDIS_PASSWORD" "$REDIS_PASSWORD"
+    write_env_var "REDIS_URL" "redis://:${REDIS_PASSWORD}@localhost:6379/0"
     write_env_var "REDIS_KEY_PREFIX" "projectx_bot:"
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
@@ -549,7 +583,6 @@ init_database() {
     if ! runuser -u projectx -- "$VENV_DIR/bin/python" -c "
 import asyncio
 from database.connection import init_db
-
 asyncio.run(init_db())
 "; then
         warn "Ошибка инициализации БД"
@@ -630,8 +663,10 @@ server {
         proxy_pass http://127.0.0.1:${WEBHOOK_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+
         proxy_connect_timeout 10s;
         proxy_read_timeout 30s;
+
         client_max_body_size 1m;
     }
 
@@ -651,8 +686,10 @@ NGINXEOF
     read -p "Email для SSL (certbot): " LE_EMAIL
 
     if ! timeout 120 certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" --redirect >/dev/null 2>&1; then
-        warn "SSL не получен"
+        error "SSL не получен. Платёжный webhook нельзя считать готовым."
     fi
+
+    success "SSL получен и Nginx переведён на HTTPS"
 }
 
 setup_backup() {
@@ -679,15 +716,75 @@ fi
 
 cp /opt/projectx-bot/.env "$DIR/env_$DATE.bak"
 gzip "$DIR/env_$DATE.bak"
+chmod 600 "$DIR/env_$DATE.bak.gz" 2>/dev/null || true
 
 find "$DIR" -type f -mtime +30 -delete
 EOF
 
     chmod +x /usr/local/bin/projectx-backup.sh
 
+    cat > /usr/local/bin/projectx-restore.sh << 'EOF'
+#!/bin/bash
+set -euo pipefail
+
+DIR="/root/backups/projectx"
+SERVICE_NAME="projectx-bot"
+PROJECT_DIR="/opt/projectx-bot"
+
+if [[ $# -lt 1 ]]; then
+    echo "Использование: projectx-restore.sh <YYYYMMDD_HHMMSS>"
+    echo ""
+    echo "Доступные бэкапы:"
+    ls -1 "$DIR"/db_*.sql.gz 2>/dev/null | sed -E 's#.*/db_([0-9_]+)\.sql\.gz#\1#' | sort -r || true
+    exit 1
+fi
+
+STAMP="$1"
+
+DB_FILE=$(ls -1 "$DIR"/db_${STAMP}*.sql.gz 2>/dev/null | head -n1 || true)
+ENV_FILE=$(ls -1 "$DIR"/env_${STAMP}*.bak.gz 2>/dev/null | head -n1 || true)
+
+if [[ -z "$DB_FILE" ]]; then
+    echo "❌ Не найден бэкап БД для: $STAMP"
+    exit 1
+fi
+
+echo "Будет восстановлено:"
+echo "  DB:  $DB_FILE"
+echo "  ENV: ${ENV_FILE:-не найден}"
+echo ""
+read -p "Продолжить восстановление? (yes/no): " CONFIRM
+
+if [[ "$CONFIRM" != "yes" ]]; then
+    echo "Отменено"
+    exit 0
+fi
+
+systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+
+echo "Terminating PostgreSQL connections..."
+sudo -u postgres psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='projectx_bot' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
+
+echo "Restoring database..."
+zcat "$DB_FILE" | sudo -u postgres pg_restore --clean --if-exists --dbname=projectx_bot
+
+if [[ -n "$ENV_FILE" ]]; then
+    echo "Restoring .env..."
+    zcat "$ENV_FILE" > "$PROJECT_DIR/.env"
+    chown projectx:projectx "$PROJECT_DIR/.env"
+    chmod 600 "$PROJECT_DIR/.env"
+fi
+
+systemctl start "$SERVICE_NAME"
+
+echo "✅ Restore completed"
+EOF
+
+    chmod +x /usr/local/bin/projectx-restore.sh
+
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "0 3 * * * /usr/local/bin/projectx-backup.sh") | crontab -
 
-    success "Автобэкапы настроены"
+    success "Автобэкапы и restore-скрипт настроены"
 }
 
 setup_monitoring() {
@@ -709,7 +806,6 @@ if [ "$(systemctl is-enabled projectx-bot 2>/dev/null)" = "enabled" ] && ! syste
 
     systemctl start projectx-bot
     echo $((COUNT + 1)) > "$CRASH_FILE"
-
     exit 0
 fi
 
@@ -736,6 +832,19 @@ if systemctl is-active --quiet projectx-bot; then
         else
             rm -f "$CRASH_FILE"
         fi
+    else
+        #
+        # Если heartbeat-файл отсутствует или содержит некорректное значение,
+        # считаем heartbeat stale и перезапускаем сервис.
+        #
+        COUNT=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
+
+        if [ "$COUNT" -ge 5 ]; then
+            exit 0
+        fi
+
+        systemctl restart projectx-bot
+        echo $((COUNT + 1)) > "$CRASH_FILE"
     fi
 fi
 EOF
@@ -772,11 +881,10 @@ start_bot() {
 }
 
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v7.0 (Alembic + Hardened)${NC}
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v8.0 (Redis Auth + Restore + Hardened Healthcheck)${NC}
 "
 
     mkdir -p /var/log "$SNAPSHOT_DIR"
-
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 
     preflight_checks      || rollback "preflight_checks" "Pre-flight failed"
@@ -819,12 +927,15 @@ case "${1:-}" in
     --backup)
         /usr/local/bin/projectx-backup.sh
         ;;
+    --restore)
+        /usr/local/bin/projectx-restore.sh "${2:-}"
+        ;;
     --migrate)
         cd "$PROJECT_DIR"
         runuser -u projectx -- "$VENV_DIR/bin/alembic" upgrade head
         ;;
     --help|-h)
-        echo "Использование: ./deploy.sh [--status|--logs|--restart|--stop|--start|--backup|--migrate]"
+        echo "Использование: ./deploy.sh [--status|--logs|--restart|--stop|--start|--backup|--restore <stamp>|--migrate]"
         ;;
     *)
         main

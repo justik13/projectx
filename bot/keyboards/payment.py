@@ -11,7 +11,6 @@ def get_tariff_showcase_keyboard(
 
     for limit in sorted(grouped_tariffs.keys()):
         group_name = get_tariff_group_name(limit)
-
         builder.button(
             text=group_name,
             callback_data=f"select_tariff_type:{limit}",
@@ -23,7 +22,6 @@ def get_tariff_showcase_keyboard(
     )
 
     builder.adjust(1)
-
     return builder.as_markup()
 
 
@@ -64,7 +62,6 @@ def get_tariff_duration_keyboard(
         )
 
     builder.adjust(1)
-
     return builder.as_markup()
 
 
@@ -95,7 +92,6 @@ def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     )
 
     builder.adjust(1)
-
     return builder.as_markup()
 
 
@@ -139,14 +135,24 @@ def get_change_tariff_keyboard(
     )
 
     builder.adjust(1)
-
     return builder.as_markup()
 
 
 def get_payment_method_keyboard(
     tariff_id: int,
     device_limit: int | None = None,
+    sbp_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
+    """
+    Клавиатура способов оплаты.
+
+    Если Platega не настроена:
+    - sbp_enabled=False;
+    - кнопка SBP не показывается.
+
+    Если Platega настроена:
+    - показываются Stars и SBP.
+    """
     builder = InlineKeyboardBuilder()
 
     builder.button(
@@ -154,10 +160,11 @@ def get_payment_method_keyboard(
         callback_data=f"pay_stars:{tariff_id}",
     )
 
-    builder.button(
-        text="🏦 СБП / Карта",
-        callback_data=f"pay_sbp:{tariff_id}",
-    )
+    if sbp_enabled:
+        builder.button(
+            text="🏦 СБП / Карта",
+            callback_data=f"pay_sbp:{tariff_id}",
+        )
 
     if device_limit is not None:
         builder.button(
@@ -171,7 +178,6 @@ def get_payment_method_keyboard(
         )
 
     builder.adjust(1)
-
     return builder.as_markup()
 
 
@@ -182,19 +188,16 @@ def get_payment_success_keyboard() -> InlineKeyboardMarkup:
         text="🔌 Подключить устройство",
         callback_data="menu_connections",
     )
-
     builder.button(
         text="⏳ К подписке",
         callback_data="menu_subscription",
     )
-
     builder.button(
         text="🏠 В главное меню",
         callback_data="back_to_main_menu",
     )
 
     builder.adjust(1, 1, 1)
-
     return builder.as_markup()
 
 
@@ -209,17 +212,14 @@ def get_sbp_payment_keyboard(
         text="💳 Открыть страницу оплаты",
         url=payment_url,
     )
-
     builder.button(
         text="✅ Я оплатил (проверить)",
         callback_data=f"check_payment:{payment_id}",
     )
-
     builder.button(
         text="❌ Отменить",
         callback_data=f"cancel_invoice:{payment_id}:{tariff_id}",
     )
 
     builder.adjust(1, 1, 1)
-
     return builder.as_markup()

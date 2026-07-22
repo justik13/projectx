@@ -51,7 +51,6 @@ async def _build_tariffs_list_text_and_kb(
     else:
         for tariff in tariffs:
             status = "🟢" if tariff.is_active else "🔴"
-
             device_limit = getattr(tariff, "device_limit", 2)
 
             builder.button(
@@ -63,25 +62,24 @@ async def _build_tariffs_list_text_and_kb(
                 callback_data=f"admin_tariff_card:{tariff.id}",
             )
 
-        if page > 1:
-            builder.button(
-                text="⬅️",
-                callback_data=f"admin_tariffs_page:{page - 1}",
-            )
-
-        if page < total_pages:
-            builder.button(
-                text="➡️",
-                callback_data=f"admin_tariffs_page:{page + 1}",
-            )
-
+    if page > 1:
         builder.button(
-            text="← В админку",
-            callback_data="admin_menu",
+            text="⬅️",
+            callback_data=f"admin_tariffs_page:{page - 1}",
         )
 
-        builder.adjust(1)
+    if page < total_pages:
+        builder.button(
+            text="➡️",
+            callback_data=f"admin_tariffs_page:{page + 1}",
+        )
 
+    builder.button(
+        text="← В админку",
+        callback_data="admin_menu",
+    )
+
+    builder.adjust(1)
     return rendered, builder
 
 
@@ -91,7 +89,6 @@ async def _show_tariffs_list(
     page: int = 1,
 ):
     total_tariffs = await get_tariff_count(session)
-
     total_pages = max(
         1,
         math.ceil(total_tariffs / TARIFFS_PER_PAGE),
@@ -127,9 +124,7 @@ async def _get_payments_count_for_tariff(
     stmt = select(func.count(Payment.id)).where(
         Payment.tariff_id == tariff_id,
     )
-
     result = await session.execute(stmt)
-
     return result.scalar_one() or 0
 
 
@@ -147,9 +142,7 @@ async def show_tariffs_list(
         return
 
     await state.clear()
-
     await _show_tariffs_list(callback, session, page=1)
-
     await callback.answer()
 
 
@@ -169,9 +162,7 @@ async def tariffs_pagination(
     await state.clear()
 
     page = int(callback.data.split(":")[1])
-
     await _show_tariffs_list(callback, session, page=page)
-
     await callback.answer()
 
 
@@ -225,7 +216,6 @@ async def show_tariff_card(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -236,7 +226,6 @@ async def show_tariff_card(
         return
 
     await _show_tariff_card(callback, tariff)
-
     await callback.answer()
 
 
@@ -256,7 +245,6 @@ async def toggle_tariff_confirm(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -267,25 +255,24 @@ async def toggle_tariff_confirm(
         return
 
     new_status = not tariff.is_active
-
     device_limit = getattr(tariff, "device_limit", 2)
 
     if new_status:
         text = (
             "⚠️ <b>Подтверждение включения тарифа</b>\n"
             f"Тариф: <b>{tariff.duration_days} дн. / "
-            f"{device_limit} устр.</b>\n\n"
+            f"{device_limit} устр.</b>\n"
             "Тариф снова будет доступен пользователям\n"
-            "при покупке доступа.\n\n"
+            "при покупке доступа.\n"
             "<i>Уже купленные подписки продолжат работать.</i>"
         )
     else:
         text = (
             "⚠️ <b>Подтверждение отключения тарифа</b>\n"
             f"Тариф: <b>{tariff.duration_days} дн. / "
-            f"{device_limit} устр.</b>\n\n"
+            f"{device_limit} устр.</b>\n"
             "Тариф будет скрыт из списка доступных\n"
-            "при покупке доступа.\n\n"
+            "при покупке доступа.\n"
             "<i>Уже купленные подписки продолжат работать.</i>"
         )
 
@@ -320,7 +307,6 @@ async def toggle_tariff_apply(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -353,7 +339,6 @@ async def toggle_tariff_apply(
     )
 
     refreshed = await get_tariff_by_id(session, tariff_id)
-
     await _show_tariff_card(callback, refreshed)
 
 
@@ -373,7 +358,6 @@ async def delete_tariff_handler(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -398,7 +382,6 @@ async def delete_tariff_handler(
             logger.debug(f"delete_tariff_handler edit_text failed: {e}")
 
         await callback.answer()
-
         return
 
     payments_count = await _get_payments_count_for_tariff(
@@ -408,9 +391,9 @@ async def delete_tariff_handler(
 
     if payments_count > 0:
         text = (
-            "⚠️ <b>Удаление тарифа заблокировано</b>\n\n"
+            "⚠️ <b>Удаление тарифа заблокировано</b>\n"
             f"По этому тарифу есть история платежей: "
-            f"<b>{payments_count}</b>.\n\n"
+            f"<b>{payments_count}</b>.\n"
             "Удаление невозможно, чтобы сохранить платёжную историю."
         )
 
@@ -428,7 +411,6 @@ async def delete_tariff_handler(
             )
 
         await callback.answer()
-
         return
 
     device_limit = getattr(tariff, "device_limit", 2)
@@ -438,7 +420,7 @@ async def delete_tariff_handler(
         f"Тариф: <b>{tariff.duration_days} дн. / "
         f"{device_limit} устр.</b>\n"
         f"Цена: <b>{tariff.price_rub}₽ / "
-        f"{tariff.price_stars}⭐</b>\n\n"
+        f"{tariff.price_stars}⭐</b>\n"
         "Тариф будет удалён безвозвратно."
     )
 
@@ -473,7 +455,6 @@ async def delete_tariff_apply(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -498,7 +479,6 @@ async def delete_tariff_apply(
             logger.debug(f"delete_tariff_apply in_use edit_text failed: {e}")
 
         await callback.answer()
-
         return
 
     payments_count = await _get_payments_count_for_tariff(
@@ -508,9 +488,9 @@ async def delete_tariff_apply(
 
     if payments_count > 0:
         text = (
-            "⚠️ <b>Удаление тарифа заблокировано</b>\n\n"
+            "⚠️ <b>Удаление тарифа заблокировано</b>\n"
             f"По этому тарифу есть история платежей: "
-            f"<b>{payments_count}</b>.\n\n"
+            f"<b>{payments_count}</b>.\n"
             "Удаление невозможно, чтобы сохранить платёжную историю."
         )
 
@@ -528,7 +508,6 @@ async def delete_tariff_apply(
             )
 
         await callback.answer()
-
         return
 
     device_limit = getattr(tariff, "device_limit", 2)
@@ -539,7 +518,7 @@ async def delete_tariff_apply(
         await session.rollback()
 
         text = (
-            "⚠️ <b>Удаление тарифа заблокировано</b>\n\n"
+            "⚠️ <b>Удаление тарифа заблокировано</b>\n"
             "Не удалось удалить тариф из-за связанных данных.\n"
             "Возможно, по нему есть история платежей или активные подписки."
         )
@@ -558,7 +537,6 @@ async def delete_tariff_apply(
             )
 
         await callback.answer()
-
         return
 
     await AuditService.log_action(
@@ -596,7 +574,6 @@ async def _start_edit_tariff(
     tariff_id = int(callback.data.split(":")[1])
 
     await state.update_data(tariff_id=tariff_id)
-
     await state.set_state(field_state)
 
     try:
@@ -636,7 +613,6 @@ async def _apply_tariff_int_edit(
 
     if message.text.startswith("/"):
         await state.clear()
-
         await render_hub(
             message.bot,
             message.chat.id,
@@ -661,7 +637,6 @@ async def _apply_tariff_int_edit(
         return
 
     data = await state.get_data()
-
     tariff_id = data["tariff_id"]
 
     tariff = await get_tariff_by_id(session, tariff_id)
@@ -673,9 +648,7 @@ async def _apply_tariff_int_edit(
             texts.ERROR_TARIFF_NOT_FOUND,
             get_back_button("admin_tariffs"),
         )
-
         await state.clear()
-
         return
 
     old_value = getattr(tariff, field_name)
@@ -796,7 +769,7 @@ async def process_edit_tariff_rub(
         state,
         session,
         field_name="price_rub",
-        validator=lambda x: x >= 0,
+        validator=lambda x: x > 0,
         validator_error=texts.ERROR_POSITIVE_NUMBER,
         success_message=lambda v: f"✅ Цена в рублях изменена на {v} ₽",
         audit_detail_fn=lambda old, new: f"RUB: {old} -> {new}",

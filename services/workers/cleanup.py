@@ -46,10 +46,8 @@ async def cleanup_dangling_peers_loop(shutdown_event: asyncio.Event):
             shutdown_event.wait(),
             timeout=CLEANUP_START_DELAY,
         )
-
         logger.info("Cleanup worker stopped during start delay (shutdown)")
         return
-
     except asyncio.TimeoutError:
         pass
 
@@ -60,7 +58,6 @@ async def cleanup_dangling_peers_loop(shutdown_event: asyncio.Event):
             await _process_pending_deletions()
 
             now = time.monotonic()
-
             if now - _last_old_cleanup > OLD_RECORDS_INTERVAL:
                 await _cleanup_old_records()
                 _last_old_cleanup = now
@@ -68,7 +65,6 @@ async def cleanup_dangling_peers_loop(shutdown_event: asyncio.Event):
         except asyncio.CancelledError:
             logger.info("Cleanup worker cancelled")
             break
-
         except Exception as e:
             logger.error(
                 "Критическая ошибка в цикле очистки: %s",
@@ -85,7 +81,6 @@ async def cleanup_dangling_peers_loop(shutdown_event: asyncio.Event):
                 timeout=CLEANUP_LOOP_INTERVAL,
             )
             break
-
         except asyncio.TimeoutError:
             continue
 
@@ -118,7 +113,6 @@ async def _cleanup_expired_profiles_grace():
             .order_by(User.subscription_end.asc())
             .limit(50)
         )
-
         result = await session.execute(stmt)
         user_ids = [row[0] for row in result.all()]
 
@@ -136,7 +130,6 @@ async def _cleanup_expired_profiles_grace():
                     .where(User.id == user_id)
                     .with_for_update()
                 )
-
                 user_result = await session.execute(user_stmt)
                 user = user_result.scalar_one_or_none()
 
@@ -161,7 +154,6 @@ async def _cleanup_expired_profiles_grace():
                 profiles_stmt = select(VPNProfile).where(
                     VPNProfile.user_id == user.id,
                 )
-
                 profiles_result = await session.execute(profiles_stmt)
                 profiles = list(profiles_result.scalars().all())
 
@@ -200,6 +192,54 @@ async def _cleanup_expired_profiles_grace():
             "Grace cleanup completed: %s users, %s profiles removed",
             deleted_users_count,
             deleted_profiles_count,
+        )
+
+
+async def _queue_zombie_deletion(
+    server_info: dict,
+    peer_id: str,
+    client_name: str | None,
+    error_text: str,
+) -> None:
+    """
+    Ставит зомби-пира в очередь pending_api_deletions,
+    если API недоступен или удаление не удалось.
+
+    Дальше pending_api_deletions обрабатывается общим механизмом:
+    - повторные попытки;
+    - лимит 10 попыток;
+    - алерт админам после исчерпания попыток.
+    """
+    try:
+        async with session_scope() as session:
+            pending = PendingAPIDeletion(
+                server_name=server_info["name"],
+                api_url=server_info["api_url"],
+                api_key=server_info["api_key"],
+                peer_id=peer_id,
+                client_name=client_name or f"zombie_{peer_id[:16]}",
+                reason="zombie_peer_cleanup_failed",
+                attempts=1,
+                last_attempt_at=now_utc(),
+                last_error=error_text,
+            )
+            session.add(pending)
+            await session.flush()
+
+            logger.warning(
+                "Queued zombie peer for pending deletion: "
+                "server=%s, peer=%s..., reason=zombie_peer_cleanup_failed",
+                server_info["name"],
+                peer_id[:16],
+            )
+
+    except Exception as e:
+        logger.error(
+            "Failed to queue zombie peer deletion: server=%s, peer=%s..., error=%s",
+            server_info["name"],
+            peer_id[:16],
+            e,
+            exc_info=True,
         )
 
 
@@ -279,7 +319,6 @@ async def _cleanup_dangling_peers():
                             VPNProfile.peer_id == client_id
                         )
                     )
-
                     peer_exists_in_db = fresh_result.first() is not None
 
             except Exception as e:
@@ -293,26 +332,69 @@ async def _cleanup_dangling_peers():
             if peer_exists_in_db:
                 continue
 
+            # Если по этому пиру уже есть pending-запись,
+            # не создаём дубликат. Его обработает _process_pending_deletions.
+            try:
+                async with session_scope() as session:
+                    existing_pending = await session.scalar(
+                        select(PendingAPIDeletion.id)
+                        .where(PendingAPIDeletion.peer_id == client_id)
+                        .limit(1)
+                    )
+
+                    if existing_pending:
+                        continue
+
+            except Exception as e:
+                logger.error(
+                    "Failed to check existing pending deletion "
+                    "for zombie peer %s...: %s",
+                    client_id[:16],
+                    e,
+                )
+                continue
+
             logger.warning(
                 "Удаляю 'призрака' %s на %s",
                 client_name,
                 server_info["name"],
             )
 
+            deleted = False
+            error_text = None
+
             try:
                 client = AmneziaClient(
                     server_info["api_url"],
                     server_info["api_key"],
                 )
-
-                await client.delete_user(client_id=client_id)
+                deleted = await client.delete_user(client_id=client_id)
 
             except Exception as e:
-                logger.error(
-                    "Ошибка удаления призрака %s... на %s: %s",
-                    client_id[:16],
+                error_text = f"{type(e).__name__}: {str(e)[:200]}"
+
+            if deleted:
+                logger.info(
+                    "Зомби-пир удалён: server=%s, peer=%s...",
                     server_info["name"],
-                    e,
+                    client_id[:16],
+                )
+            else:
+                logger.warning(
+                    "Не удалось удалить зомби-пира: server=%s, peer=%s..., "
+                    "ставлю в pending queue",
+                    server_info["name"],
+                    client_id[:16],
+                )
+
+                await _queue_zombie_deletion(
+                    server_info=server_info,
+                    peer_id=client_id,
+                    client_name=client_name,
+                    error_text=(
+                        error_text
+                        or "API delete_user returned False"
+                    ),
                 )
 
 
@@ -422,6 +504,7 @@ async def _process_pending_deletions():
                         PendingAPIDeletion.id == deletion_id
                     )
                 )
+
                 success_count += 1
 
                 logger.info(
@@ -432,6 +515,7 @@ async def _process_pending_deletions():
                     attempts + 1,
                     reason,
                 )
+
             else:
                 await session.execute(
                     update(PendingAPIDeletion)
@@ -445,6 +529,7 @@ async def _process_pending_deletions():
                         ),
                     )
                 )
+
                 fail_count += 1
 
     if expired_ids:
@@ -470,6 +555,7 @@ async def _process_pending_deletions():
             from config.settings import get_settings
 
             bot = get_bot_ref()
+
             if bot:
                 settings = get_settings()
 
@@ -513,7 +599,6 @@ async def _cleanup_old_records():
             )
             .where(BroadcastProgress.updated_at < threshold_broadcasts)
         )
-
         result_broadcasts = await session.execute(stmt_broadcasts)
         broadcasts_deleted = result_broadcasts.rowcount
 

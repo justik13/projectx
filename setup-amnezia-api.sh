@@ -16,10 +16,12 @@
 #   - API доступен по https://ваш-домен.com
 #   - API-ключ передаётся по HTTPS (зашифрованно)
 #   - Amnezia API остаётся на 127.0.0.1:4001 (безопасно)
+#   - /docs и /metrics не светятся публично
 # ═══════════════════════════════════════════════════════════════
 
 set -euo pipefail
-IFS=$'\n\t'
+IFS=$'
+\t'
 
 # ─────────────────────────────────────────────────────────────
 # Цвета и логирование
@@ -35,6 +37,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/amnezia-api-public-setup.log"
 NGINX_CONF="/etc/nginx/sites-available/amnezia-api"
 NGINX_LINK="/etc/nginx/sites-enabled/amnezia-api"
+
 AMNEZIA_PORT=4001
 AMNEZIA_HOST="127.0.0.1"
 
@@ -47,7 +50,14 @@ success() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; }
 error()   { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
 info()    { echo -e "${CYAN}[i]${NC} $1" | tee -a "$LOG_FILE"; }
-header()  { echo -e "\n${BOLD}${BLUE}══════════════════════════════════════════════════════════${NC}"; echo -e "${BOLD}${BLUE}  $1${NC}"; echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════════════${NC}\n"; }
+
+header()  {
+    echo -e "
+${BOLD}${BLUE}══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${BLUE}  $1${NC}"
+    echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════════════${NC}
+"
+}
 
 # ─────────────────────────────────────────────────────────────
 # Парсинг аргументов
@@ -95,7 +105,9 @@ preflight_checks() {
     if [[ ! -f /etc/os-release ]]; then
         error "Не удалось определить операционную систему"
     fi
+
     source /etc/os-release
+
     if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
         error "Поддерживаются только Ubuntu и Debian. Обнаружено: $ID"
     fi
@@ -160,27 +172,36 @@ collect_domain_and_email() {
         echo -e "${CYAN}Домен должен иметь A-запись на IP сервера (настраивается у регистратора).${NC}"
         echo ""
         echo -e "Примеры: ${BOLD}api.example.com${NC}, ${BOLD}vpn.mydomain.ru${NC}"
+
         if [[ -n "$PUBLIC_IP" ]]; then
-            echo -e "\nСоздайте A-запись: ${BOLD}ваш-домен → ${PUBLIC_IP}${NC}"
+            echo -e "
+Создайте A-запись: ${BOLD}ваш-домен → ${PUBLIC_IP}${NC}"
         fi
+
         echo ""
+
         while true; do
             read -p "Домен (например api.example.com): " -r DOMAIN
+
             if [[ -z "$DOMAIN" ]]; then
                 warn "Домен не может быть пустым"
                 continue
             fi
+
             if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
                 warn "Некорректный формат домена"
                 continue
             fi
+
             break
         done
     fi
 
     # Проверка DNS
     info "Проверяю DNS для ${BOLD}${DOMAIN}${NC}..."
+
     local RESOLVED_IP=""
+
     if command -v dig &>/dev/null; then
         RESOLVED_IP=$(dig +short "$DOMAIN" A 2>/dev/null | head -n1)
     elif command -v host &>/dev/null; then
@@ -215,16 +236,20 @@ collect_domain_and_email() {
     if [[ -z "$EMAIL" ]]; then
         echo ""
         echo -e "${CYAN}Email для уведомлений Let's Encrypt о продлении сертификата.${NC}"
+
         while true; do
             read -p "Email: " -r EMAIL
+
             if [[ -z "$EMAIL" ]]; then
                 warn "Email не может быть пустым"
                 continue
             fi
+
             if [[ ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
                 warn "Некорректный формат email"
                 continue
             fi
+
             break
         done
     fi
@@ -257,11 +282,16 @@ install_dependencies() {
     fi
 
     log "Устанавливаю: ${to_install[*]}"
+
     local install_log=$(mktemp)
+
     if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${to_install[@]}" > "$install_log" 2>&1; then
-        error "Ошибка установки. Лог: $install_log\n$(tail -20 "$install_log")"
+        error "Ошибка установки. Лог: $install_log
+$(tail -20 "$install_log")"
     fi
+
     rm -f "$install_log"
+
     success "Зависимости установлены"
 }
 
@@ -281,8 +311,9 @@ setup_firewall() {
 
     header "🔥 Настройка UFW"
 
-    ufw allow 80/tcp comment 'HTTP (Let\'s Encrypt challenge)' >/dev/null 2>&1 || true
+    ufw allow 80/tcp comment 'HTTP (Let'\''s Encrypt challenge)' >/dev/null 2>&1 || true
     ufw allow 443/tcp comment 'HTTPS (Amnezia API)' >/dev/null 2>&1 || true
+
     success "UFW: порты 80 и 443 открыты"
 }
 
@@ -336,6 +367,7 @@ NGINX_EOF
     fi
 
     systemctl reload nginx || error "Не удалось перезапустить Nginx"
+
     success "Nginx: HTTP конфиг активен для ${DOMAIN}"
 }
 
@@ -349,6 +381,7 @@ obtain_ssl_certificate() {
     info "Certbot проверит что домен ${DOMAIN} указывает на этот сервер"
 
     local certbot_log=$(mktemp)
+
     if ! certbot certonly \
         --webroot \
         -w /var/www/certbot \
@@ -359,6 +392,7 @@ obtain_ssl_certificate() {
         --no-eff-email \
         --keep-until-expiring \
         > "$certbot_log" 2>&1; then
+
         echo -e "${RED}══════════════════════════════════════════════════════════${NC}"
         echo -e "${RED}  Certbot не смог получить сертификат${NC}"
         echo -e "${RED}══════════════════════════════════════════════════════════${NC}"
@@ -375,7 +409,9 @@ obtain_ssl_certificate() {
         echo -e "${YELLOW}Лог: ${certbot_log}${NC}"
         exit 1
     fi
+
     rm -f "$certbot_log"
+
     success "SSL сертификат получен!"
 }
 
@@ -432,6 +468,7 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
+
     ssl_session_timeout 1d;
     ssl_session_cache shared:SSL:10m;
     ssl_session_tickets off;
@@ -462,6 +499,13 @@ server {
     proxy_read_timeout 120s;
 
     # ═══════════════════════════════════════════════════════════
+    # Запрет публичного доступа к документации и метрикам
+    # ═══════════════════════════════════════════════════════════
+    location ~* ^/(docs|documentation|metrics|static)(/|\$) {
+        return 404;
+    }
+
+    # ═══════════════════════════════════════════════════════════
     # Reverse proxy на локальный Amnezia API
     # ═══════════════════════════════════════════════════════════
     location / {
@@ -488,9 +532,6 @@ server {
         # Отключаем буферизацию для streaming ответов
         proxy_buffering off;
     }
-
-    # Отдаём 404 на неизвестные пути (защита от сканеров)
-    # Amnezia API сам вернёт 404 для несуществующих endpoints
 }
 NGINX_EOF
 
@@ -499,6 +540,7 @@ NGINX_EOF
     fi
 
     systemctl reload nginx || error "Не удалось перезапустить Nginx"
+
     success "Nginx: HTTPS reverse proxy активен"
 }
 
@@ -521,12 +563,15 @@ setup_auto_renewal() {
 
     # Создаём cron вручную
     log "Создаю cron задачу для автопродления..."
+
     cat > /etc/cron.d/certbot-amnezia <<EOF
 # Certbot auto-renewal for Amnezia API
 # Запускается 2 раза в день, продлевает если до истечения < 30 дней
 0 */12 * * * root certbot renew --quiet --deploy-hook "systemctl reload nginx"
 EOF
+
     chmod 644 /etc/cron.d/certbot-amnezia
+
     success "Cron для автопродления настроен (проверка каждые 12 часов)"
 }
 
@@ -550,9 +595,11 @@ final_verification() {
 
     # Healthcheck через HTTPS
     info "Проверяю healthcheck через HTTPS..."
+
     if command -v curl &>/dev/null; then
         local health_status
         health_status=$(curl -s -o /dev/null -w "%{http_code}" "https://${DOMAIN}/healthz" --max-time 10 2>/dev/null || echo "000")
+
         if [[ "$health_status" == "200" ]]; then
             success "HTTPS healthcheck: ${BOLD}200 OK${NC}"
         else
@@ -587,6 +634,7 @@ print_result() {
         "/root/amnezia-api/.env"
         "/opt/amnezia-api/.env"
     )
+
     for env_path in "${ENV_LOCATIONS[@]}"; do
         if [[ -f "$env_path" ]]; then
             API_KEY=$(grep -E "^FASTIFY_API_KEY=" "$env_path" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
@@ -599,6 +647,7 @@ print_result() {
     echo -e "${BOLD}🌐 URL для бота:${NC}"
     echo -e "   ${CYAN}https://${DOMAIN}${NC}"
     echo ""
+
     echo -e "${BOLD}🔑 API-ключ (из .env):${NC}"
     if [[ -n "$API_KEY" ]]; then
         echo -e "   ${CYAN}${API_KEY}${NC}"
@@ -608,8 +657,8 @@ print_result() {
         echo -e "   ${YELLOW}(не удалось найти .env — возьмите ключ вручную)${NC}"
         echo -e "   ${CYAN}cat ~/amnezia-api/.env | grep FASTIFY_API_KEY${NC}"
     fi
-    echo ""
 
+    echo ""
     echo -e "${BOLD}🤖 Как добавить сервер в бота:${NC}"
     echo -e "   1. Откройте админку бота → 🌍 Серверы → ➕ Добавить сервер"
     echo -e "   2. Введите имя (например: ${BOLD}Нидерланды${NC})"
@@ -646,6 +695,7 @@ print_result() {
 # ─────────────────────────────────────────────────────────────
 uninstall() {
     header "🗑 Удаление настройки"
+
     read -p "Удалить Nginx конфиг и сертификаты для этого домена? (y/N): " -r
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         info "Отменено"
@@ -660,6 +710,7 @@ uninstall() {
         certbot delete --cert-name "$DOMAIN" --non-interactive 2>/dev/null || true
         success "Сертификат удалён"
     fi
+
     exit 0
 }
 
@@ -680,6 +731,7 @@ main() {
     echo -e "║   • SSL сертификат Let's Encrypt                             ║"
     echo -e "║   • Rate limiting (защита от брутфорса)                      ║"
     echo -e "║   • Автопродление сертификата                                ║"
+    echo -e "║   • Скрытие /docs и /metrics                                 ║"
     echo -e "║                                                              ║"
     echo -e "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"

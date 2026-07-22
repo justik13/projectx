@@ -3,6 +3,7 @@ import logging
 import re
 import uuid
 from datetime import date
+
 from database.connection import session_scope
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
@@ -28,16 +29,14 @@ from services.audit_service import AuditService
 from services.slots_cache import get_real_peer_count
 from services.subscription import SubscriptionService
 from utils.admin import is_admin
-from utils.datetime_helpers import now_msk, now_utc
-from utils.vpn_parser import is_valid_vpn_uri
+from utils.datetime_helpers import now_msk, now_utc, is_expired
+from utils.vpn_parser import is_valid_vpn_uri, build_conf_file
 
 logger = logging.getLogger(__name__)
 
 CRITICAL_SLOTS_THRESHOLD = 5
 
 _redis_client: aioredis.Redis | None = None
-
-
 _server_locks: dict[int, asyncio.Lock] = {}
 
 
@@ -92,12 +91,12 @@ async def close_redis() -> None:
         finally:
             _redis_client = None
 
+
 async def _get_redis() -> aioredis.Redis:
     global _redis_client
 
     if _redis_client is None:
         settings = get_settings()
-
         _redis_client = aioredis.from_url(
             settings.REDIS_URL,
             decode_responses=True,
@@ -108,6 +107,10 @@ async def _get_redis() -> aioredis.Redis:
 
 
 class DeviceCreationError(Exception):
+    pass
+
+
+class NoActiveSubscription(DeviceCreationError):
     pass
 
 
@@ -133,7 +136,6 @@ _user_locks: dict[int, asyncio.Lock] = {}
 def _get_user_lock(user_id: int) -> asyncio.Lock:
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
-
     return _user_locks[user_id]
 
 
@@ -143,7 +145,6 @@ def _is_same_day_msk(
 ) -> bool:
     if stored_date is None:
         return False
-
     return stored_date == now_msk_date
 
 
@@ -154,14 +155,11 @@ async def _get_server_profiles_count(
     stmt = select(func.count(VPNProfile.id)).where(
         VPNProfile.server_id == server_id,
     )
-
     result = await session.execute(stmt)
-
     return result.scalar_one() or 0
 
 
 class DeviceService:
-
     @staticmethod
     async def create_device(
         session: AsyncSession,
@@ -187,6 +185,21 @@ class DeviceService:
             )
             raise ServerUnavailable("Server is disabled by admin")
 
+        #
+        # Сервисный запрет создания устройства без активной подписки.
+        # Это дополнительная защита даже если handler по какой-то причине
+        # пропустил проверку.
+        #
+        if not await SubscriptionService.check_access(
+            session,
+            user.telegram_id,
+        ):
+            logger.warning(
+                "create_device: user %s has no active subscription",
+                user.telegram_id,
+            )
+            raise NoActiveSubscription("No active subscription")
+
         redis_lock = None
         local_lock = None
         acquired = False
@@ -199,13 +212,20 @@ class DeviceService:
             try:
                 redis = await _get_redis()
                 lock_key = f"lock:create_device:server:{server.id}"
+
+                #
+                # Увеличенный timeout Redis-lock.
+                # Раньше было 30 секунд, что могло быть мало при медленном API
+                # и повторных попытках.
+                #
                 redis_lock = redis.lock(
                     lock_key,
-                    timeout=30,
-                    blocking_timeout=5,
+                    timeout=60,
+                    blocking_timeout=10,
                 )
                 acquired = await redis_lock.acquire()
                 using_redis = True
+
             except Exception as e:
                 logger.warning(
                     "create_device: Redis lock unavailable, "
@@ -229,6 +249,7 @@ class DeviceService:
                 session,
                 server.id,
             )
+
             free_slots = server.max_clients - local_count
 
             if free_slots <= 0:
@@ -289,6 +310,23 @@ class DeviceService:
                 if not user:
                     raise ServerUnavailable("User disappeared")
 
+                #
+                # Повторная проверка подписки уже под блокировкой.
+                # Это защищает от гонки, если подписка истекла прямо
+                # во время создания устройства.
+                #
+                if (
+                    user.is_banned
+                    or not user.subscription_end
+                    or is_expired(user.subscription_end)
+                ):
+                    logger.warning(
+                        "create_device: user %s blocked or subscription "
+                        "is not active after lock",
+                        user.telegram_id,
+                    )
+                    raise NoActiveSubscription("No active subscription")
+
                 if not is_admin(user.telegram_id):
                     now_msk_date = now_msk().date()
 
@@ -335,6 +373,7 @@ class DeviceService:
                         )
 
                 short_hash = uuid.uuid4().hex[:4]
+
                 clean_device_name = re.sub(
                     r"[^a-zA-Z0-9]",
                     "",
@@ -374,6 +413,9 @@ class DeviceService:
                     peer_id = api_result.id
                     raw_config = api_result.config
 
+                    #
+                    # Проверяем, что API вернул валидный vpn:// URI.
+                    #
                     if not is_valid_vpn_uri(raw_config):
                         logger.error(
                             "create_device: API returned invalid "
@@ -403,6 +445,43 @@ class DeviceService:
 
                         raise InvalidConfig(
                             "Invalid configuration URI"
+                        )
+
+                    #
+                    # Проверяем, что из vpn:// реально достаётся готовый .conf.
+                    # Если конфиг битый, откатываем создание пира.
+                    #
+                    conf_content = build_conf_file(raw_config)
+
+                    if not conf_content:
+                        logger.error(
+                            "create_device: API returned vpn:// URI "
+                            "without usable .conf content. Rolling back."
+                        )
+
+                        try:
+                            deleted = await client.delete_user(
+                                client_id=peer_id,
+                            )
+
+                            if not deleted:
+                                await _queue_failed_rollback_deletion(
+                                    server,
+                                    peer_id,
+                                    user.telegram_id,
+                                    "broken_conf_delete_false",
+                                )
+
+                        except Exception as rollback_error:
+                            await _queue_failed_rollback_deletion(
+                                server,
+                                peer_id,
+                                user.telegram_id,
+                                f"broken_conf_delete_error: {rollback_error}",
+                            )
+
+                        raise InvalidConfig(
+                            "Broken configuration content"
                         )
 
                     try:
@@ -478,6 +557,7 @@ class DeviceService:
 
                     except IntegrityError as e:
                         await session.rollback()
+
                         logger.error(
                             "create_device: IntegrityError: %s",
                             e,
@@ -511,11 +591,13 @@ class DeviceService:
                     DeviceLimitExceeded,
                     InvalidConfig,
                     ServerUnavailable,
+                    NoActiveSubscription,
                 ):
                     raise
 
                 except Exception as e:
                     await session.rollback()
+
                     logger.error(
                         "create_device: DB error: %s",
                         e,
@@ -552,6 +634,7 @@ class DeviceService:
                     await redis_lock.release()
                 except Exception:
                     pass
+
             elif local_lock is not None and acquired:
                 try:
                     local_lock.release()
@@ -581,14 +664,12 @@ class DeviceService:
                 return True
             except Exception as e:
                 await session.rollback()
-
                 logger.error(
                     "delete_device: failed to delete profile %s "
                     "from DB: %s",
                     profile.id,
                     e,
                 )
-
                 return False
 
         client = AmneziaClient(
@@ -623,7 +704,6 @@ class DeviceService:
                     last_attempt_at=now_utc(),
                     last_error="API delete_user returned False",
                 )
-
                 session.add(pending)
 
         try:
@@ -648,15 +728,13 @@ class DeviceService:
                         audit_error,
                     )
 
-            return True
+                return True
 
         except Exception as e:
             await session.rollback()
-
             logger.error(
                 "delete_device: DB error: %s",
                 e,
                 exc_info=True,
             )
-
             return False

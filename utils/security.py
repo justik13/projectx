@@ -25,12 +25,18 @@ _LOCAL_HOSTNAMES = {
 def _env_truthy(value: str | None) -> bool:
     if value is None:
         return False
-
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _allow_local_http() -> bool:
-    raw = os.getenv("ALLOW_LOCAL_HTTP", "true")
+    """
+    Production-safe default:
+    локальный HTTP запрещён, пока явно не включён.
+
+    Для локальной разработки можно задать:
+    ALLOW_LOCAL_HTTP=true
+    """
+    raw = os.getenv("ALLOW_LOCAL_HTTP", "false")
     return _env_truthy(raw)
 
 
@@ -44,12 +50,11 @@ def allow_local_networks() -> bool:
     Используется в aiohttp resolver.
 
     Для production рекомендуется:
+    ALLOW_LOCAL_HTTP=false
+    ALLOW_LOCAL_HTTPS=false
 
-        ALLOW_LOCAL_HTTP=false
-        ALLOW_LOCAL_HTTPS=false
-
-    Тогда любые private/loopback/metadata адреса будут запрещены
-    даже при DNS rebinding.
+    Тогда любые private/loopback/metadata адреса будут запрещены,
+    включая DNS rebinding.
     """
     return _allow_local_http() or _allow_local_https()
 
@@ -57,7 +62,6 @@ def allow_local_networks() -> bool:
 def _host_is_localish(hostname: str) -> bool:
     """
     Возвращает True только если хост явно выглядит как локальный:
-
     - localhost;
     - 127.0.0.1;
     - ::1;
@@ -67,7 +71,6 @@ def _host_is_localish(hostname: str) -> bool:
     Metadata/link-local адреса НЕ считаются разрешёнными локальными.
     """
     h = (hostname or "").lower().strip().strip("[]")
-
     if not h:
         return False
 
@@ -141,7 +144,6 @@ class SafeResolver(DefaultResolver):
         allow_for_host = self.allow_local and _host_is_localish(host)
 
         safe_records = []
-
         for record in records:
             try:
                 ip = ipaddress.ip_address(record["host"])
@@ -159,23 +161,23 @@ class SafeResolver(DefaultResolver):
         return safe_records
 
 
-async def _resolved_ips_are_safe(hostname: str, *, allow_local: bool = False) -> bool:
+async def _resolved_ips_are_safe(
+    hostname: str,
+    *,
+    allow_local: bool = False,
+) -> bool:
     effective_allow_local = allow_local and _host_is_localish(hostname)
 
     try:
         loop = asyncio.get_running_loop()
-
         addr_info = await asyncio.wait_for(
             loop.getaddrinfo(hostname, None),
             timeout=5.0,
         )
-
     except asyncio.TimeoutError:
         return False
-
     except socket.gaierror:
         return False
-
     except Exception:
         return False
 
@@ -199,7 +201,6 @@ async def _resolved_ips_are_safe(hostname: str, *, allow_local: bool = False) ->
 async def is_safe_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
-
         hostname = parsed.hostname
         scheme = (parsed.scheme or "").lower()
 

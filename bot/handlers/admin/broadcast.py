@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import time
+
 from utils.telegram import render_hub, send_hub_photo, safe
+
 from aiogram.filters import StateFilter
 from aiogram import Router, F
 from aiogram.exceptions import (
@@ -11,7 +13,7 @@ from aiogram.exceptions import (
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
@@ -34,6 +36,18 @@ logger = logging.getLogger(__name__)
 _broadcast_stop_events: dict[int, asyncio.Event] = {}
 _broadcast_in_progress: set[int] = set()
 
+#
+# Храним ссылки на background tasks, чтобы asyncio не собрал их GC.
+#
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _start_background_task(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 class BroadcastRateLimiter:
     def __init__(self, rate: float = 20.0):
@@ -47,19 +61,17 @@ class BroadcastRateLimiter:
             async with self._lock:
                 now = time.monotonic()
                 elapsed = now - self.last_refill
-
                 self.tokens = min(
                     self.rate,
                     self.tokens + elapsed * self.rate,
                 )
-
                 self.last_refill = now
 
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
 
-            await asyncio.sleep(1.0 / self.rate)
+                await asyncio.sleep(1.0 / self.rate)
 
 
 _broadcast_limiter = BroadcastRateLimiter(rate=20.0)
@@ -68,7 +80,6 @@ _broadcast_limiter = BroadcastRateLimiter(rate=20.0)
 def _get_stop_event(admin_id: int) -> asyncio.Event:
     if admin_id not in _broadcast_stop_events:
         _broadcast_stop_events[admin_id] = asyncio.Event()
-
     return _broadcast_stop_events[admin_id]
 
 
@@ -125,7 +136,6 @@ async def process_broadcast_message(
             texts.ERROR_TEXT_OR_MEDIA,
             get_back_button("admin_menu"),
         )
-
         return
 
     media_id = None
@@ -133,7 +143,6 @@ async def process_broadcast_message(
 
     if message.photo:
         media_id = message.photo[-1].file_id
-
     elif message.document:
         media_id = message.document.file_id
 
@@ -152,7 +161,6 @@ async def process_broadcast_message(
                 reply_markup=get_broadcast_confirm_keyboard(),
                 parse_mode="HTML",
             )
-
         elif media_id and content_type == "document":
             from utils.telegram import send_hub_document
 
@@ -164,7 +172,6 @@ async def process_broadcast_message(
                 reply_markup=get_broadcast_confirm_keyboard(),
                 parse_mode="HTML",
             )
-
         else:
             await render_hub(
                 message.bot,
@@ -179,7 +186,6 @@ async def process_broadcast_message(
             media_id=media_id,
             content_type=content_type,
         )
-
         await state.set_state(AdminStates.confirming_broadcast)
 
     except Exception as e:
@@ -281,7 +287,6 @@ async def _dispatch_message(
                 f"HTML parse failed for user {uid}, "
                 f"falling back to plain text"
             )
-
             await _send_plain(
                 bot,
                 uid,
@@ -327,7 +332,6 @@ async def _get_next_batch(
         )
 
     stmt = stmt.order_by(User.id).limit(limit)
-
     result = await session.execute(stmt)
     return [(row[0], row[1]) for row in result.all()]
 
@@ -344,33 +348,55 @@ async def _send_broadcast_to_users_with_resume(
     target_audience = None
     last_id = None
 
-    async with session_scope() as session:
-        progress = await session.get(BroadcastProgress, progress_id)
-
-        if not progress or progress.status != "in_progress":
-            return
-
-        admin_id = progress.admin_id
-
-        stop_event = _get_stop_event(admin_id)
-        stop_event.clear()
-
-        broadcast_text = progress.broadcast_text
-        media_id = progress.media_id
-        content_type = progress.content_type
-        target_audience = progress.target_audience
-        last_id = progress.last_processed_id
-
-    logger.info(
-        f"Broadcast resume: admin={admin_id}, "
-        f"progress_id={progress_id}, starting from id {last_id}"
-    )
-
-    blocked_user_ids = []
-    local_success = 0
-    local_fail = 0
+    final_progress = None
+    owns_progress = False
+    should_finalize = False
 
     try:
+        async with session_scope() as session:
+            progress = await session.get(BroadcastProgress, progress_id)
+
+            if not progress:
+                return
+
+            admin_id = progress.admin_id
+
+            #
+            # Если рассылка уже находится в статусе stopping,
+            # например админ нажал stop или бот перезапустился
+            # во время остановки, завершаем её как stopped.
+            #
+            if progress.status == "stopping":
+                progress.status = "stopped"
+                await session.commit()
+                final_progress = progress
+                owns_progress = True
+                return
+
+            if progress.status != "in_progress":
+                return
+
+            owns_progress = True
+            should_finalize = True
+
+            stop_event = _get_stop_event(admin_id)
+            stop_event.clear()
+
+            broadcast_text = progress.broadcast_text
+            media_id = progress.media_id
+            content_type = progress.content_type
+            target_audience = progress.target_audience
+            last_id = progress.last_processed_id
+
+            logger.info(
+                f"Broadcast resume/start: admin={admin_id}, "
+                f"progress_id={progress_id}, starting from id {last_id}"
+            )
+
+        blocked_user_ids = []
+        local_success = 0
+        local_fail = 0
+
         while True:
             if stop_event and stop_event.is_set():
                 break
@@ -382,32 +408,15 @@ async def _send_broadcast_to_users_with_resume(
                     last_id,
                 )
 
-            if not batch:
-                break
-
-            for internal_id, uid in batch:
-                if stop_event and stop_event.is_set():
+                if not batch:
                     break
 
-                try:
-                    await _broadcast_limiter.acquire()
-
-                    await _dispatch_message(
-                        bot,
-                        uid,
-                        broadcast_text,
-                        media_id,
-                        content_type,
-                    )
-
-                    local_success += 1
-
-                except TelegramRetryAfter as e:
-                    await asyncio.sleep(e.retry_after + 1)
+                for internal_id, uid in batch:
+                    if stop_event and stop_event.is_set():
+                        break
 
                     try:
                         await _broadcast_limiter.acquire()
-
                         await _dispatch_message(
                             bot,
                             uid,
@@ -415,25 +424,36 @@ async def _send_broadcast_to_users_with_resume(
                             media_id,
                             content_type,
                         )
-
                         local_success += 1
 
-                    except Exception:
+                    except TelegramRetryAfter as e:
+                        await asyncio.sleep(e.retry_after + 1)
+
+                        try:
+                            await _broadcast_limiter.acquire()
+                            await _dispatch_message(
+                                bot,
+                                uid,
+                                broadcast_text,
+                                media_id,
+                                content_type,
+                            )
+                            local_success += 1
+                        except Exception:
+                            local_fail += 1
+
+                    except TelegramForbiddenError:
+                        blocked_user_ids.append(uid)
                         local_fail += 1
 
-                except TelegramForbiddenError:
-                    blocked_user_ids.append(uid)
-                    local_fail += 1
+                    except Exception as e:
+                        logger.error(
+                            f"Broadcast error for user {uid}: {e}"
+                        )
+                        local_fail += 1
 
-                except Exception as e:
-                    logger.error(
-                        f"Broadcast error for user {uid}: {e}"
-                    )
-                    local_fail += 1
+                    last_id = internal_id
 
-                last_id = internal_id
-
-            async with session_scope() as session:
                 progress = await session.get(
                     BroadcastProgress,
                     progress_id,
@@ -446,107 +466,152 @@ async def _send_broadcast_to_users_with_resume(
 
                     await session.commit()
 
-            local_success = 0
-            local_fail = 0
+                local_success = 0
+                local_fail = 0
+
+        if should_finalize:
+            async with session_scope() as session:
+                progress = await session.get(
+                    BroadcastProgress,
+                    progress_id,
+                )
+
+                if progress:
+                    if (
+                        (stop_event and stop_event.is_set())
+                        or progress.status == "stopping"
+                    ):
+                        progress.status = "stopped"
+                    else:
+                        progress.status = "completed"
+
+                    await session.commit()
+                    final_progress = progress
+
+        if blocked_user_ids:
+            try:
+                async with session_scope() as session:
+                    for uid in blocked_user_ids:
+                        await mark_user_bot_blocked(session, uid)
+            except Exception as e:
+                logger.error(
+                    f"Failed to batch mark users as bot_blocked: {e}"
+                )
 
     finally:
         if stop_event:
             stop_event.clear()
 
-    final_progress = None
+        if owns_progress and admin_id:
+            _broadcast_in_progress.discard(admin_id)
+            _cleanup_stop_event(admin_id)
 
-    async with session_scope() as session:
-        progress = await session.get(BroadcastProgress, progress_id)
-
-        if progress:
-            if stop_event and stop_event.is_set():
-                progress.status = "stopped"
-            else:
-                progress.status = "completed"
-
-            await session.commit()
-
-            final_progress = progress
-
-    if blocked_user_ids:
-        try:
-            async with session_scope() as session:
-                for uid in blocked_user_ids:
-                    await mark_user_bot_blocked(session, uid)
-
-        except Exception as e:
-            logger.error(
-                f"Failed to batch mark users as bot_blocked: {e}"
-            )
-
-    if admin_id:
-        _broadcast_in_progress.discard(admin_id)
-        _cleanup_stop_event(admin_id)
-
-    if final_progress and admin_id:
-        try:
-            await bot.send_message(
-                admin_id,
-                texts.BROADCAST_RESULT.format(
-                    success_count=final_progress.success_count,
-                    fail_count=final_progress.fail_count,
-                    label=final_progress.label,
-                    total_count=final_progress.total_count,
-                ),
-                reply_markup=get_broadcast_result_keyboard(),
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to send broadcast result to admin {admin_id}: {e}"
-            )
-
-        try:
-            async with session_scope() as session:
-                await AuditService.log_action(
-                    session,
+        if final_progress and admin_id:
+            try:
+                await bot.send_message(
                     admin_id,
-                    "BROADCAST",
-                    details=(
-                        f"to {final_progress.label}: "
-                        f"{final_progress.success_count} success, "
-                        f"{final_progress.fail_count} fail"
-                        if final_progress
-                        else "no progress"
+                    texts.BROADCAST_RESULT.format(
+                        success_count=final_progress.success_count,
+                        fail_count=final_progress.fail_count,
+                        label=final_progress.label,
+                        total_count=final_progress.total_count,
                     ),
+                    reply_markup=get_broadcast_result_keyboard(),
+                    parse_mode="HTML",
                 )
-        except Exception as e:
-            logger.error(f"Failed to log broadcast audit: {e}")
+            except Exception as e:
+                logger.error(
+                    f"Failed to send broadcast result to admin {admin_id}: {e}"
+                )
+
+            try:
+                async with session_scope() as session:
+                    await AuditService.log_action(
+                        session,
+                        admin_id,
+                        "BROADCAST",
+                        details=(
+                            f"to {final_progress.label}: "
+                            f"{final_progress.success_count} success, "
+                            f"{final_progress.fail_count} fail, "
+                            f"status={final_progress.status}"
+                        ),
+                    )
+            except Exception as e:
+                logger.error(f"Failed to log broadcast audit: {e}")
 
 
 async def resume_pending_broadcasts(bot):
+    """
+    Resume рассылки после рестарта.
+
+    Правила:
+    - статус stopping считается остановленным и не продолжается;
+    - возобновляется только последняя in_progress рассылка для админа;
+    - старые дубликаты in_progress помечаются stopped;
+    - если для админа уже есть активная задача, дубликаты помечаются stopped.
+    """
     try:
         async with session_scope() as session:
-            stmt = select(BroadcastProgress).where(
-                BroadcastProgress.status == "in_progress"
+            #
+            # Если бот перезапустился во время остановки рассылки,
+            # статус stopping должен стать stopped.
+            #
+            await session.execute(
+                update(BroadcastProgress)
+                .where(BroadcastProgress.status == "stopping")
+                .values(status="stopped")
             )
 
+            stmt = (
+                select(BroadcastProgress)
+                .where(BroadcastProgress.status == "in_progress")
+                .order_by(
+                    BroadcastProgress.created_at.desc(),
+                    BroadcastProgress.id.desc(),
+                )
+            )
             result = await session.execute(stmt)
             pending = result.scalars().all()
 
+            resume_items: list[tuple[int, int]] = []
+            stop_ids: list[int] = []
+            seen_admins: set[int] = set()
+
             for p in pending:
                 if p.admin_id in _broadcast_in_progress:
-                    logger.info(
-                        f"Broadcast ID {p.id} for admin {p.admin_id} "
-                        f"already running, skipping duplicate resume"
-                    )
+                    stop_ids.append(p.id)
                     continue
 
+                if p.admin_id in seen_admins:
+                    stop_ids.append(p.id)
+                    continue
+
+                seen_admins.add(p.admin_id)
+                resume_items.append((p.id, p.admin_id))
+
+            if stop_ids:
+                await session.execute(
+                    update(BroadcastProgress)
+                    .where(BroadcastProgress.id.in_(stop_ids))
+                    .values(status="stopped")
+                )
+
                 logger.info(
-                    f"Resuming interrupted broadcast ID {p.id} "
-                    f"for admin {p.admin_id}"
+                    "Marked %s old/duplicate broadcast(s) as stopped",
+                    len(stop_ids),
                 )
 
-                _broadcast_in_progress.add(p.admin_id)
+        for progress_id, admin_id in resume_items:
+            logger.info(
+                f"Resuming interrupted broadcast ID {progress_id} "
+                f"for admin {admin_id}"
+            )
 
-                asyncio.create_task(
-                    _send_broadcast_to_users_with_resume(bot, p.id)
-                )
+            _broadcast_in_progress.add(admin_id)
+            _start_background_task(
+                _send_broadcast_to_users_with_resume(bot, progress_id)
+            )
 
     except Exception as e:
         logger.error(
@@ -571,7 +636,6 @@ async def _start_broadcast_process(
         return
 
     data = await state.get_data()
-
     broadcast_text = data.get("broadcast_text")
 
     if not broadcast_text:
@@ -596,7 +660,6 @@ async def _start_broadcast_process(
 
     if audience == "active":
         current_time = now_utc()
-
         count_stmt = count_stmt.where(
             User.subscription_end > current_time,
         )
@@ -625,17 +688,14 @@ async def _start_broadcast_process(
             label="Всего" if audience == "all" else "Активных",
             status="in_progress",
         )
-
         sess.add(progress)
-
         await sess.commit()
         await sess.refresh(progress)
-
         progress_id = progress.id
 
     _broadcast_in_progress.add(admin_id)
 
-    asyncio.create_task(
+    _start_background_task(
         _send_broadcast_to_users_with_resume(
             callback.bot,
             progress_id,
@@ -716,6 +776,25 @@ async def stop_broadcast(callback: CallbackQuery):
         return
 
     admin_id = callback.from_user.id
+
+    #
+    # Переводим активные рассылки админа в промежуточный статус stopping.
+    # Это гарантирует, что после рестарта они не будут возобновлены.
+    #
+    try:
+        async with session_scope() as session:
+            await session.execute(
+                update(BroadcastProgress)
+                .where(
+                    BroadcastProgress.admin_id == admin_id,
+                    BroadcastProgress.status == "in_progress",
+                )
+                .values(status="stopping")
+            )
+    except Exception as e:
+        logger.error(
+            f"Failed to set broadcast status to stopping: {e}"
+        )
 
     stop_event = _get_stop_event(admin_id)
     stop_event.set()
