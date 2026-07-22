@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Tariff
 
-
 ALLOWED_TARIFF_UPDATE_FIELDS = {
     "duration_days",
     "device_limit",
@@ -39,27 +38,6 @@ async def get_tariff_by_id(
     return result.scalar_one_or_none()
 
 
-async def create_tariff(
-    session: AsyncSession,
-    duration_days: int,
-    device_limit: int,
-    price_rub: int,
-    price_stars: int,
-    sort_order: int = 0,
-) -> Tariff:
-    tariff = Tariff(
-        duration_days=duration_days,
-        device_limit=device_limit,
-        price_rub=price_rub,
-        price_stars=price_stars,
-        sort_order=sort_order,
-    )
-    session.add(tariff)
-    await session.flush()
-    await session.refresh(tariff)
-    return tariff
-
-
 async def update_tariff(
     session: AsyncSession,
     tariff: Tariff,
@@ -67,11 +45,6 @@ async def update_tariff(
 ) -> Tariff:
     """
     Обновляет тариф только по whitelist-полям.
-
-    Это защита от случайной записи опасных полей через **kwargs:
-    - id
-    - created_at
-    - любые другие поля, не разрешённые явно
     """
     for key, value in kwargs.items():
         if key not in ALLOWED_TARIFF_UPDATE_FIELDS:
@@ -103,6 +76,7 @@ async def get_tariffs_paginated(
     per_page: int = 10,
 ) -> list[Tariff]:
     offset = (page - 1) * per_page
+
     result = await session.execute(
         select(Tariff)
         .order_by(
@@ -113,4 +87,5 @@ async def get_tariffs_paginated(
         .offset(offset)
         .limit(per_page)
     )
+
     return result.scalars().all()

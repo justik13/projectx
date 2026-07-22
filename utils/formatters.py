@@ -1,22 +1,21 @@
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-from typing import Optional, List
-from utils.datetime_helpers import to_msk, now_msk, format_datetime_msk, days_left_msk
-MSK_TZ = ZoneInfo("Europe/Moscow")
+from typing import Optional
+
+from utils.datetime_helpers import format_datetime_msk, days_left_msk
 
 
 def format_traffic(bytes_value: int) -> str:
     if bytes_value == 0:
         return "0 B"
-    
+
     units = ["B", "KiB", "MiB", "GiB", "TiB"]
     size = bytes_value
     unit_index = 0
-    
+
     while size >= 1024 and unit_index < len(units) - 1:
         size /= 1024
         unit_index += 1
-    
+
     if unit_index == 0:
         return f"{int(size)} {units[unit_index]}"
     else:
@@ -31,9 +30,6 @@ def format_days_left(dt: Optional[datetime]) -> str:
     return days_left_msk(dt)
 
 
-def format_datetime_short(dt: Optional[datetime]) -> str:
-    return format_datetime_msk(dt, "%d.%m")
-
 def format_user_card_text(
     user,
     profiles: list,
@@ -42,11 +38,12 @@ def format_user_card_text(
 ) -> str:
     from bot import texts
     from utils.telegram import safe
+
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    
+
     has_access = user.subscription_end and user.subscription_end > now
-    
+
     return texts.ADMIN_USER_CARD.format(
         telegram_id=user.telegram_id,
         username=safe(user.username),
@@ -71,9 +68,9 @@ def format_connection_device_card(
 ) -> str:
     from bot import texts
     from utils.telegram import safe
-    
+
     traffic_total = format_traffic(profile.traffic_down + profile.traffic_up)
-    
+
     return texts.DEVICE_CARD.format(
         device_name=safe(profile.device_name),
         flag=server_flag,

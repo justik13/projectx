@@ -17,7 +17,9 @@ def _get_fernet(key: str) -> Fernet:
             oldest_key = next(iter(_fernet_cache))
             del _fernet_cache[oldest_key]
             logger.debug("Fernet cache full, evicted oldest key")
+
         _fernet_cache[key] = Fernet(key.encode("utf-8"))
+
     return _fernet_cache[key]
 
 
@@ -32,14 +34,17 @@ class EncryptedString(TypeDecorator):
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
+
         settings = get_settings()
         key = settings.DB_ENCRYPTION_KEY
+
         if not key:
             raise RuntimeError(
                 "CRITICAL: DB_ENCRYPTION_KEY is empty! "
                 "Cannot write sensitive data in plaintext. "
                 "Fix .env immediately."
             )
+
         try:
             f = _get_fernet(key)
             encrypted = f.encrypt(value.encode("utf-8"))
@@ -51,8 +56,10 @@ class EncryptedString(TypeDecorator):
     def process_result_value(self, value, dialect):
         if value is None:
             return None
+
         settings = get_settings()
         key = settings.DB_ENCRYPTION_KEY
+
         if not key:
             if self.critical:
                 logger.critical(
@@ -64,6 +71,7 @@ class EncryptedString(TypeDecorator):
                     "DB_ENCRYPTION_KEY is empty during decryption. Returning None."
                 )
             return None
+
         try:
             f = _get_fernet(key)
             decrypted = f.decrypt(value.encode("utf-8"))
@@ -92,36 +100,3 @@ class EncryptedString(TypeDecorator):
                     type(e).__name__,
                 )
             return None
-
-
-def encrypt_value(value: str, key: str) -> str:
-    if not key:
-        raise RuntimeError("Cannot encrypt without key")
-    try:
-        f = _get_fernet(key)
-        encrypted = f.encrypt(value.encode("utf-8"))
-        return encrypted.decode("utf-8")
-    except Exception as e:
-        raise RuntimeError("Encryption failed") from e
-
-
-def decrypt_value(value: str, key: str) -> str | None:
-    if not key:
-        return None
-    try:
-        f = _get_fernet(key)
-        decrypted = f.decrypt(value.encode("utf-8"))
-        return decrypted.decode("utf-8")
-    except InvalidToken:
-        return None
-    except Exception:
-        return None
-
-
-def require_decrypted(value: str | None, field_name: str) -> str:
-    if value is None:
-        raise RuntimeError(
-            f"Critical encrypted field is unavailable: {field_name}. "
-            "Check DB_ENCRYPTION_KEY and database integrity."
-        )
-    return value

@@ -15,7 +15,9 @@ async def get_hub_message_ids(session: AsyncSession, chat_id: int) -> list[int]:
 
 
 async def add_hub_message_id(
-    session: AsyncSession, chat_id: int, message_id: int
+    session: AsyncSession,
+    chat_id: int,
+    message_id: int,
 ) -> None:
     hub_message = HubMessage(chat_id=chat_id, message_id=message_id)
     session.add(hub_message)
@@ -23,19 +25,16 @@ async def add_hub_message_id(
 
 
 async def remove_hub_message_ids(
-    session: AsyncSession, chat_id: int, message_ids: list[int]
+    session: AsyncSession,
+    chat_id: int,
+    message_ids: list[int],
 ) -> None:
     if not message_ids:
         return
+
     stmt = delete(HubMessage).where(
         HubMessage.chat_id == chat_id,
         HubMessage.message_id.in_(message_ids),
     )
-    await session.execute(stmt)
-    await session.flush()
-
-
-async def clear_hub_message_ids(session: AsyncSession, chat_id: int) -> None:
-    stmt = delete(HubMessage).where(HubMessage.chat_id == chat_id)
     await session.execute(stmt)
     await session.flush()

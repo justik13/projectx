@@ -47,11 +47,8 @@ async def _render_profile(
     target,
     user: User,
     session: AsyncSession,
-    *,
-    back_to: str = "back_to_main_menu",
 ):
     profiles = await get_user_profiles(session, user.id)
-
     profiles_count = len(profiles)
 
     total_traffic = sum(
@@ -69,13 +66,6 @@ async def _render_profile(
     )
 
     if has_access:
-        #
-        # Fallback на user.device_limit, если тариф не найден.
-        #
-        # Это защищает от ситуации, когда current_tariff_id
-        # по какой-то причине отсутствует или тариф удалён,
-        # но у пользователя сохранён лимит устройств.
-        #
         device_limit = user.device_limit or 0
 
         tariff_name = (
@@ -88,10 +78,8 @@ async def _render_profile(
                 session,
                 user.current_tariff_id,
             )
-
             if tariff:
                 device_limit = tariff.device_limit
-
                 tariff_name = (
                     f"{get_tariff_display_name(device_limit)} "
                     f"({device_limit} устр.)"
@@ -108,10 +96,7 @@ async def _render_profile(
             referral_days=user.referral_days,
         )
 
-        kb = get_profile_keyboard(
-            is_active=True,
-            back_to=back_to,
-        )
+        kb = get_profile_keyboard()
 
     else:
         rendered = texts.PROFILE_TEXT_INACTIVE.format(
@@ -128,27 +113,18 @@ async def _render_profile(
             text="🚀 Купить доступ",
             callback_data="menu_buy",
         )
-
         builder.button(
             text="🎁 Пригласить друга",
             callback_data="referral",
         )
-
         builder.button(
             text="🧾 История оплат",
             callback_data="user_history",
         )
-
-        if back_to == "menu_subscription":
-            builder.button(
-                text="← К подписке",
-                callback_data="menu_subscription",
-            )
-        else:
-            builder.button(
-                text="🏠 В главное меню",
-                callback_data="back_to_main_menu",
-            )
+        builder.button(
+            text="🏠 В главное меню",
+            callback_data="back_to_main_menu",
+        )
 
         builder.adjust(1, 1, 1, 1)
 
@@ -183,7 +159,6 @@ async def hub_menu_profile(
         callback.message,
         db_user,
         session,
-        back_to="back_to_main_menu",
     )
 
 
@@ -208,7 +183,6 @@ async def back_to_profile(
         callback.message,
         db_user,
         session,
-        back_to="back_to_main_menu",
     )
 
 

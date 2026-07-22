@@ -167,14 +167,11 @@ def _get_rate_limiter(api_url: str) -> TokenBucketRateLimiter:
 class AmneziaClientCreateResponse(BaseModel):
     id: str
     config: str
-    protocol: str = AMNEZIA_PROTOCOL
 
 
 class AmneziaClientTraffic(BaseModel):
     totalDownload: int = 0
     totalUpload: int = 0
-    received: int = 0
-    sent: int = 0
 
 
 class AmneziaClientListItem(BaseModel):
@@ -707,12 +704,6 @@ class AmneziaClient:
                             traffic_raw.get("received", 0) or 0
                         ),
                         totalUpload=(
-                            traffic_raw.get("sent", 0) or 0
-                        ),
-                        received=(
-                            traffic_raw.get("received", 0) or 0
-                        ),
-                        sent=(
                             traffic_raw.get("sent", 0) or 0
                         ),
                     )

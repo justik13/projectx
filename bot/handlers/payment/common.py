@@ -1,6 +1,3 @@
-import logging
-from decimal import Decimal, InvalidOperation
-
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,8 +18,6 @@ from utils.formatters import format_datetime, format_days_left
 from utils.tariff_names import get_tariff_display_name
 from utils.telegram import render_hub
 
-logger = logging.getLogger(__name__)
-
 PAYMENT_MANUAL_REVIEW_TEXT = (
     "💳 <b>Оплата получена</b>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
@@ -32,16 +27,6 @@ PAYMENT_MANUAL_REVIEW_TEXT = (
     "━━━━━━━━━━━━━━━━━━━━\n"
     "<i>Обычно проверка занимает не более 5 минут.</i>"
 )
-
-
-def _to_decimal(value) -> Decimal | None:
-    if value is None:
-        return None
-
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
 
 
 async def _is_subscription_active(user) -> bool:
@@ -165,17 +150,14 @@ async def _show_hub(
         text="🔄 Продлить доступ",
         callback_data="payment_quick_renew",
     )
-
     builder.button(
         text="⚙️ Сменить тариф",
         callback_data="payment_change_tariff",
     )
-
     builder.button(
         text="👤 Профиль",
         callback_data="menu_profile",
     )
-
     builder.button(
         text="🏠 В главное меню",
         callback_data="back_to_main_menu",

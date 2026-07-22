@@ -11,7 +11,6 @@ from services.slots_cache import get_real_peer_count
 class ServerUpdateFields(TypedDict, total=False):
     name: str
     country_flag: str | None
-    description: str | None
     api_url: str
     protocol: str
     max_clients: int
@@ -29,9 +28,7 @@ async def get_active_servers(
         .where(Server.is_active == True)
         .order_by(Server.name)
     )
-
     result = await session.execute(stmt)
-
     return result.scalars().all()
 
 
@@ -40,7 +37,6 @@ async def get_available_servers(
 ) -> List[Server]:
     """
     Возвращает активные серверы со свободными слотами.
-
     Один запрос с LEFT JOIN вместо двух отдельных.
     """
     profile_counts = (
@@ -67,7 +63,6 @@ async def get_available_servers(
     )
 
     result = await session.execute(stmt)
-
     return result.scalars().all()
 
 
@@ -76,9 +71,7 @@ async def get_server_by_id(
     server_id: int,
 ) -> Optional[Server]:
     stmt = select(Server).where(Server.id == server_id)
-
     result = await session.execute(stmt)
-
     return result.scalar_one_or_none()
 
 
@@ -88,7 +81,6 @@ async def create_server(
     api_url: str,
     api_key: str,
     country_flag: str = None,
-    description: str = None,
     protocol: str = "amneziawg2",
     max_clients: int = 50,
 ) -> Server:
@@ -97,16 +89,12 @@ async def create_server(
         api_url=api_url,
         api_key=api_key,
         country_flag=country_flag,
-        description=description,
         protocol=protocol,
         max_clients=max_clients,
     )
-
     session.add(server)
-
     await session.flush()
     await session.refresh(server)
-
     return server
 
 
@@ -118,13 +106,11 @@ async def update_server(
     for key, value in kwargs.items():
         if key in PROTECTED_SERVER_FIELDS:
             continue
-
         if hasattr(server, key):
             setattr(server, key, value)
 
     await session.flush()
     await session.refresh(server)
-
     return server
 
 
@@ -141,12 +127,10 @@ async def get_total_free_ips(
 ) -> int:
     """
     Считает свободные слоты параллельно.
-
     Если API сервера недоступно и get_real_peer_count возвращает -1,
     используется количество профилей из БД.
     """
     active_servers = await get_active_servers(session)
-
     if not active_servers:
         return 0
 
@@ -157,9 +141,7 @@ async def get_total_free_ips(
         )
         .group_by(VPNProfile.server_id)
     )
-
     counts_result = await session.execute(counts_stmt)
-
     db_counts = {
         row[0]: row[1]
         for row in counts_result.all()
@@ -175,7 +157,6 @@ async def get_total_free_ips(
             real_count = db_counts.get(server.id, 0)
 
         free_slots = server.max_clients - real_count
-
         return max(0, free_slots)
 
     results = await asyncio.gather(
@@ -187,7 +168,6 @@ async def get_total_free_ips(
     )
 
     total_free = 0
-
     for result in results:
         if isinstance(result, int):
             total_free += result
@@ -199,9 +179,7 @@ async def get_server_count(
     session: AsyncSession,
 ) -> int:
     stmt = select(func.count(Server.id))
-
     result = await session.execute(stmt)
-
     return result.scalar_one()
 
 
@@ -211,14 +189,12 @@ async def get_servers_paginated(
     per_page: int = 10,
 ) -> list[Server]:
     offset = (page - 1) * per_page
-
     result = await session.execute(
         select(Server)
         .order_by(Server.name)
         .offset(offset)
         .limit(per_page)
     )
-
     return result.scalars().all()
 
 
@@ -227,9 +203,7 @@ async def get_server_by_api_url(
     api_url: str,
 ) -> Optional[Server]:
     stmt = select(Server).where(Server.api_url == api_url)
-
     result = await session.execute(stmt)
-
     return result.scalar_one_or_none()
 
 
@@ -242,9 +216,6 @@ async def delete_profiles_by_server_id(
     stmt = sql_delete(VPNProfile).where(
         VPNProfile.server_id == server_id,
     )
-
     result = await session.execute(stmt)
-
     await session.flush()
-
     return result.rowcount

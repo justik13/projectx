@@ -19,25 +19,10 @@ router = Router()
 )
 async def fsm_media_guard(message: Message, state: FSMContext):
     await state.clear()
-
     await render_hub(
         message.bot,
         message.chat.id,
         texts.ERROR_OPERATION_INTERRUPTED,
-        get_back_button("back_to_main_menu"),
-    )
-
-
-@router.message(
-    F.photo | F.sticker | F.voice | F.video | F.video_note
-    | F.document | F.audio | F.location | F.contact | F.poll
-    | F.dice | F.animation,
-)
-async def handle_media(message: Message):
-    await render_hub(
-        message.bot,
-        message.chat.id,
-        texts.FALLBACK_MEDIA_TEXT,
         get_back_button("back_to_main_menu"),
     )
 
@@ -51,7 +36,6 @@ async def handle_unknown_text(message: Message, state: FSMContext):
         return
 
     await state.clear()
-
     await render_hub(
         message.bot,
         message.chat.id,
@@ -60,15 +44,9 @@ async def handle_unknown_text(message: Message, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "noop_group_header")
-async def noop_group_header(callback: CallbackQuery):
-    await callback.answer()
-
-
 @router.callback_query(F.data == "dismiss_notification")
 async def dismiss_notification(callback: CallbackQuery):
     await callback.answer()
-
     try:
         await callback.message.delete()
     except TelegramBadRequest:

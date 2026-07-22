@@ -11,9 +11,11 @@ logger = logging.getLogger(__name__)
 def _decode_base64url(payload: str) -> Optional[bytes]:
     try:
         b64 = payload.replace("-", "+").replace("_", "/")
+
         padding_needed = len(b64) % 4
         if padding_needed:
             b64 += "=" * (4 - padding_needed)
+
         return base64.b64decode(b64, validate=True)
     except Exception as e:
         logger.warning(f"_decode_base64url failed: {e}")
@@ -169,17 +171,6 @@ def build_conf_file_from_dict(data: dict) -> Optional[str]:
             exc_info=True,
         )
         return None
-
-
-def build_vpn_file(uri: str) -> Optional[str]:
-    """
-    Декодирует vpn:// URI и возвращает содержимое .vpn файла.
-    """
-    data = decode_vpn_uri_to_json(uri)
-    if data is None:
-        return None
-
-    return build_vpn_file_from_dict(data)
 
 
 def build_conf_file(uri: str) -> Optional[str]:

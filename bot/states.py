@@ -1,5 +1,6 @@
 from aiogram.fsm.state import StatesGroup, State
 
+
 class DeviceCreationStates(StatesGroup):
     choose_server = State()
     enter_device_name = State()
@@ -8,8 +9,8 @@ class DeviceCreationStates(StatesGroup):
 class DeviceManagementStates(StatesGroup):
     rename_device = State()
 
+
 class AdminStates(StatesGroup):
-    entering_custom_days = State()
     searching_user = State()
     entering_broadcast_message = State()
     confirming_broadcast = State()

@@ -12,6 +12,7 @@ from bot.keyboards.admin.users import get_admin_user_card_keyboard
 from database.models import Tariff, User
 from database.repositories.profiles_repo import get_user_profiles
 from database.repositories.users_repo import get_user_referrals
+from services.payment_service.common import MANUAL_GRANT_ALLOWED_STATUSES
 from utils.datetime_helpers import is_expired, now_utc
 from utils.formatters import format_days_left, format_user_card_text
 from utils.telegram import render_hub, safe
@@ -19,13 +20,6 @@ from utils.telegram import render_hub, safe
 logger = logging.getLogger(__name__)
 
 USERS_PER_PAGE = 10
-
-MANUAL_GRANT_ALLOWED_STATUSES = {
-    "pending",
-    "cancelled",
-    "failed",
-    "requires_manual_review",
-}
 
 PAYMENT_STATUS_NAMES = {
     "pending": "⏳ Ожидает",
@@ -42,8 +36,8 @@ def _validate_positive_int(text: str | None) -> int | None:
         return None
 
     value = int(text.strip())
-    MAX_DAYS = 36500
 
+    MAX_DAYS = 36500
     if value < 1 or value > MAX_DAYS:
         return None
 
@@ -193,7 +187,6 @@ async def _build_users_list_text_and_kb(
         text="🔍 Поиск по ID",
         callback_data="admin_users_search",
     )
-
     builder.button(
         text="← В админку",
         callback_data="admin_menu",

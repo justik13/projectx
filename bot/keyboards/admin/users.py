@@ -1,7 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.keyboards.common import get_back_button
 from utils.tariff_names import get_tariff_group_name
 
 
@@ -42,6 +41,7 @@ def get_admin_user_card_keyboard(
     )
 
     builder.adjust(1)
+
     return builder.as_markup()
 
 
@@ -81,6 +81,7 @@ def get_admin_subscription_keyboard(
     )
 
     builder.adjust(1)
+
     return builder.as_markup()
 
 
@@ -92,6 +93,7 @@ def get_admin_change_tariff_keyboard(
     builder = InlineKeyboardBuilder()
 
     current_device_limit = None
+
     if current_tariff_id:
         for device_limit, tariffs in groups.items():
             for t in tariffs:
@@ -101,6 +103,7 @@ def get_admin_change_tariff_keyboard(
 
     for device_limit in sorted(groups.keys()):
         label = get_tariff_group_name(device_limit)
+
         if device_limit == current_device_limit:
             label += " ✅"
 
@@ -117,6 +120,7 @@ def get_admin_change_tariff_keyboard(
     )
 
     builder.adjust(1)
+
     return builder.as_markup()
 
 
@@ -128,6 +132,7 @@ def get_admin_grant_tariff_keyboard(
 
     for device_limit in sorted(groups.keys()):
         label = get_tariff_group_name(device_limit)
+
         builder.button(
             text=label,
             callback_data=(
@@ -141,6 +146,7 @@ def get_admin_grant_tariff_keyboard(
     )
 
     builder.adjust(1)
+
     return builder.as_markup()
 
 
@@ -180,6 +186,7 @@ def get_admin_grant_days_keyboard(
     )
 
     builder.adjust(2, 2, 1, 1)
+
     return builder.as_markup()
 
 
@@ -214,6 +221,7 @@ def get_admin_extend_days_new_keyboard(
     )
 
     builder.adjust(2, 2, 1, 1)
+
     return builder.as_markup()
 
 
@@ -233,6 +241,7 @@ def get_admin_confirm_action_keyboard(
     )
 
     builder.adjust(2)
+
     return builder.as_markup()
 
 
@@ -266,4 +275,5 @@ def get_admin_user_devices_keyboard(
     )
 
     builder.adjust(1)
+
     return builder.as_markup()

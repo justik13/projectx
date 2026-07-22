@@ -15,6 +15,7 @@ from database.repositories import hub_repo
 logger = logging.getLogger(__name__)
 
 _hub_cache = TTLCache(maxsize=HUB_CACHE_MAX_SIZE, ttl=HUB_CACHE_TTL)
+
 _last_cleanup_time: float = 0.0
 _CLEANUP_INTERVAL = 3600.0
 
@@ -25,15 +26,19 @@ _last_render_lock_cleanup: float = 0.0
 
 def _get_hub_render_lock(chat_id: int) -> asyncio.Lock:
     global _last_render_lock_cleanup
+
     now = time.monotonic()
+
     if now - _last_render_lock_cleanup > _CLEANUP_INTERVAL:
         _cleanup_render_locks(now)
         _last_render_lock_cleanup = now
+
     if chat_id not in _hub_render_locks:
         _hub_render_locks[chat_id] = (asyncio.Lock(), now)
     else:
         lock, _ = _hub_render_locks[chat_id]
         _hub_render_locks[chat_id] = (lock, now)
+
     return _hub_render_locks[chat_id][0]
 
 
@@ -43,8 +48,10 @@ def _cleanup_render_locks(now: float) -> None:
         for cid, (lock, last_used) in _hub_render_locks.items()
         if now - last_used > _RENDER_LOCK_TTL and not lock.locked()
     ]
+
     for cid in old:
         del _hub_render_locks[cid]
+
     if old:
         logger.debug(
             "Hub render locks cleanup: removed %s, %s remaining",
@@ -54,10 +61,13 @@ def _cleanup_render_locks(now: float) -> None:
 
 
 async def _safe_delete_batch(
-    bot, chat_id: int, msg_ids: List[int]
+    bot,
+    chat_id: int,
+    msg_ids: List[int],
 ) -> tuple[list[int], list[int]]:
     deleted_ids: list[int] = []
     failed_ids: list[int] = []
+
     for msg_id in msg_ids:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -75,14 +85,19 @@ async def _safe_delete_batch(
                 failed_ids.append(msg_id)
                 logger.warning(
                     "TelegramBadRequest on delete_message %s in %s: %s",
-                    msg_id, chat_id, e,
+                    msg_id,
+                    chat_id,
+                    e,
                 )
         except Exception as e:
             failed_ids.append(msg_id)
             logger.error(
                 "Unexpected error deleting message %s in %s: %s",
-                msg_id, chat_id, e,
+                msg_id,
+                chat_id,
+                e,
             )
+
     return deleted_ids, failed_ids
 
 
@@ -94,22 +109,28 @@ def safe(value: Optional[str]) -> str:
 
 def _maybe_cleanup_cache() -> None:
     global _last_cleanup_time
+
     now = time.monotonic()
     if now - _last_cleanup_time < _CLEANUP_INTERVAL:
         return
+
     _last_cleanup_time = now
+
     if len(_hub_cache) >= HUB_CACHE_MAX_SIZE * 0.8:
         expired_keys = []
+
         for key in list(_hub_cache.keys()):
             try:
                 _ = _hub_cache[key]
             except KeyError:
                 expired_keys.append(key)
+
         for key in expired_keys:
             try:
                 del _hub_cache[key]
             except KeyError:
                 pass
+
         logger.info(
             "Hub cache cleanup: %s expired entries removed",
             len(expired_keys),
@@ -120,6 +141,7 @@ async def _load_hub_ids_from_db(chat_id: int) -> List[int]:
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
         return list(cached["ids"])
+
     try:
         async with session_scope() as session:
             ids = await hub_repo.get_hub_message_ids(session, chat_id)
@@ -137,6 +159,7 @@ async def _store_hub_id_in_db(chat_id: int, message_id: int) -> None:
             await hub_repo.add_hub_message_id(session, chat_id, message_id)
     except Exception as e:
         logger.warning("Failed to store hub id in DB for chat %s: %s", chat_id, e)
+
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
         if message_id not in cached["ids"]:
@@ -148,11 +171,13 @@ async def _store_hub_id_in_db(chat_id: int, message_id: int) -> None:
 async def _remove_hub_ids_from_db(chat_id: int, message_ids: List[int]) -> None:
     if not message_ids:
         return
+
     try:
         async with session_scope() as session:
             await hub_repo.remove_hub_message_ids(session, chat_id, message_ids)
     except Exception as e:
         logger.warning("Failed to remove hub ids from DB for chat %s: %s", chat_id, e)
+
     cached = _hub_cache.get(chat_id)
     if cached and "ids" in cached:
         old_set = set(message_ids)
@@ -163,47 +188,33 @@ async def get_hub_ids(chat_id: int) -> List[int]:
     return await _load_hub_ids_from_db(chat_id)
 
 
-def get_cached_hub_ids(chat_id: int) -> List[int]:
-    cached = _hub_cache.get(chat_id)
-    if cached and "ids" in cached:
-        return list(cached["ids"])
-    return []
-
-
 async def _delete_hub_messages(bot, chat_id: int, msg_ids: List[int]) -> List[int]:
     if not msg_ids:
         return []
+
     deleted_ids, failed_ids = await _safe_delete_batch(bot, chat_id, msg_ids)
+
     if deleted_ids:
         await _remove_hub_ids_from_db(chat_id, deleted_ids)
+
     if failed_ids:
         logger.warning(
             "Failed to delete %s hub messages in chat %s. "
             "They will be retried on next hub render.",
-            len(failed_ids), chat_id,
+            len(failed_ids),
+            chat_id,
         )
+
     return failed_ids
 
 
 async def delete_hub_ids(bot, chat_id: int, msg_ids: List[int]) -> List[int]:
     if not msg_ids:
         return []
+
     lock = _get_hub_render_lock(chat_id)
     async with lock:
         return await _delete_hub_messages(bot, chat_id, msg_ids)
-
-
-async def clear_and_delete_hub(bot, chat_id: int) -> None:
-    _maybe_cleanup_cache()
-    lock = _get_hub_render_lock(chat_id)
-    async with lock:
-        db_ids = await _load_hub_ids_from_db(chat_id)
-        cached = _hub_cache.get(chat_id)
-        cache_ids = cached["ids"] if cached and "ids" in cached else []
-        all_ids = list(dict.fromkeys(db_ids + cache_ids))
-        if all_ids:
-            await _delete_hub_messages(bot, chat_id, all_ids)
-        _hub_cache.pop(chat_id, None)
 
 
 async def render_hub(
@@ -214,18 +225,23 @@ async def render_hub(
     parse_mode: str = "HTML",
 ) -> int:
     _maybe_cleanup_cache()
+
     lock = _get_hub_render_lock(chat_id)
     async with lock:
         old_ids = await _load_hub_ids_from_db(chat_id)
+
         msg = await bot.send_message(
             chat_id=chat_id,
             text=text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
+
         if old_ids:
             await _delete_hub_messages(bot, chat_id, old_ids)
+
         await _store_hub_id_in_db(chat_id, msg.message_id)
+
         return msg.message_id
 
 
@@ -238,9 +254,11 @@ async def send_hub_photo(
     parse_mode: str = "HTML",
 ) -> int:
     _maybe_cleanup_cache()
+
     lock = _get_hub_render_lock(chat_id)
     async with lock:
         old_ids = await _load_hub_ids_from_db(chat_id)
+
         msg = await bot.send_photo(
             chat_id=chat_id,
             photo=photo,
@@ -248,9 +266,12 @@ async def send_hub_photo(
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
+
         if old_ids:
             await _delete_hub_messages(bot, chat_id, old_ids)
+
         await _store_hub_id_in_db(chat_id, msg.message_id)
+
         return msg.message_id
 
 
@@ -263,9 +284,11 @@ async def send_hub_document(
     parse_mode: str = "HTML",
 ) -> int:
     _maybe_cleanup_cache()
+
     lock = _get_hub_render_lock(chat_id)
     async with lock:
         old_ids = await _load_hub_ids_from_db(chat_id)
+
         msg = await bot.send_document(
             chat_id=chat_id,
             document=document,
@@ -273,9 +296,12 @@ async def send_hub_document(
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
+
         if old_ids:
             await _delete_hub_messages(bot, chat_id, old_ids)
+
         await _store_hub_id_in_db(chat_id, msg.message_id)
+
         return msg.message_id
 
 
@@ -286,15 +312,21 @@ async def send_hub_invoice(
     **kwargs,
 ) -> int:
     _maybe_cleanup_cache()
+
     lock = _get_hub_render_lock(chat_id)
     async with lock:
         old_ids = await _load_hub_ids_from_db(chat_id)
+
         if reply_markup:
             kwargs["reply_markup"] = reply_markup
+
         msg = await bot.send_invoice(chat_id=chat_id, **kwargs)
+
         if old_ids:
             await _delete_hub_messages(bot, chat_id, old_ids)
+
         await _store_hub_id_in_db(chat_id, msg.message_id)
+
         return msg.message_id
 
 
@@ -307,6 +339,7 @@ async def append_hub_document(
     parse_mode: str = "HTML",
 ) -> int:
     _maybe_cleanup_cache()
+
     lock = _get_hub_render_lock(chat_id)
     async with lock:
         msg = await bot.send_document(
@@ -316,7 +349,9 @@ async def append_hub_document(
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
+
         await _store_hub_id_in_db(chat_id, msg.message_id)
+
         return msg.message_id
 
 
@@ -328,6 +363,7 @@ async def append_hub_message(
     parse_mode: str = "HTML",
 ) -> int:
     _maybe_cleanup_cache()
+
     lock = _get_hub_render_lock(chat_id)
     async with lock:
         msg = await bot.send_message(
@@ -336,44 +372,7 @@ async def append_hub_message(
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
+
         await _store_hub_id_in_db(chat_id, msg.message_id)
+
         return msg.message_id
-
-
-def clear_hub_cache(chat_id: int) -> None:
-    _hub_cache.pop(chat_id, None)
-
-
-async def safe_edit_text(message, text: str, **kwargs) -> bool:
-    try:
-        await message.edit_text(text=text, **kwargs)
-        return True
-    except TelegramBadRequest as e:
-        err_str = str(e).lower()
-        if "message is not modified" in err_str:
-            logger.debug("safe_edit_text: message is not modified")
-        else:
-            logger.warning("safe_edit_text TelegramBadRequest: %s", e)
-        return False
-    except Exception:
-        return False
-
-
-async def safe_delete_message(message) -> bool:
-    try:
-        await message.delete()
-        return True
-    except TelegramBadRequest:
-        return False
-    except Exception:
-        return False
-
-
-async def safe_answer(
-    callback, text: Optional[str] = None, show_alert: bool = False
-) -> bool:
-    try:
-        await callback.answer(text, show_alert=show_alert)
-        return True
-    except Exception:
-        return False

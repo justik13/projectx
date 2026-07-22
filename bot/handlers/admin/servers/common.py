@@ -47,9 +47,11 @@ def normalize_api_url(url: str) -> str:
     """
     url = url.strip()
     parts = urlsplit(url)
+
     scheme = parts.scheme.lower()
     netloc = parts.netloc.lower()
     path = parts.path.rstrip("/")
+
     return urlunsplit(
         (
             scheme,
@@ -102,7 +104,6 @@ async def _build_servers_list_text_and_kb(
         text="➕ Добавить сервер",
         callback_data="admin_server_add",
     )
-
     builder.button(
         text="← В админку",
         callback_data="admin_menu",
@@ -186,28 +187,25 @@ async def _bulk_delete_peers_from_api(
     profiles_data,
     api_url: str,
     api_key: str,
-) -> tuple[int, int, list[tuple[int, str]]]:
+) -> tuple[int, list[tuple[int, str]]]:
     if not profiles_data:
-        return 0, 0, []
+        return 0, []
 
     client = AmneziaClient(api_url, api_key)
     sem = asyncio.Semaphore(20)
 
-    success = 0
     fail = 0
     failed_peers: list[tuple[int, str]] = []
     lock = asyncio.Lock()
 
     async def _delete_limited(profile_id: int, peer_id: str):
-        nonlocal success, fail
+        nonlocal fail
 
         async with sem:
             ok = await client.delete_user(client_id=peer_id)
 
         async with lock:
-            if ok:
-                success += 1
-            else:
+            if not ok:
                 fail += 1
                 failed_peers.append((profile_id, peer_id))
 
@@ -227,9 +225,8 @@ async def _bulk_delete_peers_from_api(
             f"_bulk_delete_peers_from_api: timeout after 300s "
             f"for {len(profiles_data)} peers"
         )
-        return success, fail, failed_peers
 
-    return success, fail, failed_peers
+    return fail, failed_peers
 
 
 async def _delete_server_background(
@@ -242,7 +239,7 @@ async def _delete_server_background(
     deleted_profiles: int,
 ):
     if profiles_data:
-        api_success, api_fail, failed_peers = await _bulk_delete_peers_from_api(
+        api_fail, failed_peers = await _bulk_delete_peers_from_api(
             profiles_data,
             api_url,
             api_key,
@@ -271,13 +268,11 @@ async def _delete_server_background(
             except Exception as e:
                 logger.error(f"Failed to save zombie peers: {e}")
 
-            msg = (
-                f"⚠️ Сервер {server_name} удалён из БД ({deleted_profiles} устр.),\n"
-                f"но {api_fail}/{len(profiles_data)} пиров не удалось удалить из API.\n"
-                f"Worker Cleanup подчистит позже."
-            )
-        else:
-            msg = f"✅ Сервер {server_name} удалён"
+        msg = (
+            f"⚠️ Сервер {server_name} удалён из БД ({deleted_profiles} устр.),\n"
+            f"но {api_fail}/{len(profiles_data)} пиров не удалось удалить из API.\n"
+            f"Worker Cleanup подчистит позже."
+        )
     else:
         msg = f"✅ Сервер {server_name} удалён"
 
