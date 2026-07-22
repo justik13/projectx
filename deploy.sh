@@ -1,7 +1,9 @@
 #!/bin/bash
 
 set -euo pipefail
-IFS=$'\n\t'
+
+IFS=$'
+	'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -46,7 +48,6 @@ confirm() {
 
     echo ""
     read -p "$message $prompt: " response
-
     response=${response:-$default}
 
     [[ "$response" =~ ^[Yy]$ ]] && return 0 || return 1
@@ -165,7 +166,8 @@ install_dependencies() {
         postgresql postgresql-contrib libpq-dev \
         redis-server \
         > "$install_log" 2>&1; then
-        error "Ошибка apt. Лог: $install_log\n$(tail -20 "$install_log")"
+        error "Ошибка apt. Лог: $install_log
+$(tail -20 "$install_log")"
     fi
 
     rm -f "$install_log"
@@ -220,7 +222,8 @@ setup_postgresql() {
 
         [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
 
-        printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
+        printf '%s
+' "$DB_PASSWORD" > "$PG_PASS_FILE"
 
         return
     fi
@@ -239,9 +242,9 @@ setup_postgresql() {
     sudo -u postgres psql -v ON_ERROR_STOP=1 <<EOF
 DO \$\$
 BEGIN
-   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
-      CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
-   END IF;
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
+        CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
+    END IF;
 END
 \$\$;
 
@@ -255,7 +258,8 @@ EOF
 
     success "Пользователь projectx и база projectx_bot созданы"
 
-    printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
+    printf '%s
+' "$DB_PASSWORD" > "$PG_PASS_FILE"
 }
 
 setup_redis() {
@@ -571,30 +575,6 @@ verify_permissions() {
     success "Права доступа установлены"
 }
 
-run_migrations() {
-    log "Применение миграций Alembic..."
-
-    cd "$PROJECT_DIR"
-
-    if [[ ! -f "$PROJECT_DIR/alembic.ini" ]]; then
-        warn "alembic.ini не найден. Пропускаем миграции."
-        return 0
-    fi
-
-    if [[ ! -x "$VENV_DIR/bin/alembic" ]]; then
-        warn "Alembic не установлен в venv. Пропускаем миграции."
-        return 0
-    fi
-
-    if ! runuser -u projectx -- "$VENV_DIR/bin/alembic" upgrade head >> "$LOG_FILE" 2>&1; then
-        warn "Ошибка применения миграций Alembic. Последние строки лога:"
-        tail -n 50 "$LOG_FILE" || true
-        return 1
-    fi
-
-    success "Миграции Alembic применены"
-}
-
 init_database() {
     log "Инициализация схемы БД PostgreSQL..."
 
@@ -829,6 +809,7 @@ if [ "$(systemctl is-enabled projectx-bot 2>/dev/null)" = "enabled" ] && ! syste
 
     systemctl start projectx-bot
     echo $((COUNT + 1)) > "$CRASH_FILE"
+
     exit 0
 fi
 
@@ -904,7 +885,8 @@ start_bot() {
 }
 
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v8.0 (Redis Auth + Restore + Hardened Healthcheck)${NC}\n"
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v8.1 (No Alembic + Redis Auth + Restore + Hardened Healthcheck)${NC}
+"
 
     mkdir -p /var/log "$SNAPSHOT_DIR"
 
@@ -920,7 +902,6 @@ main() {
     setup_venv            || rollback "setup_venv" "Venv failed"
     setup_env             || rollback "setup_env" "Env failed"
     verify_permissions    || rollback "verify_permissions" "Permissions failed"
-    run_migrations        || rollback "run_migrations" "Alembic migrations failed"
     init_database         || rollback "init_database" "DB init failed"
     setup_systemd         || rollback "setup_systemd" "Systemd failed"
     setup_nginx_ssl       || rollback "setup_nginx_ssl" "Nginx failed"
@@ -953,12 +934,8 @@ case "${1:-}" in
     --restore)
         /usr/local/bin/projectx-restore.sh "${2:-}"
         ;;
-    --migrate)
-        cd "$PROJECT_DIR"
-        runuser -u projectx -- "$VENV_DIR/bin/alembic" upgrade head
-        ;;
     --help|-h)
-        echo "Использование: ./deploy.sh [--status|--logs|--restart|--stop|--start|--backup|--restore <stamp>|--migrate]"
+        echo "Использование: ./deploy.sh [--status|--logs|--restart|--stop|--start|--backup|--restore <stamp>]"
         ;;
     *)
         main

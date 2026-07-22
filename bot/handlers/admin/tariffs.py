@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +14,7 @@ from bot import texts
 from bot.keyboards import get_admin_tariff_card_keyboard, get_back_button
 from bot.keyboards.admin.users import get_admin_confirm_action_keyboard
 from bot.states import AdminStates
-from database.models import Payment
+from database.models import Payment, User
 from database.repositories.tariffs_repo import (
     delete_tariff,
     get_tariff_by_id,
@@ -80,6 +80,7 @@ async def _build_tariffs_list_text_and_kb(
     )
 
     builder.adjust(1)
+
     return rendered, builder
 
 
@@ -89,6 +90,7 @@ async def _show_tariffs_list(
     page: int = 1,
 ):
     total_tariffs = await get_tariff_count(session)
+
     total_pages = max(
         1,
         math.ceil(total_tariffs / TARIFFS_PER_PAGE),
@@ -124,7 +126,9 @@ async def _get_payments_count_for_tariff(
     stmt = select(func.count(Payment.id)).where(
         Payment.tariff_id == tariff_id,
     )
+
     result = await session.execute(stmt)
+
     return result.scalar_one() or 0
 
 
@@ -162,6 +166,7 @@ async def tariffs_pagination(
     await state.clear()
 
     page = int(callback.data.split(":")[1])
+
     await _show_tariffs_list(callback, session, page=page)
     await callback.answer()
 
@@ -216,6 +221,7 @@ async def show_tariff_card(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
+
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -245,6 +251,7 @@ async def toggle_tariff_confirm(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
+
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -307,6 +314,7 @@ async def toggle_tariff_apply(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
+
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -358,6 +366,7 @@ async def delete_tariff_handler(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
+
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -455,6 +464,7 @@ async def delete_tariff_apply(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
+
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -613,6 +623,7 @@ async def _apply_tariff_int_edit(
 
     if message.text.startswith("/"):
         await state.clear()
+
         await render_hub(
             message.bot,
             message.chat.id,
@@ -658,6 +669,32 @@ async def _apply_tariff_int_edit(
         tariff,
         **{field_name: new_value},
     )
+
+    #
+    # Если админ меняет лимит устройств у тарифа,
+    # нужно синхронизировать user.device_limit у пользователей,
+    # которые сейчас привязаны к этому тарифу.
+    #
+    # Иначе user.device_limit может остаться старым,
+    # что приведёт к расхождениям в проверках и отображении.
+    #
+    if field_name == "device_limit":
+        await session.execute(
+            update(User)
+            .where(
+                User.current_tariff_id == tariff_id,
+                User.is_deleted == False,
+            )
+            .values(device_limit=new_value)
+        )
+        await session.flush()
+
+        logger.info(
+            "Synced user.device_limit for tariff %s: %s -> %s",
+            tariff_id,
+            old_value,
+            new_value,
+        )
 
     await AuditService.log_action(
         session,

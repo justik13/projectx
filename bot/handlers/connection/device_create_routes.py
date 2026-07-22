@@ -21,6 +21,7 @@ from services.device_service import (
     DeviceLimitExceeded,
     DeviceService,
     InvalidConfig,
+    NoActiveSubscription,
     ServerUnavailable,
 )
 from services.maintenance_service import MaintenanceService
@@ -53,7 +54,6 @@ async def start_add_device(
         user_id,
     ):
         await callback.answer()
-
         await _render_maintenance(
             callback.message,
             session,
@@ -171,6 +171,7 @@ async def select_server(
         return
 
     server_id = int(callback.data.split(":")[1])
+
     server = await get_server_by_id(session, server_id)
 
     if not server:
@@ -311,6 +312,16 @@ async def enter_device_name(
                 server_id,
                 device_name,
             )
+
+        except NoActiveSubscription:
+            await render_hub(
+                message.bot,
+                message.chat.id,
+                texts.ERROR_NO_SUBSCRIPTION,
+                get_back_button("back_to_connections"),
+            )
+            await state.clear()
+            return
 
         except DailyLimitExceeded:
             await render_hub(

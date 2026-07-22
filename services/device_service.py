@@ -43,6 +43,7 @@ _server_locks: dict[int, asyncio.Lock] = {}
 def _get_server_lock(server_id: int) -> asyncio.Lock:
     if server_id not in _server_locks:
         _server_locks[server_id] = asyncio.Lock()
+
     return _server_locks[server_id]
 
 
@@ -72,8 +73,10 @@ async def _queue_failed_rollback_deletion(
                 last_attempt_at=now_utc(),
                 last_error=reason,
             )
+
             session.add(pending)
             await session.flush()
+
     except Exception as e:
         logger.error(
             "Failed to queue rollback pending deletion: %s",
@@ -97,6 +100,7 @@ async def _get_redis() -> aioredis.Redis:
 
     if _redis_client is None:
         settings = get_settings()
+
         _redis_client = aioredis.from_url(
             settings.REDIS_URL,
             decode_responses=True,
@@ -136,6 +140,7 @@ _user_locks: dict[int, asyncio.Lock] = {}
 def _get_user_lock(user_id: int) -> asyncio.Lock:
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
+
     return _user_locks[user_id]
 
 
@@ -145,6 +150,7 @@ def _is_same_day_msk(
 ) -> bool:
     if stored_date is None:
         return False
+
     return stored_date == now_msk_date
 
 
@@ -155,7 +161,9 @@ async def _get_server_profiles_count(
     stmt = select(func.count(VPNProfile.id)).where(
         VPNProfile.server_id == server_id,
     )
+
     result = await session.execute(stmt)
+
     return result.scalar_one() or 0
 
 
@@ -211,6 +219,7 @@ class DeviceService:
         try:
             try:
                 redis = await _get_redis()
+
                 lock_key = f"lock:create_device:server:{server.id}"
 
                 #
@@ -223,6 +232,7 @@ class DeviceService:
                     timeout=60,
                     blocking_timeout=10,
                 )
+
                 acquired = await redis_lock.acquire()
                 using_redis = True
 
@@ -232,6 +242,7 @@ class DeviceService:
                     "falling back to local lock: %s",
                     e,
                 )
+
                 local_lock = _get_server_lock(server.id)
                 await local_lock.acquire()
                 acquired = True
@@ -305,6 +316,7 @@ class DeviceService:
                     .where(User.telegram_id == user.telegram_id)
                     .with_for_update()
                 )
+
                 user = result.scalar_one_or_none()
 
                 if not user:
@@ -645,6 +657,7 @@ class DeviceService:
     async def delete_device(
         session: AsyncSession,
         profile: VPNProfile,
+        actor_id: int | None = None,
     ) -> bool:
         server = await get_server_by_id(
             session,
@@ -664,12 +677,14 @@ class DeviceService:
                 return True
             except Exception as e:
                 await session.rollback()
+
                 logger.error(
                     "delete_device: failed to delete profile %s "
                     "from DB: %s",
                     profile.id,
                     e,
                 )
+
                 return False
 
         client = AmneziaClient(
@@ -704,6 +719,7 @@ class DeviceService:
                     last_attempt_at=now_utc(),
                     last_error="API delete_user returned False",
                 )
+
                 session.add(pending)
 
         try:
@@ -713,7 +729,7 @@ class DeviceService:
                 try:
                     await AuditService.log_action(
                         session,
-                        admin_id=profile.user_id,
+                        admin_id=actor_id or profile.user_id,
                         action="DEVICE_DELETED",
                         target_type="VPNProfile",
                         target_id=profile.id,
@@ -732,9 +748,11 @@ class DeviceService:
 
         except Exception as e:
             await session.rollback()
+
             logger.error(
                 "delete_device: DB error: %s",
                 e,
                 exc_info=True,
             )
+
             return False

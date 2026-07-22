@@ -32,6 +32,7 @@ async def request_delete_device(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
+
     profile = await get_profile_by_id(session, profile_id)
 
     if not profile or not db_user or profile.user_id != db_user.id:
@@ -61,6 +62,7 @@ async def cancel_delete_device(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
+
     profile = await get_profile_by_id(session, profile_id)
 
     if not profile or not db_user or profile.user_id != db_user.id:
@@ -115,7 +117,17 @@ async def confirm_delete_device(
             )
             return
 
-        if not await DeviceService.delete_device(session, profile):
+        #
+        # actor_id нужен для корректного аудита.
+        #
+        # Здесь удаление выполняет сам пользователь,
+        # поэтому actor_id = callback.from_user.id.
+        #
+        if not await DeviceService.delete_device(
+            session,
+            profile,
+            actor_id=callback.from_user.id,
+        ):
             await callback.answer(
                 texts.ERROR_SERVER_UNAVAILABLE_GENERIC,
                 show_alert=True,

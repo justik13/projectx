@@ -75,6 +75,25 @@ async def pay_sbp(
     try:
         await callback.answer("⏳ Создаю платеж...")
 
+        #
+        # Серверная защита:
+        # если Platega не настроена, SBP-платёж создавать нельзя.
+        #
+        settings = get_settings()
+
+        if (
+            not settings.PLATEGA_MERCHANT_ID
+            or not settings.PLATEGA_SECRET
+        ):
+            await render_hub(
+                callback.bot,
+                callback.message.chat.id,
+                "⚠️ Оплата через СБП временно недоступна.\n"
+                "Попробуйте другой способ оплаты или напишите в поддержку.",
+                get_back_button(back_callback),
+            )
+            return
+
         tariff = await get_tariff_by_id(session, tariff_id)
 
         if not tariff:
@@ -162,6 +181,7 @@ async def pay_sbp(
 
     except Exception as e:
         logger.error(f"pay_sbp error: {e}", exc_info=True)
+
         await callback.answer(
             "❌ Ошибка при создании платежа",
             show_alert=True,
@@ -286,14 +306,17 @@ async def check_payment_status(
         )
 
         builder = InlineKeyboardBuilder()
+
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
+
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
+
         builder.adjust(1, 1)
 
         await render_hub(
@@ -308,14 +331,17 @@ async def check_payment_status(
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
 
         builder = InlineKeyboardBuilder()
+
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
+
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
+
         builder.adjust(1, 1)
 
         await render_hub(

@@ -38,8 +38,10 @@ from services.workers import (
     stop_background_workers,
     shutdown_event,
 )
+from services.workers.heartbeat import set_bot_ref
 from bot.handlers.webhook import setup_webhook_routes
 from bot.handlers.admin.broadcast import resume_pending_broadcasts
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +57,7 @@ for handler in root_logger.handlers:
 
 logger = logging.getLogger(__name__)
 
+
 #
 # Анти-спам кэш для глобальных error-алертов.
 #
@@ -65,6 +68,7 @@ _error_alert_cache: TTLCache[str, bool] = TTLCache(
     maxsize=10000,
     ttl=300.0,
 )
+
 
 _SECRET_PATTERNS = [
     (
@@ -128,7 +132,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     from bot.middlewares.correlation import get_current_request_id
 
     request_id = get_current_request_id()
-
     exception = event.exception
     error_type = type(exception).__name__
 
@@ -138,7 +141,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             exception,
             exception.__traceback__,
         )
-
         tb_text = "".join(tb_lines)
         tb_sanitized = _sanitize_text(tb_text)
 
@@ -151,7 +153,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             error_type,
             tb_sanitized,
         )
-
     except Exception:
         logger.critical(
             "[%s] Unhandled exception: %s",
@@ -160,7 +161,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         )
 
     state = kwargs.get("state")
-
     if state:
         try:
             await state.clear()
@@ -171,7 +171,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         settings = get_settings()
 
         error_type_safe = html.escape(error_type)
-
         error_short = html.escape(
             _sanitize_short(str(exception), 200)
         )
@@ -217,19 +216,16 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
                 texts.ERROR_TECHNICAL_ALERT,
                 show_alert=True,
             )
-
         elif event.update.message:
             await event.update.message.answer(
                 texts.ERROR_TECHNICAL_MESSAGE,
                 parse_mode="HTML",
             )
-
         elif getattr(event.update, "pre_checkout_query", None):
             await event.update.pre_checkout_query.answer(
                 ok=False,
                 error_message="Техническая ошибка. Попробуйте позже.",
             )
-
     except Exception:
         pass
 
@@ -326,7 +322,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
 async def start_webhook_server(port: int):
     app = web.Application()
-
     setup_webhook_routes(app)
 
     runner = web.AppRunner(app)
@@ -394,6 +389,18 @@ async def main():
 
         bot, dp = await setup_bot()
 
+        #
+        # ВАЖНО:
+        #
+        # bot_ref должен быть доступен ДО старта webhook-сервера
+        # и ДО resume_pending_broadcasts.
+        #
+        # Иначе ранние платёжные callback'и или возобновление рассылки
+        # могут не отправить алерты/уведомления, потому что get_bot_ref()
+        # вернёт None.
+        #
+        set_bot_ref(bot)
+
         webhook_runner = None
 
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
@@ -430,20 +437,16 @@ async def main():
 
         if shutdown_event.is_set():
             logger.info("Shutdown requested, stopping polling...")
-
             await dp.stop_polling()
 
             polling_task.cancel()
-
             try:
                 await polling_task
             except asyncio.CancelledError:
                 pass
-
         else:
             for task in done:
                 exc = task.exception() if not task.cancelled() else None
-
                 if exc:
                     logger.critical(
                         "Fatal error in main task: %s",

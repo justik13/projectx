@@ -13,7 +13,6 @@ from bot.keyboards.admin.users import (
 )
 from database.repositories.profiles_repo import get_profile_by_id
 from database.repositories.servers_repo import get_server_by_id
-from services.audit_service import AuditService
 from services.device_service import DeviceService
 from utils.admin import is_admin
 from utils.telegram import safe
@@ -173,9 +172,20 @@ async def admin_delete_device_apply(
 
         device_name = profile.device_name
 
+        #
+        # actor_id нужен для корректного аудита.
+        #
+        # Здесь удаление выполняет админ,
+        # поэтому actor_id = callback.from_user.id.
+        #
+        # Дополнительный ручной AuditService.log_action здесь не нужен,
+        # потому что DeviceService.delete_device уже пишет аудит
+        # DEVICE_DELETED с правильным actor_id.
+        #
         success = await DeviceService.delete_device(
             session,
             profile,
+            actor_id=callback.from_user.id,
         )
 
         if not success:
@@ -185,15 +195,6 @@ async def admin_delete_device_apply(
                 show_alert=True,
             )
             return
-
-        await AuditService.log_action(
-            session,
-            callback.from_user.id,
-            "DELETE_DEVICE",
-            "Profile",
-            profile_id,
-            f"user={telegram_id}, device={device_name}",
-        )
 
         text = texts.ADMIN_DELETE_DEVICE_SUCCESS.format(
             telegram_id=telegram_id,
@@ -218,6 +219,7 @@ async def admin_delete_device_apply(
             f"admin_delete_device_apply error: {e}",
             exc_info=True,
         )
+
         await session.rollback()
 
         await callback.answer(

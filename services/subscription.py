@@ -65,7 +65,6 @@ class SubscriptionService:
             return False
 
         ref_user = await get_user_by_telegram_id(session, ref_id)
-
         if not ref_user:
             logger.warning(
                 "Referral: referrer %s not found in DB",
@@ -119,20 +118,16 @@ class SubscriptionService:
                     telegram_id,
                     ref_id,
                 )
-
                 if is_valid:
                     user.referred_by = ref_id
                     await session.flush()
-
                     invalidate_user_cache(telegram_id)
-
                     logger.info(
                         "Late referral binding: user %s bound to "
                         "referrer %s",
                         telegram_id,
                         ref_id,
                     )
-
             return user
 
         referred_by = None
@@ -143,23 +138,27 @@ class SubscriptionService:
                 telegram_id,
                 ref_id,
             )
-
             if is_valid:
                 referred_by = ref_id
-
                 logger.info(
                     "New user %s referred by %s",
                     telegram_id,
                     ref_id,
                 )
 
-        return await create_user(
+        user = await create_user(
             session,
             telegram_id,
             username,
             first_name,
             referred_by,
         )
+
+        # Критично: иначе UserContextMiddleware может ещё 15 секунд
+        # отдавать None для только что созданного пользователя.
+        invalidate_user_cache(telegram_id)
+
+        return user
 
     @staticmethod
     async def extend_subscription(
@@ -170,7 +169,6 @@ class SubscriptionService:
         new_tariff_id: Optional[int] = None,
     ) -> Optional[User]:
         user = await get_user_by_telegram_id(session, telegram_id)
-
         if not user:
             return None
 
@@ -179,7 +177,6 @@ class SubscriptionService:
                 session,
                 user.id,
             )
-
             if profiles_count > new_device_limit:
                 raise ValueError(
                     f"Cannot downgrade: {profiles_count} devices > "
@@ -231,7 +228,6 @@ class SubscriptionService:
 
         if new_device_limit is not None:
             old_device_limit = user.device_limit
-
             user.device_limit = new_device_limit
 
             if new_device_limit > old_device_limit:
@@ -289,7 +285,6 @@ class SubscriptionService:
         )
 
         profiles = await get_user_profiles(session, user.id)
-
         if not profiles:
             return
 
@@ -341,50 +336,49 @@ class SubscriptionService:
                     return
 
                 server_ids = {p.server_id for p in profiles}
-
                 servers_map = {}
 
                 for sid in server_ids:
                     server = await get_server_by_id(session, sid)
-
-                    if server:
+                    if server and server.api_url and server.api_key:
                         servers_map[sid] = server
 
                 tasks = []
 
                 for profile in profiles:
                     server = servers_map.get(profile.server_id)
+                    if not server:
+                        continue
 
-                    if server and server.is_active:
-                        client = AmneziaClient(
-                            server.api_url,
-                            server.api_key,
-                        )
+                    client = AmneziaClient(
+                        server.api_url,
+                        server.api_key,
+                    )
 
-                        #
-                        # Для вечной подписки expires_ts=None.
-                        #
-                        # Если целевой статус active и expires_ts=None,
-                        # нужно явно очистить expiresAt на сервере.
-                        # Иначе API может сохранить старый срок истечения.
-                        #
-                        clear_expires_at = (
-                            target_status == "active"
-                            and expires_ts is None
-                        )
+                    #
+                    # Для вечной подписки expires_ts=None.
+                    #
+                    # Если целевой статус active и expires_ts=None,
+                    # нужно явно очистить expiresAt на сервере.
+                    # Иначе API может сохранить старый срок истечения.
+                    #
+                    clear_expires_at = (
+                        target_status == "active"
+                        and expires_ts is None
+                    )
 
-                        tasks.append(
-                            client.update_client(
-                                client_id=profile.peer_id,
-                                expires_at=(
-                                    expires_ts
-                                    if target_status == "active"
-                                    else None
-                                ),
-                                status=target_status,
-                                clear_expires_at=clear_expires_at,
-                            )
+                    tasks.append(
+                        client.update_client(
+                            client_id=profile.peer_id,
+                            expires_at=(
+                                expires_ts
+                                if target_status == "active"
+                                else None
+                            ),
+                            status=target_status,
+                            clear_expires_at=clear_expires_at,
                         )
+                    )
 
                 if tasks:
                     results = await asyncio.gather(
@@ -429,5 +423,4 @@ class SubscriptionService:
             return None
 
         expires_ts = int(user.subscription_end.timestamp())
-
         return expires_ts

@@ -9,11 +9,11 @@ from database.connection import session_scope
 from database.models import (
     BroadcastProgress,
     PendingAPIDeletion,
+    Server,
     User,
     VPNProfile,
 )
 from database.repositories.audit_repo import clear_audit_logs
-from database.repositories.servers_repo import get_active_servers
 from services.amnezia_client import AmneziaClient
 from services.profile_deletion_service import ProfileDeletionService
 from utils.datetime_helpers import now_utc
@@ -23,18 +23,26 @@ logger = logging.getLogger("BackgroundWorker")
 MAX_PENDING_ATTEMPTS = 10
 PENDING_RETRY_INTERVAL = 3600
 
+#
 # Короткая стартовая задержка вместо 10 минут.
+#
 CLEANUP_START_DELAY = 60.0
 
+#
 # Основной цикл очистки запускаем чаще, чтобы grace-удаление
 # и pending API deletions обрабатывались своевременно.
+#
 CLEANUP_LOOP_INTERVAL = 900.0
 
+#
 # Grace-период после истечения подписки.
 # Через 48 часов устройства удаляются полностью.
+#
 GRACE_PERIOD_HOURS = 48
 
+#
 # Старые broadcast/audit логи чистим не чаще раза в сутки.
+#
 OLD_RECORDS_INTERVAL = 86400.0
 
 _last_old_cleanup: float = 0.0
@@ -58,6 +66,7 @@ async def cleanup_dangling_peers_loop(shutdown_event: asyncio.Event):
             await _process_pending_deletions()
 
             now = time.monotonic()
+
             if now - _last_old_cleanup > OLD_RECORDS_INTERVAL:
                 await _cleanup_old_records()
                 _last_old_cleanup = now
@@ -65,6 +74,7 @@ async def cleanup_dangling_peers_loop(shutdown_event: asyncio.Event):
         except asyncio.CancelledError:
             logger.info("Cleanup worker cancelled")
             break
+
         except Exception as e:
             logger.error(
                 "Критическая ошибка в цикле очистки: %s",
@@ -113,6 +123,7 @@ async def _cleanup_expired_profiles_grace():
             .order_by(User.subscription_end.asc())
             .limit(50)
         )
+
         result = await session.execute(stmt)
         user_ids = [row[0] for row in result.all()]
 
@@ -130,6 +141,7 @@ async def _cleanup_expired_profiles_grace():
                     .where(User.id == user_id)
                     .with_for_update()
                 )
+
                 user_result = await session.execute(user_stmt)
                 user = user_result.scalar_one_or_none()
 
@@ -142,18 +154,23 @@ async def _cleanup_expired_profiles_grace():
                 if user.subscription_end is None:
                     continue
 
+                #
                 # Вечная подписка.
+                #
                 if user.subscription_end.year >= 2100:
                     continue
 
+                #
                 # Если пользователь уже продлил подписку,
                 # ничего не удаляем.
+                #
                 if user.subscription_end >= threshold:
                     continue
 
                 profiles_stmt = select(VPNProfile).where(
                     VPNProfile.user_id == user.id,
                 )
+
                 profiles_result = await session.execute(profiles_stmt)
                 profiles = list(profiles_result.scalars().all())
 
@@ -210,6 +227,14 @@ async def _queue_zombie_deletion(
     - лимит 10 попыток;
     - алерт админам после исчерпания попыток.
     """
+    if not server_info.get("api_url") or not server_info.get("api_key"):
+        logger.error(
+            "Cannot queue zombie deletion: missing API URL or key "
+            "for server %s",
+            server_info.get("name"),
+        )
+        return
+
     try:
         async with session_scope() as session:
             pending = PendingAPIDeletion(
@@ -223,6 +248,7 @@ async def _queue_zombie_deletion(
                 last_attempt_at=now_utc(),
                 last_error=error_text,
             )
+
             session.add(pending)
             await session.flush()
 
@@ -244,11 +270,20 @@ async def _queue_zombie_deletion(
 
 
 async def _cleanup_dangling_peers():
+    """
+    Удаляет зомби-пиров, которых нет в БД, но они есть на сервере.
+
+    Важно:
+    - обрабатываем все серверы, а не только активные;
+    - если сервер выключен админом, зомби всё равно лучше чистить;
+    - если API недоступен, зомби ставится в pending_api_deletions.
+    """
     servers_data = []
     db_peer_ids = set()
 
     async with session_scope() as session:
-        servers = await get_active_servers(session)
+        servers_result = await session.execute(select(Server))
+        servers = servers_result.scalars().all()
 
         result = await session.execute(select(VPNProfile.peer_id))
         db_peer_ids = {row[0] for row in result.all() if row[0]}
@@ -261,6 +296,7 @@ async def _cleanup_dangling_peers():
                 "id": s.id,
             }
             for s in servers
+            if s.api_url and s.api_key
         ]
 
     if not servers_data:
@@ -332,8 +368,10 @@ async def _cleanup_dangling_peers():
             if peer_exists_in_db:
                 continue
 
+            #
             # Если по этому пиру уже есть pending-запись,
             # не создаём дубликат. Его обработает _process_pending_deletions.
+            #
             try:
                 async with session_scope() as session:
                     existing_pending = await session.scalar(
@@ -368,6 +406,7 @@ async def _cleanup_dangling_peers():
                     server_info["api_url"],
                     server_info["api_key"],
                 )
+
                 deleted = await client.delete_user(client_id=client_id)
 
             except Exception as e:
@@ -409,6 +448,7 @@ async def _process_pending_deletions():
             .order_by(PendingAPIDeletion.created_at)
             .limit(200)
         )
+
         result = await session.execute(stmt)
         pending_deletions = result.scalars().all()
 
@@ -599,6 +639,7 @@ async def _cleanup_old_records():
             )
             .where(BroadcastProgress.updated_at < threshold_broadcasts)
         )
+
         result_broadcasts = await session.execute(stmt_broadcasts)
         broadcasts_deleted = result_broadcasts.rowcount
 

@@ -61,17 +61,19 @@ class BroadcastRateLimiter:
             async with self._lock:
                 now = time.monotonic()
                 elapsed = now - self.last_refill
+
                 self.tokens = min(
                     self.rate,
                     self.tokens + elapsed * self.rate,
                 )
+
                 self.last_refill = now
 
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
 
-                await asyncio.sleep(1.0 / self.rate)
+            await asyncio.sleep(1.0 / self.rate)
 
 
 _broadcast_limiter = BroadcastRateLimiter(rate=20.0)
@@ -80,6 +82,7 @@ _broadcast_limiter = BroadcastRateLimiter(rate=20.0)
 def _get_stop_event(admin_id: int) -> asyncio.Event:
     if admin_id not in _broadcast_stop_events:
         _broadcast_stop_events[admin_id] = asyncio.Event()
+
     return _broadcast_stop_events[admin_id]
 
 
@@ -186,6 +189,7 @@ async def process_broadcast_message(
             media_id=media_id,
             content_type=content_type,
         )
+
         await state.set_state(AdminStates.confirming_broadcast)
 
     except Exception as e:
@@ -287,6 +291,7 @@ async def _dispatch_message(
                 f"HTML parse failed for user {uid}, "
                 f"falling back to plain text"
             )
+
             await _send_plain(
                 bot,
                 uid,
@@ -327,12 +332,15 @@ async def _get_next_batch(
 
     if audience == "active":
         current_time = now_utc()
+
         stmt = stmt.where(
             User.subscription_end > current_time,
         )
 
     stmt = stmt.order_by(User.id).limit(limit)
+
     result = await session.execute(stmt)
+
     return [(row[0], row[1]) for row in result.all()]
 
 
@@ -342,6 +350,7 @@ async def _send_broadcast_to_users_with_resume(
 ):
     stop_event = None
     admin_id = None
+
     broadcast_text = None
     media_id = None
     content_type = None
@@ -349,6 +358,19 @@ async def _send_broadcast_to_users_with_resume(
     last_id = None
 
     final_progress = None
+
+    #
+    # ВАЖНО:
+    #
+    # owns_progress должен становиться True сразу после того,
+    # как мы прочитали progress и узнали admin_id.
+    #
+    # Иначе возможен сценарий:
+    # - resume добавил admin_id в _broadcast_in_progress;
+    # - задача увидела progress.status != "in_progress";
+    # - задача вышла без cleanup;
+    # - админ навсегда остался в _broadcast_in_progress.
+    #
     owns_progress = False
     should_finalize = False
 
@@ -362,6 +384,11 @@ async def _send_broadcast_to_users_with_resume(
             admin_id = progress.admin_id
 
             #
+            # С этого момента задача отвечает за cleanup admin_id.
+            #
+            owns_progress = True
+
+            #
             # Если рассылка уже находится в статусе stopping,
             # например админ нажал stop или бот перезапустился
             # во время остановки, завершаем её как stopped.
@@ -369,14 +396,13 @@ async def _send_broadcast_to_users_with_resume(
             if progress.status == "stopping":
                 progress.status = "stopped"
                 await session.commit()
+
                 final_progress = progress
-                owns_progress = True
                 return
 
             if progress.status != "in_progress":
                 return
 
-            owns_progress = True
             should_finalize = True
 
             stop_event = _get_stop_event(admin_id)
@@ -394,6 +420,7 @@ async def _send_broadcast_to_users_with_resume(
             )
 
         blocked_user_ids = []
+
         local_success = 0
         local_fail = 0
 
@@ -417,6 +444,7 @@ async def _send_broadcast_to_users_with_resume(
 
                     try:
                         await _broadcast_limiter.acquire()
+
                         await _dispatch_message(
                             bot,
                             uid,
@@ -424,6 +452,7 @@ async def _send_broadcast_to_users_with_resume(
                             media_id,
                             content_type,
                         )
+
                         local_success += 1
 
                     except TelegramRetryAfter as e:
@@ -431,6 +460,7 @@ async def _send_broadcast_to_users_with_resume(
 
                         try:
                             await _broadcast_limiter.acquire()
+
                             await _dispatch_message(
                                 bot,
                                 uid,
@@ -438,7 +468,9 @@ async def _send_broadcast_to_users_with_resume(
                                 media_id,
                                 content_type,
                             )
+
                             local_success += 1
+
                         except Exception:
                             local_fail += 1
 
@@ -452,7 +484,7 @@ async def _send_broadcast_to_users_with_resume(
                         )
                         local_fail += 1
 
-                    last_id = internal_id
+                last_id = internal_id
 
                 progress = await session.get(
                     BroadcastProgress,
@@ -486,6 +518,7 @@ async def _send_broadcast_to_users_with_resume(
                         progress.status = "completed"
 
                     await session.commit()
+
                     final_progress = progress
 
         if blocked_user_ids:
@@ -571,6 +604,7 @@ async def resume_pending_broadcasts(bot):
                     BroadcastProgress.id.desc(),
                 )
             )
+
             result = await session.execute(stmt)
             pending = result.scalars().all()
 
@@ -609,6 +643,7 @@ async def resume_pending_broadcasts(bot):
             )
 
             _broadcast_in_progress.add(admin_id)
+
             _start_background_task(
                 _send_broadcast_to_users_with_resume(bot, progress_id)
             )
@@ -660,6 +695,7 @@ async def _start_broadcast_process(
 
     if audience == "active":
         current_time = now_utc()
+
         count_stmt = count_stmt.where(
             User.subscription_end > current_time,
         )
@@ -688,9 +724,11 @@ async def _start_broadcast_process(
             label="Всего" if audience == "all" else "Активных",
             status="in_progress",
         )
+
         sess.add(progress)
         await sess.commit()
         await sess.refresh(progress)
+
         progress_id = progress.id
 
     _broadcast_in_progress.add(admin_id)

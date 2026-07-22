@@ -22,10 +22,14 @@ MAX_RETRY_COUNT = 4
 BACKOFF_BASE_INTERVAL = NOTIFICATION_INTERVAL
 NOTIFICATION_BATCH_SIZE = 20
 
+#
 # Короткая стартовая задержка вместо 30 минут.
+#
 NOTIFICATION_START_DELAY = 60.0
 
+#
 # Grace-период после истечения подписки.
+#
 GRACE_PERIOD_HOURS = 48
 
 
@@ -41,10 +45,12 @@ class NotificationRateLimiter:
             async with self._lock:
                 now = time.monotonic()
                 elapsed = now - self.last_refill
+
                 self.tokens = min(
                     self.rate,
                     self.tokens + elapsed * self.rate,
                 )
+
                 self.last_refill = now
 
                 if self.tokens >= 1.0:
@@ -52,7 +58,8 @@ class NotificationRateLimiter:
                     return
 
                 wait_time = (1.0 - self.tokens) / self.rate
-                await asyncio.sleep(wait_time)
+
+            await asyncio.sleep(wait_time)
 
 
 _notification_limiter = NotificationRateLimiter(rate=25.0)
@@ -95,15 +102,10 @@ async def subscription_notifications_loop(
 
     while not shutdown_event.is_set():
         try:
-            try:
-                await asyncio.wait_for(
-                    shutdown_event.wait(),
-                    timeout=NOTIFICATION_INTERVAL,
-                )
-                break
-            except asyncio.TimeoutError:
-                pass
-
+            #
+            # Сначала выполняем проверки уведомлений,
+            # только потом ждём интервал.
+            #
             current_time = now_utc()
 
             await _send_pre_expiry_notifications(bot, current_time)
@@ -112,6 +114,7 @@ async def subscription_notifications_loop(
         except asyncio.CancelledError:
             logger.info("Notifications worker cancelled")
             break
+
         except Exception as e:
             logger.error(
                 "Критическая ошибка в цикле уведомлений: %s",
@@ -123,6 +126,16 @@ async def subscription_notifications_loop(
                 break
 
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
+            continue
+
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(),
+                timeout=NOTIFICATION_INTERVAL,
+            )
+            break
+        except asyncio.TimeoutError:
+            continue
 
     logger.info("Notifications worker stopped gracefully")
 
@@ -163,6 +176,7 @@ async def _send_pre_expiry_notifications(
             .order_by(User.subscription_end.asc())
             .limit(500)
         )
+
         result = await session.execute(stmt)
         user_ids = [row[0] for row in result.all()]
 
@@ -181,6 +195,7 @@ async def _send_pre_expiry_notifications(
             users_result = await session.execute(
                 select(User).where(User.id.in_(batch_ids))
             )
+
             batch_users = list(users_result.scalars().all())
 
             for user in batch_users:
@@ -190,19 +205,25 @@ async def _send_pre_expiry_notifications(
                 if not user.subscription_end:
                     continue
 
+                #
                 # Повторная проверка актуальности подписки.
+                #
                 if user.subscription_end <= current_time:
                     continue
 
+                #
                 # Если подписку продлили больше чем на 3 дня,
                 # уведомление уже не нужно.
+                #
                 if user.subscription_end > current_time + timedelta(days=3):
                     continue
 
                 retry_count = user.notification_retry_count or 0
 
+                #
                 # После исчерпания попыток помечаем уведомление как отправленное,
                 # чтобы не выбирать пользователя бесконечно.
+                #
                 if retry_count >= MAX_RETRY_COUNT:
                     user.notified_3d = True
                     user.notified_1d = True
@@ -212,6 +233,7 @@ async def _send_pre_expiry_notifications(
 
                 if retry_count > 0 and user.last_notification_attempt:
                     backoff_delay = _get_backoff_delay(retry_count - 1)
+
                     time_since_last = (
                         current_time - user.last_notification_attempt
                     ).total_seconds()
@@ -265,14 +287,17 @@ async def _send_pre_expiry_notifications(
                     await _notification_limiter.acquire()
 
                     builder = InlineKeyboardBuilder()
+
                     builder.button(
                         text="💳 Продлить доступ",
                         callback_data="menu_subscription",
                     )
+
                     builder.button(
                         text="✅ Прочитано (убрать)",
                         callback_data="dismiss_notification",
                     )
+
                     builder.adjust(1)
 
                     await bot.send_message(
@@ -289,9 +314,11 @@ async def _send_pre_expiry_notifications(
                         user.notified_2h = True
                         user.notified_1d = True
                         user.notified_3d = True
+
                     elif notification_type == "1d":
                         user.notified_1d = True
                         user.notified_3d = True
+
                     elif notification_type == "3d":
                         user.notified_3d = True
 
@@ -355,6 +382,7 @@ async def _send_post_expiry_notifications(
             .order_by(User.subscription_end.asc())
             .limit(500)
         )
+
         result = await session.execute(stmt)
         user_ids = [row[0] for row in result.all()]
 
@@ -373,14 +401,17 @@ async def _send_post_expiry_notifications(
             users_result = await session.execute(
                 select(User).where(User.id.in_(batch_ids))
             )
+
             batch_users = list(users_result.scalars().all())
 
             for user in batch_users:
                 if not user.subscription_end:
                     continue
 
+                #
                 # Если пользователь продлил подписку,
                 # уведомление об истечении больше не нужно.
+                #
                 if user.subscription_end >= current_time:
                     continue
 
@@ -391,15 +422,19 @@ async def _send_post_expiry_notifications(
                     hours=GRACE_PERIOD_HOURS,
                 )
 
+                #
                 # Если 48 часов уже прошло, уведомления больше не отправляем.
                 # Удалением занимается cleanup worker.
+                #
                 if current_time >= deletion_time:
                     continue
 
                 retry_count = user.notification_retry_count or 0
 
+                #
                 # После исчерпания попыток помечаем уведомление как отправленное,
                 # чтобы не выбирать пользователя бесконечно.
+                #
                 if retry_count >= MAX_RETRY_COUNT:
                     user.notified_expired = True
                     user.notified_grace_12h = True
@@ -408,6 +443,7 @@ async def _send_post_expiry_notifications(
 
                 if retry_count > 0 and user.last_notification_attempt:
                     backoff_delay = _get_backoff_delay(retry_count - 1)
+
                     time_since_last = (
                         current_time - user.last_notification_attempt
                     ).total_seconds()
@@ -454,18 +490,22 @@ async def _send_post_expiry_notifications(
                     await _notification_limiter.acquire()
 
                     builder = InlineKeyboardBuilder()
+
                     builder.button(
                         text="🚀 Купить доступ",
                         callback_data="menu_buy",
                     )
+
                     builder.button(
                         text="💬 Поддержка",
                         callback_data="menu_support",
                     )
+
                     builder.button(
                         text="✅ Прочитано (убрать)",
                         callback_data="dismiss_notification",
                     )
+
                     builder.adjust(1)
 
                     await bot.send_message(
@@ -481,6 +521,7 @@ async def _send_post_expiry_notifications(
                     if notification_type == "grace_12h":
                         user.notified_grace_12h = True
                         user.notified_expired = True
+
                     elif notification_type == "expired":
                         user.notified_expired = True
 

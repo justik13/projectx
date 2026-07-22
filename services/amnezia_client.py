@@ -14,7 +14,9 @@ from bot.constants import (
 )
 from utils.security import SafeResolver, allow_local_networks
 
+
 logger = logging.getLogger(__name__)
+
 
 _http_session: Optional[aiohttp.ClientSession] = None
 
@@ -27,9 +29,11 @@ class CircuitBreaker:
     ):
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
+
         self.failure_count = 0
         self.state = "CLOSED"
         self.last_failure_time = 0.0
+
         self._lock = asyncio.Lock()
 
     async def is_available(self) -> bool:
@@ -118,8 +122,10 @@ class TokenBucketRateLimiter:
     def __init__(self, rate: float = 3.0, burst: int = 5):
         self.rate = rate
         self.burst = burst
+
         self.tokens = float(burst)
         self.last_refill = time.monotonic()
+
         self._lock = asyncio.Lock()
 
     async def acquire(self, timeout: float = 30.0) -> bool:
@@ -142,7 +148,6 @@ class TokenBucketRateLimiter:
                     return True
 
             remaining = deadline - time.monotonic()
-
             if remaining <= 0:
                 return False
 
@@ -167,11 +172,14 @@ def _get_rate_limiter(api_url: str) -> TokenBucketRateLimiter:
 class AmneziaClientCreateResponse(BaseModel):
     id: str
     config: str
+    protocol: str = AMNEZIA_PROTOCOL
 
 
 class AmneziaClientTraffic(BaseModel):
     totalDownload: int = 0
     totalUpload: int = 0
+    received: int = 0
+    sent: int = 0
 
 
 class AmneziaClientListItem(BaseModel):
@@ -179,9 +187,11 @@ class AmneziaClientListItem(BaseModel):
     username: str = ""
     peer_name: str = ""
     status: str = "active"
+
     traffics: AmneziaClientTraffic = Field(
         default_factory=AmneziaClientTraffic
     )
+
     lastHandshake: Optional[float] = None
     lastSeen: Optional[float] = None
     updatedAt: Optional[float] = None
@@ -198,6 +208,7 @@ class AmneziaClientListItem(BaseModel):
 class AmneziaServerInfo(BaseModel):
     name: str = ""
     protocols: List[str] = Field(default_factory=list)
+
     maxPeers: int = 0
     serverMaxPeers: int = 0
 
@@ -487,7 +498,6 @@ class AmneziaClient:
                     "Failed to parse create_user response: %s",
                     e,
                 )
-
                 return None
 
         return None
@@ -558,7 +568,6 @@ class AmneziaClient:
                     "Failed to parse get_server_info response: %s",
                     e,
                 )
-
                 return None
 
         return None
@@ -582,6 +591,27 @@ class AmneziaClient:
           они могут привести к неверному подсчёту слотов;
         - если API вернул сырые элементы, но ни один не распарсился,
           это считается ошибкой формата API, а не реальным нулём.
+
+        Поддерживаются разные форматы ответа:
+        1) {"items": [...]}
+        2) {"clients": [...]}
+        3) {"data": [...]}
+        4) [...]
+        5) вложенные peers:
+           [
+             {
+               "username": "...",
+               "peers": [ ... ]
+             }
+           ]
+        6) плоские клиенты:
+           [
+             {
+               "id": "...",
+               "username": "...",
+               "traffic": {...}
+             }
+           ]
         """
         all_clients: List[AmneziaClientListItem] = []
 
@@ -606,10 +636,33 @@ class AmneziaClient:
                     "Returning None instead of partial result.",
                     page_count,
                 )
-
                 return None
 
-            items_raw = result.get("items", [])
+            if isinstance(result, list):
+                items_raw = result
+            elif isinstance(result, dict):
+                items_raw = (
+                    result.get("items")
+                    or result.get("clients")
+                    or result.get("data")
+                    or []
+                )
+
+                if isinstance(items_raw, dict):
+                    items_raw = [items_raw]
+            else:
+                logger.error(
+                    "get_all_clients: unexpected API response type: %s",
+                    type(result).__name__,
+                )
+                return None
+
+            if not isinstance(items_raw, list):
+                logger.error(
+                    "get_all_clients: unexpected items type: %s",
+                    type(items_raw).__name__,
+                )
+                return None
 
             if not items_raw:
                 break
@@ -627,24 +680,13 @@ class AmneziaClient:
             # и некорректной синхронизации.
             #
             if items_raw and not page_clients:
-                suspicious = any(
-                    isinstance(item, dict)
-                    and (
-                        "peers" in item
-                        or "username" in item
-                        or "id" in item
-                    )
-                    for item in items_raw
+                logger.critical(
+                    "get_all_clients: API returned items, "
+                    "but none were parsed. "
+                    "Treating this as API format error "
+                    "instead of zero peers."
                 )
-
-                if suspicious:
-                    logger.critical(
-                        "get_all_clients: API returned items, "
-                        "but none were parsed. "
-                        "Treating this as API format error "
-                        "instead of zero peers."
-                    )
-                    return None
+                return None
 
             all_clients.extend(page_clients)
 
@@ -660,7 +702,6 @@ class AmneziaClient:
                 "cannot be safely fetched.",
                 MAX_SAFETY_PAGES * page_size,
             )
-
             return None
 
         logger.info(
@@ -681,45 +722,103 @@ class AmneziaClient:
             if not isinstance(item, dict):
                 continue
 
-            username = item.get("username", "")
-            peers = item.get("peers", [])
+            username = (
+                item.get("username")
+                or item.get("name")
+                or item.get("clientName")
+                or ""
+            )
 
-            if not isinstance(peers, list):
-                continue
+            peers = item.get("peers")
 
-            for peer in peers:
+            #
+            # Поддержка двух форматов:
+            #
+            # 1) item.peers = [...]
+            # 2) item сам является peer/client объектом
+            #
+            if isinstance(peers, list) and peers:
+                peer_items = peers
+            else:
+                peer_items = [item]
+
+            for peer in peer_items:
                 if not isinstance(peer, dict):
                     continue
 
-                peer_id = peer.get("id", "")
+                peer_id = (
+                    peer.get("id")
+                    or peer.get("clientId")
+                    or peer.get("peerId")
+                    or peer.get("publicKey")
+                )
 
                 if not peer_id:
                     continue
 
-                traffic_raw = peer.get("traffic", {})
+                traffic_raw = (
+                    peer.get("traffic")
+                    or peer.get("traffics")
+                    or item.get("traffic")
+                    or item.get("traffics")
+                    or {}
+                )
 
                 if isinstance(traffic_raw, dict):
+                    received = (
+                        traffic_raw.get("received")
+                        or traffic_raw.get("totalDownload")
+                        or 0
+                    )
+
+                    sent = (
+                        traffic_raw.get("sent")
+                        or traffic_raw.get("totalUpload")
+                        or 0
+                    )
+
                     traffic = AmneziaClientTraffic(
-                        totalDownload=(
-                            traffic_raw.get("received", 0) or 0
-                        ),
-                        totalUpload=(
-                            traffic_raw.get("sent", 0) or 0
-                        ),
+                        totalDownload=received,
+                        totalUpload=sent,
+                        received=received,
+                        sent=sent,
                     )
                 else:
                     traffic = AmneziaClientTraffic()
 
                 try:
                     client_item = AmneziaClientListItem(
-                        id=peer_id,
-                        username=username,
-                        peer_name=peer.get("name") or "",
-                        status=peer.get("status", "active"),
+                        id=str(peer_id),
+                        username=(
+                            peer.get("username")
+                            or item.get("username")
+                            or username
+                            or ""
+                        ),
+                        peer_name=(
+                            peer.get("name")
+                            or peer.get("peer_name")
+                            or item.get("name")
+                            or ""
+                        ),
+                        status=(
+                            peer.get("status")
+                            or item.get("status")
+                            or "active"
+                        ),
                         traffics=traffic,
-                        lastHandshake=peer.get("lastHandshake"),
-                        lastSeen=peer.get("lastSeen"),
-                        updatedAt=peer.get("updatedAt"),
+                        lastHandshake=(
+                            peer.get("lastHandshake")
+                            or item.get("lastHandshake")
+                        ),
+                        lastSeen=(
+                            peer.get("lastSeen")
+                            or item.get("lastSeen")
+                        ),
+                        updatedAt=(
+                            peer.get("updatedAt")
+                            or item.get("updatedAt")
+                        ),
                     )
 
                     clients.append(client_item)
@@ -730,7 +829,6 @@ class AmneziaClient:
                         e,
                         peer,
                     )
-
                     continue
 
         return clients

@@ -12,7 +12,6 @@ from bot.keyboards.admin.users import get_admin_user_card_keyboard
 from database.models import Tariff, User
 from database.repositories.profiles_repo import get_user_profiles
 from database.repositories.users_repo import get_user_referrals
-from services.payment_service.common import MANUAL_GRANT_ALLOWED_STATUSES
 from utils.datetime_helpers import is_expired, now_utc
 from utils.formatters import format_days_left, format_user_card_text
 from utils.telegram import render_hub, safe
@@ -20,6 +19,13 @@ from utils.telegram import render_hub, safe
 logger = logging.getLogger(__name__)
 
 USERS_PER_PAGE = 10
+
+MANUAL_GRANT_ALLOWED_STATUSES = {
+    "pending",
+    "cancelled",
+    "failed",
+    "requires_manual_review",
+}
 
 PAYMENT_STATUS_NAMES = {
     "pending": "⏳ Ожидает",
@@ -38,6 +44,7 @@ def _validate_positive_int(text: str | None) -> int | None:
     value = int(text.strip())
 
     MAX_DAYS = 36500
+
     if value < 1 or value > MAX_DAYS:
         return None
 
@@ -52,6 +59,19 @@ def _is_subscription_active(user: User) -> bool:
 
 
 def _format_time_left(subscription_end) -> str:
+    """
+    Форматирует остаток подписки для админки.
+
+    Важно:
+    - вечная подписка должна показываться как "∞ навсегда";
+    - нельзя показывать 27000 дней для даты 2100-01-01.
+    """
+    if not subscription_end:
+        return "—"
+
+    if subscription_end.year >= 2100:
+        return "∞ навсегда"
+
     current_time = now_utc()
     delta = subscription_end - current_time
 
@@ -68,6 +88,7 @@ def _format_time_left(subscription_end) -> str:
         return f"{days} дн. {hours} ч."
 
     minutes = (delta.seconds % 3600) // 60
+
     return f"{hours} ч. {minutes} мин."
 
 
@@ -117,6 +138,7 @@ async def _get_user_with_profiles(
     )
 
     result = await session.execute(stmt)
+
     return result.scalar_one_or_none()
 
 
@@ -187,6 +209,7 @@ async def _build_users_list_text_and_kb(
         text="🔍 Поиск по ID",
         callback_data="admin_users_search",
     )
+
     builder.button(
         text="← В админку",
         callback_data="admin_menu",
@@ -264,12 +287,12 @@ async def _show_user_card_edit(
     except TelegramBadRequest as e:
         logger.debug(f"_show_user_card_edit edit_text failed: {e}")
 
-        await render_hub(
-            message.bot,
-            message.chat.id,
-            rendered,
-            get_admin_user_card_keyboard(
-                user.telegram_id,
-                user.is_banned,
-            ),
-        )
+    await render_hub(
+        message.bot,
+        message.chat.id,
+        rendered,
+        get_admin_user_card_keyboard(
+            user.telegram_id,
+            user.is_banned,
+        ),
+    )

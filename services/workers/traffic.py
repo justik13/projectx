@@ -4,130 +4,70 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 
-from database.connection import session_scope
-from services.amnezia_client import AmneziaClient
-from database.models import VPNProfile, Server, User
 from bot.constants import (
+    SELF_HEALING_MAX_PER_CYCLE,
     TRAFFIC_SYNC_INTERVAL,
     WORKER_ERROR_SLEEP_INTERVAL,
-    SELF_HEALING_MAX_PER_CYCLE,
 )
-from utils.datetime_helpers import now_utc
 from config.settings import get_settings
+from database.connection import queue_post_commit_task, session_scope
+from database.models import Server, User, VPNProfile
+from services.amnezia_client import AmneziaClient
+from utils.datetime_helpers import now_utc
 
 logger = logging.getLogger("BackgroundWorker")
 
 BATCH_SIZE = 100
-
 TRAFFIC_QUOTA_BYTES = 1 * 1024 * 1024 * 1024 * 1024
 TRAFFIC_MAX_BACKOFF = 900
 
+#
 # Короткая стартовая задержка, чтобы после деплоя/рестарта worker
 # не ждал 15 минут до первой синхронизации.
+#
 WORKER_START_DELAY = 30.0
 
 _quota_alerted: set[int] = set()
 _consecutive_crashes: int = 0
 
+#
+# Храним ссылки на background tasks, чтобы asyncio не собрал их GC.
+#
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _start_background_task(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 async def traffic_sync_loop(shutdown_event: asyncio.Event):
     global _consecutive_crashes
 
+    #
     # Короткий initial delay вместо длительного ожидания первого цикла.
+    #
     try:
         await asyncio.wait_for(
             shutdown_event.wait(),
             timeout=WORKER_START_DELAY,
         )
-        logger.info("Traffic sync worker stopped during start delay (shutdown)")
+        logger.info(
+            "Traffic sync worker stopped during start delay (shutdown)"
+        )
         return
     except asyncio.TimeoutError:
         pass
 
     while not shutdown_event.is_set():
         try:
-            try:
-                await asyncio.wait_for(
-                    shutdown_event.wait(),
-                    timeout=TRAFFIC_SYNC_INTERVAL,
-                )
-                break
-            except asyncio.TimeoutError:
-                pass
-
-            servers = []
-
-            async with session_scope() as session:
-                stmt = select(
-                    Server.id,
-                    Server.api_url,
-                    Server.api_key,
-                    Server.name,
-                    Server.is_active,
-                )
-
-                result = await session.execute(stmt)
-
-                servers = [
-                    {
-                        "id": row[0],
-                        "api_url": row[1],
-                        "api_key": row[2],
-                        "name": row[3],
-                        "is_active": row[4],
-                    }
-                    for row in result.all()
-                ]
-
-            if not servers:
-                continue
-
-            async def _fetch_server_traffic(server_info):
-                client = AmneziaClient(
-                    server_info["api_url"],
-                    server_info["api_key"],
-                )
-
-                try:
-                    api_clients_list = await client.get_all_clients()
-
-                    if api_clients_list is None:
-                        return server_info["id"], None
-
-                    return server_info["id"], {
-                        c.id: c for c in api_clients_list
-                    }
-
-                except Exception as e:
-                    logger.error(
-                        "Ошибка трафика с %s: %s",
-                        server_info["name"],
-                        e,
-                    )
-
-                    return server_info["id"], None
-
-            tasks = [_fetch_server_traffic(s) for s in servers]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            api_data_by_server = {
-                r[0]: r[1]
-                for r in results
-                if not isinstance(r, Exception)
-                and r is not None
-                and r[1] is not None
-            }
-
-            for server_info in servers:
-                server_id = server_info["id"]
-
-                if server_id not in api_data_by_server:
-                    continue
-
-                api_clients = api_data_by_server[server_id]
-
-                await _process_server_traffic(server_info, api_clients)
-
+            #
+            # Сначала выполняем синхронизацию,
+            # только потом ждём интервал.
+            #
+            await _traffic_sync_once()
             _consecutive_crashes = 0
 
         except asyncio.CancelledError:
@@ -156,12 +96,102 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                 break
 
             await asyncio.sleep(backoff)
+            continue
+
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(),
+                timeout=TRAFFIC_SYNC_INTERVAL,
+            )
+            break
+        except asyncio.TimeoutError:
+            continue
 
     logger.info("Traffic sync worker stopped gracefully")
 
 
+async def _traffic_sync_once():
+    servers = []
+
+    async with session_scope() as session:
+        stmt = select(
+            Server.id,
+            Server.api_url,
+            Server.api_key,
+            Server.name,
+            Server.is_active,
+        )
+
+        result = await session.execute(stmt)
+
+        servers = [
+            {
+                "id": row[0],
+                "api_url": row[1],
+                "api_key": row[2],
+                "name": row[3],
+                "is_active": row[4],
+            }
+            for row in result.all()
+        ]
+
+    if not servers:
+        return
+
+    async def _fetch_server_traffic(server_info):
+        client = AmneziaClient(
+            server_info["api_url"],
+            server_info["api_key"],
+        )
+
+        try:
+            api_clients_list = await client.get_all_clients()
+
+            if api_clients_list is None:
+                return server_info["id"], None
+
+            return server_info["id"], {
+                c.id: c for c in api_clients_list
+            }
+
+        except Exception as e:
+            logger.error(
+                "Ошибка трафика с %s: %s",
+                server_info["name"],
+                e,
+            )
+            return server_info["id"], None
+
+    tasks = [_fetch_server_traffic(s) for s in servers]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    api_data_by_server = {
+        r[0]: r[1]
+        for r in results
+        if not isinstance(r, Exception)
+        and r is not None
+        and r[1] is not None
+    }
+
+    for server_info in servers:
+        server_id = server_info["id"]
+
+        if server_id not in api_data_by_server:
+            continue
+
+        api_clients = api_data_by_server[server_id]
+        await _process_server_traffic(server_info, api_clients)
+
+
 async def _process_server_traffic(server_info, api_clients):
     server_id = server_info["id"]
+
+    updates_data = {}
+    healing_tasks = []
+    reverse_healing_tasks = []
+    disable_db_ids = []
+
+    current_time = now_utc()
 
     async with session_scope() as session:
         stmt = (
@@ -178,129 +208,105 @@ async def _process_server_traffic(server_info, api_clients):
             )
             .join(User, VPNProfile.user_id == User.id)
             .where(VPNProfile.server_id == server_id)
-            .execution_options(yield_per=BATCH_SIZE)
         )
 
-        result = await session.stream(stmt)
+        result = await session.execute(stmt)
+        rows = result.all()
 
-        updates_data = {}
-        healing_tasks = []
-        reverse_healing_tasks = []
-        disable_db_ids = []
+        for (
+            p_id,
+            peer_id,
+            t_down,
+            t_up,
+            last_conn,
+            is_active,
+            is_banned,
+            tg_id,
+            sub_end,
+        ) in rows:
+            if peer_id not in api_clients:
+                continue
 
-        current_time = now_utc()
+            api_data = api_clients[peer_id]
 
-        async for row in result.partitions(size=BATCH_SIZE):
-            for (
-                p_id,
-                peer_id,
-                t_down,
-                t_up,
-                last_conn,
-                is_active,
-                is_banned,
-                tg_id,
-                sub_end,
-            ) in row:
-                if peer_id not in api_clients:
-                    continue
+            api_t_down = api_data.traffics.totalDownload
+            api_t_up = api_data.traffics.totalUpload
 
-                api_data = api_clients[peer_id]
+            new_t_down = (
+                api_t_down
+                if api_t_down is not None
+                else t_down
+            )
 
-                api_t_down = api_data.traffics.totalDownload
-                api_t_up = api_data.traffics.totalUpload
+            new_t_up = (
+                api_t_up
+                if api_t_up is not None
+                else t_up
+            )
 
-                new_t_down = api_t_down if api_t_down is not None else t_down
-                new_t_up = api_t_up if api_t_up is not None else t_up
+            last_conn_raw = (
+                api_data.lastHandshake
+                or api_data.lastSeen
+                or api_data.updatedAt
+            )
 
-                last_conn_raw = (
-                    api_data.lastHandshake
-                    or api_data.lastSeen
-                    or api_data.updatedAt
-                )
+            new_last_connected = last_conn
 
-                new_last_connected = last_conn
+            if last_conn_raw:
+                try:
+                    ts = int(float(str(last_conn_raw)))
 
-                if last_conn_raw:
-                    try:
-                        ts = int(float(str(last_conn_raw)))
+                    if ts > 1e12:
+                        ts = ts // 1000
 
-                        if ts > 1e12:
-                            ts = ts // 1000
+                    new_last_connected = datetime.fromtimestamp(
+                        ts,
+                        tz=timezone.utc,
+                    )
+                except (ValueError, TypeError, OverflowError):
+                    pass
 
-                        new_last_connected = datetime.fromtimestamp(
-                            ts,
-                            tz=timezone.utc,
-                        )
-                    except (ValueError, TypeError, OverflowError):
-                        pass
+            api_is_active = api_data.status == "active"
 
-                api_is_active = api_data.status == "active"
+            #
+            # Подписка невалидна, если:
+            # - subscription_end отсутствует;
+            # - subscription_end в прошлом.
+            #
+            # Вечная подписка имеет дату ~2100 год и остаётся валидной.
+            #
+            is_subscription_expired = (
+                sub_end is None or sub_end < current_time
+            )
 
-                # Подписка невалидна, если:
-                # - subscription_end отсутствует;
-                # - subscription_end в прошлом.
+            local_should_be_disabled = (
+                (not is_active)
+                or is_banned
+                or is_subscription_expired
+            )
+
+            if local_should_be_disabled:
                 #
-                # Вечная подписка имеет дату ~2100 год и остаётся валидной.
-                is_subscription_expired = (
-                    sub_end is None or sub_end < current_time
-                )
+                # DB — источник истины.
+                #
+                # Если по данным бота доступ должен быть выключен,
+                # фиксируем это в БД даже если API временно недоступен.
+                #
+                if is_active:
+                    disable_db_ids.append(p_id)
 
-                local_should_be_disabled = (
-                    (not is_active)
-                    or is_banned
-                    or is_subscription_expired
-                )
-
-                if local_should_be_disabled:
-                    # DB — источник истины.
-                    #
-                    # Если по данным бота доступ должен быть выключен,
-                    # фиксируем это в БД даже если API временно недоступен.
-                    if is_active:
-                        disable_db_ids.append(p_id)
-
-                    if api_is_active:
-                        reason = (
-                            "banned"
-                            if is_banned
-                            else (
-                                "expired"
-                                if is_subscription_expired
-                                else "disabled"
-                            )
+                if api_is_active:
+                    reason = (
+                        "banned"
+                        if is_banned
+                        else (
+                            "expired"
+                            if is_subscription_expired
+                            else "disabled"
                         )
+                    )
 
-                        healing_tasks.append(
-                            {
-                                "profile_id": p_id,
-                                "api_url": server_info["api_url"],
-                                "api_key": server_info["api_key"],
-                                "peer_id": peer_id,
-                                "server_name": server_info["name"],
-                                "telegram_id": tg_id,
-                                "reason": reason,
-                                "target_status": "disabled",
-                                "expires_at": None,
-                                "clear_expires_at": False,
-                            }
-                        )
-
-                elif is_active and not api_is_active:
-                    # DB — источник истины.
-                    #
-                    # Если в БД профиль активен, подписка активна,
-                    # пользователь не забанен, а на сервере профиль выключен,
-                    # считаем это рассинхроном и восстанавливаем доступ.
-                    #
-                    # Прямые ручные действия на сервере считаются рассинхроном,
-                    # если они не отражены в боте.
-                    expires_ts = None
-
-                    if sub_end and sub_end.year < 2100:
-                        expires_ts = int(sub_end.timestamp())
-
-                    reverse_healing_tasks.append(
+                    healing_tasks.append(
                         {
                             "profile_id": p_id,
                             "api_url": server_info["api_url"],
@@ -308,43 +314,90 @@ async def _process_server_traffic(server_info, api_clients):
                             "peer_id": peer_id,
                             "server_name": server_info["name"],
                             "telegram_id": tg_id,
-                            "reason": "api_desync",
-                            "target_status": "active",
-                            "expires_at": expires_ts,
-                            "clear_expires_at": expires_ts is None,
+                            "reason": reason,
+                            "target_status": "disabled",
+                            "expires_at": None,
+                            "clear_expires_at": False,
                         }
                     )
 
-                if (
-                    t_down != new_t_down
-                    or t_up != new_t_up
-                    or last_conn != new_last_connected
-                ):
-                    updates_data[p_id] = {
-                        "traffic_down": new_t_down,
-                        "traffic_up": new_t_up,
-                        "last_connected": new_last_connected,
+            elif is_active and not api_is_active:
+                #
+                # DB — источник истины.
+                #
+                # Если в БД профиль активен, подписка активна,
+                # пользователь не забанен, а на сервере профиль выключен,
+                # считаем это рассинхроном и восстанавливаем доступ.
+                #
+                expires_ts = None
+
+                if sub_end and sub_end.year < 2100:
+                    expires_ts = int(sub_end.timestamp())
+
+                reverse_healing_tasks.append(
+                    {
+                        "profile_id": p_id,
+                        "api_url": server_info["api_url"],
+                        "api_key": server_info["api_key"],
+                        "peer_id": peer_id,
+                        "server_name": server_info["name"],
+                        "telegram_id": tg_id,
+                        "reason": "api_desync",
+                        "target_status": "active",
+                        "expires_at": expires_ts,
+                        "clear_expires_at": expires_ts is None,
                     }
+                )
 
-                total_traffic = (new_t_down or 0) + (new_t_up or 0)
+            if (
+                t_down != new_t_down
+                or t_up != new_t_up
+                or last_conn != new_last_connected
+            ):
+                updates_data[p_id] = {
+                    "traffic_down": new_t_down,
+                    "traffic_up": new_t_up,
+                    "last_connected": new_last_connected,
+                }
 
-                if (
-                    total_traffic > TRAFFIC_QUOTA_BYTES
-                    and p_id not in _quota_alerted
-                ):
-                    _quota_alerted.add(p_id)
+            total_traffic = (new_t_down or 0) + (new_t_up or 0)
 
-                    asyncio.create_task(
-                        _send_quota_alert(
-                            tg_id,
-                            server_info["name"],
-                            total_traffic,
-                            p_id,
-                        )
+            if (
+                total_traffic > TRAFFIC_QUOTA_BYTES
+                and p_id not in _quota_alerted
+            ):
+                _quota_alerted.add(p_id)
+
+                _start_background_task(
+                    _send_quota_alert(
+                        tg_id,
+                        server_info["name"],
+                        total_traffic,
+                        p_id,
                     )
+                )
 
         if updates_data:
-            await _batch_update_profiles(updates_data)
+            for profile_id, data in updates_data.items():
+                values = {}
+
+                if "traffic_down" in data:
+                    values["traffic_down"] = data["traffic_down"]
+
+                if "traffic_up" in data:
+                    values["traffic_up"] = data["traffic_up"]
+
+                if "last_connected" in data:
+                    values["last_connected"] = data["last_connected"]
+
+                if not values:
+                    continue
+
+                await session.execute(
+                    update(VPNProfile)
+                    .where(VPNProfile.id == profile_id)
+                    .values(**values)
+                )
 
             logger.info(
                 "Трафик синхронизирован для %s устройств на сервере %s",
@@ -365,17 +418,23 @@ async def _process_server_traffic(server_info, api_clients):
                 server_info["name"],
             )
 
-    #
-    # Self-healing выполняется ПОСЛЕ commit.
-    #
-    # Это важно, чтобы не держать DB-сессию открытой во время
-    # внешних HTTP-запросов к Amnezia API.
-    #
-    if healing_tasks:
-        await _self_heal_peers(healing_tasks)
+        #
+        # Self-healing выполняется ПОСЛЕ commit.
+        #
+        # Это важно, чтобы не держать DB-сессию открытой во время
+        # внешних HTTP-запросов к Amnezia API.
+        #
+        if healing_tasks:
+            queue_post_commit_task(
+                session,
+                lambda tasks=healing_tasks: _self_heal_peers(tasks),
+            )
 
-    if reverse_healing_tasks:
-        await _self_heal_peers(reverse_healing_tasks)
+        if reverse_healing_tasks:
+            queue_post_commit_task(
+                session,
+                lambda tasks=reverse_healing_tasks: _self_heal_peers(tasks),
+            )
 
 
 async def _send_quota_alert(
@@ -443,48 +502,6 @@ async def _send_quota_alert(
         logger.error("Failed to send quota alert: %s", e)
 
 
-async def _batch_update_profiles(updates_data: dict):
-    """
-    Безопасное пакетное обновление трафика.
-
-    ВАЖНО:
-    Раньше здесь использовался INSERT ... ON CONFLICT, который мог падать
-    из-за NOT NULL полей user_id/server_id/device_name/peer_id/raw_config.
-
-    Теперь используется обычный UPDATE по id.
-    Если профиль уже удалён, UPDATE просто не затронет строку.
-    """
-    if not updates_data:
-        return
-
-    async with session_scope() as session:
-        items = list(updates_data.items())
-
-        for i in range(0, len(items), BATCH_SIZE):
-            batch = items[i : i + BATCH_SIZE]
-
-            for profile_id, data in batch:
-                values = {}
-
-                if "traffic_down" in data:
-                    values["traffic_down"] = data["traffic_down"]
-
-                if "traffic_up" in data:
-                    values["traffic_up"] = data["traffic_up"]
-
-                if "last_connected" in data:
-                    values["last_connected"] = data["last_connected"]
-
-                if not values:
-                    continue
-
-                await session.execute(
-                    update(VPNProfile)
-                    .where(VPNProfile.id == profile_id)
-                    .values(**values)
-                )
-
-
 async def _self_heal_peers(healing_tasks: list):
     if not healing_tasks:
         return
@@ -511,7 +528,10 @@ async def _self_heal_peers(healing_tasks: list):
         nonlocal success_count, fail_count
 
         async with sem:
-            client = AmneziaClient(task["api_url"], task["api_key"])
+            client = AmneziaClient(
+                task["api_url"],
+                task["api_key"],
+            )
 
             try:
                 result = await client.update_client(
