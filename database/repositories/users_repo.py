@@ -1,10 +1,8 @@
 from datetime import timedelta
 from typing import Optional, List, TypedDict
-
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-
 from database.models import User
 from utils.datetime_helpers import now_utc
 
@@ -68,6 +66,21 @@ async def get_user_by_telegram_id(
     return result.scalar_one_or_none()
 
 
+async def get_user_by_telegram_id_any(
+    session: AsyncSession,
+    telegram_id: int,
+) -> Optional[User]:
+    """
+    Возвращает пользователя независимо от флага is_deleted.
+
+    Используется для безопасной обработки повторного входа,
+    чтобы не ловить unique constraint при soft-deleted пользователе.
+    """
+    stmt = select(User).where(User.telegram_id == telegram_id)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
 async def create_user(
     session: AsyncSession,
     telegram_id: int,
@@ -94,7 +107,6 @@ async def update_user(
 ) -> User:
     """
     Обновляет пользователя только по whitelist-полям.
-
     Это защита от случайной записи опасных полей через **kwargs:
     - telegram_id
     - is_admin
@@ -169,7 +181,6 @@ async def get_dashboard_stats(session: AsyncSession) -> dict:
     Возвращает total, active, new_24h одним запросом.
     """
     now = now_utc()
-
     stmt = select(
         func.count(User.id).label("total"),
         func.count(User.id)
@@ -196,7 +207,6 @@ async def get_users_paginated(
     per_page: int = 10,
 ) -> list[User]:
     offset = (page - 1) * per_page
-
     result = await session.execute(
         select(User)
         .where(User.is_deleted == False)
@@ -204,7 +214,6 @@ async def get_users_paginated(
         .offset(offset)
         .limit(per_page)
     )
-
     return result.scalars().all()
 
 
@@ -214,7 +223,6 @@ async def get_users_paginated_with_profiles(
     per_page: int = 10,
 ) -> list[User]:
     offset = (page - 1) * per_page
-
     stmt = (
         select(User)
         .where(User.is_deleted == False)
@@ -223,7 +231,6 @@ async def get_users_paginated_with_profiles(
         .offset(offset)
         .limit(per_page)
     )
-
     result = await session.execute(stmt)
     return result.scalars().unique().all()
 
@@ -256,7 +263,6 @@ async def get_user_with_referrals(
             User.is_deleted == False,
         )
     )
-
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
 
@@ -277,6 +283,27 @@ async def mark_user_bot_blocked(
         .values(is_bot_blocked=True)
     )
     await session.flush()
+
+
+async def mark_user_bot_unblocked(
+    session: AsyncSession,
+    telegram_id: int,
+) -> bool:
+    """
+    Сбрасывает is_bot_blocked, если пользователь снова пишет боту.
+
+    Возвращает True, если флаг был реально изменён.
+    """
+    result = await session.execute(
+        update(User)
+        .where(
+            User.telegram_id == telegram_id,
+            User.is_bot_blocked == True,
+        )
+        .values(is_bot_blocked=False)
+    )
+    await session.flush()
+    return result.rowcount > 0
 
 
 async def count_users_with_tariff(

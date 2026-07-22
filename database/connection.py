@@ -1,20 +1,17 @@
 import logging
 from contextlib import asynccontextmanager
 from typing import Awaitable, Callable
-
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-
 from config.settings import get_settings
 from database.models import Base, MaintenanceMode, Tariff
 
 _engine = None
 _sessionmaker = None
-
 
 DEFAULT_TARIFFS = [
     {"duration_days": 7, "device_limit": 2, "price_rub": 35, "price_stars": 35, "sort_order": 10},
@@ -29,7 +26,6 @@ DEFAULT_TARIFFS = [
 
 async def init_db():
     global _engine, _sessionmaker
-
     settings = get_settings()
 
     _engine = create_async_engine(
@@ -40,7 +36,6 @@ async def init_db():
         pool_timeout=30,
         pool_pre_ping=True,
     )
-
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
 
     async with _engine.begin() as conn:
@@ -50,7 +45,6 @@ async def init_db():
         await _apply_additional_indexes(conn)
 
     logging.info("PostgreSQL database initialized at %s", settings.DATABASE_URL)
-
     return _engine, _sessionmaker
 
 
@@ -87,6 +81,18 @@ async def _apply_additional_indexes(conn):
         CREATE UNIQUE INDEX IF NOT EXISTS ix_payment_external_completed
         ON payments (external_id)
         WHERE status = 'completed' AND external_id IS NOT NULL
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS ix_payments_status_created_at
+        ON payments (status, created_at)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS ix_payments_tariff_status
+        ON payments (tariff_id, status)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS ix_payment_events_payment_created
+        ON payment_events (payment_id, created_at)
         """,
         """
         CREATE INDEX IF NOT EXISTS ix_users_active_subscription
@@ -147,10 +153,8 @@ async def _apply_additional_indexes(conn):
 
 async def get_session() -> AsyncSession:
     global _sessionmaker
-
     if _sessionmaker is None:
         await init_db()
-
     return _sessionmaker()
 
 
@@ -158,7 +162,6 @@ async def _run_post_commit_tasks(session: AsyncSession) -> None:
     tasks: list[Callable[[], Awaitable[None]]] = session.info.pop(
         "post_commit_tasks", []
     )
-
     if not tasks:
         return
 
@@ -175,14 +178,12 @@ def queue_post_commit_task(
 ) -> None:
     if "post_commit_tasks" not in session.info:
         session.info["post_commit_tasks"] = []
-
     session.info["post_commit_tasks"].append(task)
 
 
 @asynccontextmanager
 async def session_scope():
     session = await get_session()
-
     try:
         yield session
         await session.commit()
@@ -197,6 +198,5 @@ async def session_scope():
 
 async def close_db():
     global _engine
-
     if _engine:
         await _engine.dispose()
