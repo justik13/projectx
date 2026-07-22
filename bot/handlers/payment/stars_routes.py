@@ -33,6 +33,7 @@ from database.repositories.tariffs_repo import get_tariff_by_id
 from database.repositories.users_repo import get_user_by_telegram_id
 from services.maintenance_service import MaintenanceService
 from services.payment_service import PaymentService
+from services.payment_service.alerts import _send_payment_not_found_alert_now
 from utils.formatters import format_datetime
 from utils.tariff_names import get_tariff_display_name
 from utils.telegram import render_hub, send_hub_invoice
@@ -62,22 +63,32 @@ async def pay_stars(
         await callback.answer()
         return
 
+    parts = callback.data.split(":")
+    try:
+        tariff_id = int(parts[1])
+        source = parts[2] if len(parts) > 2 else "showcase"
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    back_callback = {
+        "change": "payment_change_tariff",
+        "renew": "payment_quick_renew",
+    }.get(source, f"select_tariff:{tariff_id}:{source}")
+
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
     ):
         await callback.answer()
-
         await _render_maintenance(
             callback,
             session,
-            back_to="menu_subscription",
+            back_to=back_callback,
         )
         return
 
-    tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff or not db_user:
         await callback.answer()
         return
@@ -87,9 +98,8 @@ async def pay_stars(
             callback.bot,
             callback.message.chat.id,
             texts.ERROR_TARIFF_UNAVAILABLE,
-            get_back_button(f"select_tariff:{tariff_id}"),
+            get_back_button(back_callback),
         )
-
         await callback.answer()
         return
 
@@ -98,15 +108,13 @@ async def pay_stars(
         db_user,
         tariff,
     )
-
     if error_text:
         await render_hub(
             callback.bot,
             callback.message.chat.id,
             error_text,
-            get_back_button(f"select_tariff:{tariff_id}"),
+            get_back_button(back_callback),
         )
-
         await callback.answer()
         return
 
@@ -123,7 +131,6 @@ async def pay_stars(
 
         try:
             invoice_builder = InlineKeyboardBuilder()
-
             invoice_builder.row(
                 InlineKeyboardButton(
                     text="💳 Оплатить",
@@ -132,7 +139,7 @@ async def pay_stars(
                 InlineKeyboardButton(
                     text="❌ Отменить",
                     callback_data=(
-                        f"cancel_invoice:{payment.id}:{tariff.id}"
+                        f"cancel_invoice:{payment.id}:{tariff.id}:{source}"
                     ),
                 ),
             )
@@ -175,14 +182,13 @@ async def pay_stars(
                 callback.bot,
                 callback.message.chat.id,
                 texts.ERROR_PAYMENT_SERVICE,
-                get_back_button(f"select_tariff:{tariff_id}"),
+                get_back_button(back_callback),
             )
 
             payment.status = "failed"
 
     except Exception as e:
         logger.error(f"pay_stars error: {e}", exc_info=True)
-
         await callback.answer(
             "❌ Ошибка при создании платежа",
             show_alert=True,
@@ -311,7 +317,6 @@ async def process_pre_checkout(
                 expected_amount,
                 payment_id,
             )
-
             await pre_checkout_query.answer(
                 ok=False,
                 error_message="Некорректная сумма платежа",
@@ -333,7 +338,6 @@ async def process_pre_checkout(
                 expected_amount,
                 payment_id,
             )
-
             await pre_checkout_query.answer(
                 ok=False,
                 error_message="Некорректная сумма платежа",
@@ -370,6 +374,21 @@ async def process_successful_payment(
     payment = await get_payment_by_id(session, payment_id)
 
     if not payment:
+        try:
+            await _send_payment_not_found_alert_now(
+                {
+                    "transaction_id": payload,
+                    "status": "successful_payment_not_found",
+                    "source": "stars_successful_payment",
+                    "user_telegram_id": message.from_user.id,
+                }
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to send payment not found alert: %s",
+                e,
+            )
+
         await render_hub(
             message.bot,
             message.chat.id,
@@ -382,6 +401,21 @@ async def process_successful_payment(
         not payment.user
         or payment.user.telegram_id != message.from_user.id
     ):
+        try:
+            await _send_payment_not_found_alert_now(
+                {
+                    "transaction_id": payload,
+                    "status": "successful_payment_owner_mismatch",
+                    "source": "stars_successful_payment",
+                    "user_telegram_id": message.from_user.id,
+                }
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to send payment owner mismatch alert: %s",
+                e,
+            )
+
         await render_hub(
             message.bot,
             message.chat.id,
@@ -462,17 +496,14 @@ async def process_successful_payment(
         )
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1)
 
         await render_hub(
@@ -487,17 +518,14 @@ async def process_successful_payment(
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1)
 
         await render_hub(
@@ -528,6 +556,7 @@ async def cancel_invoice(
     try:
         payment_id = int(parts[1])
         tariff_id = int(parts[2])
+        source = parts[3] if len(parts) > 3 else "showcase"
     except (ValueError, IndexError):
         await callback.answer(
             "Некорректный платёж",
@@ -587,11 +616,21 @@ async def cancel_invoice(
             price_stars=tariff.price_stars,
         )
 
+        settings = get_settings()
+        sbp_enabled = bool(
+            settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET
+        )
+
         await render_hub(
             callback.bot,
             callback.message.chat.id,
             text,
-            get_payment_method_keyboard(tariff.id, device_limit),
+            get_payment_method_keyboard(
+                tariff.id,
+                device_limit,
+                sbp_enabled=sbp_enabled,
+                source=source,
+            ),
         )
         return
 

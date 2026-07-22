@@ -51,7 +51,6 @@ async def _render_profile(
     back_to: str = "back_to_main_menu",
 ):
     profiles = await get_user_profiles(session, user.id)
-
     profiles_count = len(profiles)
 
     total_traffic = sum(
@@ -69,8 +68,19 @@ async def _render_profile(
     )
 
     if has_access:
-        tariff_name = "—"
-        device_limit = 0
+        #
+        # Fallback на user.device_limit, если тариф не найден.
+        #
+        # Это защищает от ситуации, когда current_tariff_id
+        # по какой-то причине отсутствует или тариф удалён,
+        # но у пользователя сохранён лимит устройств.
+        #
+        device_limit = user.device_limit or 0
+
+        tariff_name = (
+            f"{get_tariff_display_name(device_limit)} "
+            f"({device_limit} устр.)"
+        ) if device_limit else "—"
 
         if user.current_tariff_id:
             tariff = await get_tariff_by_id(
@@ -80,7 +90,6 @@ async def _render_profile(
 
             if tariff:
                 device_limit = tariff.device_limit
-
                 tariff_name = (
                     f"{get_tariff_display_name(device_limit)} "
                     f"({device_limit} устр.)"
@@ -117,12 +126,10 @@ async def _render_profile(
             text="🚀 Купить доступ",
             callback_data="menu_buy",
         )
-
         builder.button(
             text="🎁 Пригласить друга",
             callback_data="referral",
         )
-
         builder.button(
             text="🧾 История оплат",
             callback_data="user_history",
@@ -344,9 +351,9 @@ async def show_referrals_list(
                 f"рефералов</i>"
             )
 
-        rendered += texts.REFERRAL_LIST_FOOTER.format(
-            count=len(referrals),
-        )
+    rendered += texts.REFERRAL_LIST_FOOTER.format(
+        count=len(referrals),
+    )
 
     await render_hub(
         callback.bot,

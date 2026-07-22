@@ -46,23 +46,35 @@ async def pay_sbp(
         await callback.answer()
         return
 
+    parts = callback.data.split(":")
+
+    try:
+        tariff_id = int(parts[1])
+        source = parts[2] if len(parts) > 2 else "showcase"
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    back_callback = {
+        "change": "payment_change_tariff",
+        "renew": "payment_quick_renew",
+    }.get(source, f"select_tariff:{tariff_id}:{source}")
+
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
     ):
         await callback.answer()
-
         await _render_maintenance(
             callback,
             session,
-            back_to="menu_subscription",
+            back_to=back_callback,
         )
         return
 
     try:
         await callback.answer("⏳ Создаю платеж...")
 
-        tariff_id = int(callback.data.split(":")[1])
         tariff = await get_tariff_by_id(session, tariff_id)
 
         if not tariff:
@@ -77,7 +89,7 @@ async def pay_sbp(
                 callback.bot,
                 callback.message.chat.id,
                 texts.ERROR_TARIFF_UNAVAILABLE,
-                get_back_button(f"select_tariff:{tariff_id}"),
+                get_back_button(back_callback),
             )
             return
 
@@ -104,7 +116,7 @@ async def pay_sbp(
                 callback.bot,
                 callback.message.chat.id,
                 error_text,
-                get_back_button(f"select_tariff:{tariff_id}"),
+                get_back_button(back_callback),
             )
             return
 
@@ -124,7 +136,7 @@ async def pay_sbp(
                 callback.bot,
                 callback.message.chat.id,
                 texts.ERROR_PAYMENT_SERVICE,
-                get_back_button(f"select_tariff:{tariff_id}"),
+                get_back_button(back_callback),
             )
             return
 
@@ -143,13 +155,13 @@ async def pay_sbp(
                 payment.payment_url,
                 payment.id,
                 tariff.id,
+                source,
             ),
             parse_mode="HTML",
         )
 
     except Exception as e:
         logger.error(f"pay_sbp error: {e}", exc_info=True)
-
         await callback.answer(
             "❌ Ошибка при создании платежа",
             show_alert=True,
@@ -274,17 +286,14 @@ async def check_payment_status(
         )
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1)
 
         await render_hub(
@@ -299,17 +308,14 @@ async def check_payment_status(
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1)
 
         await render_hub(

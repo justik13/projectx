@@ -11,6 +11,7 @@ from bot.keyboards import (
     get_renew_keyboard,
     get_tariff_duration_keyboard,
 )
+from config.settings import get_settings
 from database.repositories.profiles_repo import get_user_profiles_count
 from database.repositories.tariffs_repo import (
     get_active_tariffs,
@@ -102,22 +103,32 @@ async def select_tariff(
         await callback.answer()
         return
 
+    parts = callback.data.split(":")
+    try:
+        tariff_id = int(parts[1])
+        source = parts[2] if len(parts) > 2 else "showcase"
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    back_to = {
+        "change": "payment_change_tariff",
+        "renew": "payment_quick_renew",
+    }.get(source, "payment_showcase")
+
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
     ):
         await callback.answer()
-
         await _render_maintenance(
             callback,
             session,
-            back_to="payment_showcase",
+            back_to=back_to,
         )
         return
 
-    tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff or not tariff.is_active:
         await callback.answer(
             texts.ERROR_TARIFF_UNAVAILABLE,
@@ -133,20 +144,22 @@ async def select_tariff(
             db_user,
             tariff,
         )
-
         if error_text:
             await render_hub(
                 callback.bot,
                 callback.message.chat.id,
                 error_text,
-                get_back_button("payment_change_tariff"),
+                get_back_button(back_to),
             )
-
             await callback.answer()
             return
 
-    tariff_name = get_tariff_display_name(device_limit)
+    settings = get_settings()
+    sbp_enabled = bool(
+        settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET
+    )
 
+    tariff_name = get_tariff_display_name(device_limit)
     text = texts.PAYMENT_CHECKOUT_TEXT.format(
         tariff_name=tariff_name,
         duration_days=tariff.duration_days,
@@ -158,9 +171,13 @@ async def select_tariff(
         callback.bot,
         callback.message.chat.id,
         text,
-        get_payment_method_keyboard(tariff.id, device_limit),
+        get_payment_method_keyboard(
+            tariff.id,
+            device_limit,
+            sbp_enabled=sbp_enabled,
+            source=source,
+        ),
     )
-
     await callback.answer()
 
 
@@ -187,7 +204,6 @@ async def show_quick_renew(
         return
 
     tariffs = await get_active_tariffs(session)
-
     current_limit = db_user.device_limit
 
     renew_tariffs = [
@@ -206,7 +222,6 @@ async def show_quick_renew(
         return
 
     tariff_name = get_tariff_display_name(current_limit)
-
     text = texts.PAYMENT_QUICK_RENEW_HEADER.format(
         tariff_name=tariff_name,
         valid_until=format_datetime(db_user.subscription_end),
@@ -245,7 +260,6 @@ async def show_change_tariff(
         return
 
     tariffs = await get_active_tariffs(session)
-
     if not tariffs:
         await render_hub(
             callback.bot,
@@ -256,9 +270,7 @@ async def show_change_tariff(
         return
 
     current_limit = db_user.device_limit
-
     tariff_name = get_tariff_display_name(current_limit)
-
     is_active = await _is_subscription_active(db_user)
 
     text = texts.PAYMENT_CHANGE_TARIFF_HEADER.format(
@@ -291,6 +303,18 @@ async def select_tariff_type(
     if session is None:
         return
 
+    parts = callback.data.split(":")
+    try:
+        device_limit = int(parts[1])
+        source = parts[2] if len(parts) > 2 else "showcase"
+    except (ValueError, IndexError):
+        return
+
+    back_to = {
+        "change": "payment_change_tariff",
+        "renew": "menu_subscription",
+    }.get(source, "payment_showcase")
+
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
@@ -298,19 +322,15 @@ async def select_tariff_type(
         await _render_maintenance(
             callback,
             session,
-            back_to="payment_showcase",
+            back_to=back_to,
         )
         return
-
-    device_limit = int(callback.data.split(":")[1])
 
     # Дополнительная серверная проверка даунгрейда и лимита устройств.
     if db_user:
         is_active = await _is_subscription_active(db_user)
-
         if is_active:
             current_limit = db_user.device_limit or 0
-
             if device_limit < current_limit:
                 await render_hub(
                     callback.bot,
@@ -322,7 +342,7 @@ async def select_tariff_type(
                             db_user.subscription_end,
                         ),
                     ),
-                    get_back_button("payment_change_tariff"),
+                    get_back_button(back_to),
                 )
                 return
 
@@ -330,7 +350,6 @@ async def select_tariff_type(
             session,
             db_user.id,
         )
-
         if profiles_count > device_limit:
             await render_hub(
                 callback.bot,
@@ -339,12 +358,11 @@ async def select_tariff_type(
                     profiles_count=profiles_count,
                     new_limit=device_limit,
                 ),
-                get_back_button("payment_change_tariff"),
+                get_back_button(back_to),
             )
             return
 
     tariffs = await get_active_tariffs(session)
-
     type_tariffs = [
         tariff
         for tariff in tariffs
@@ -356,7 +374,7 @@ async def select_tariff_type(
             callback.bot,
             callback.message.chat.id,
             texts.PAYMENT_NO_TARIFFS,
-            get_back_button("payment_showcase"),
+            get_back_button(back_to),
         )
         return
 
@@ -364,10 +382,12 @@ async def select_tariff_type(
         device_limit,
         "",
     )
-
     text = description + texts.PAYMENT_DURATION_HEADER
 
-    keyboard = get_tariff_duration_keyboard(type_tariffs)
+    keyboard = get_tariff_duration_keyboard(
+        type_tariffs,
+        source=source,
+    )
 
     await render_hub(
         callback.bot,

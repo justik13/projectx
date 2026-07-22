@@ -1,7 +1,7 @@
 #!/bin/bash
+
 set -euo pipefail
-IFS=$'
-'
+IFS=$'\n\t'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -46,6 +46,7 @@ confirm() {
 
     echo ""
     read -p "$message $prompt: " response
+
     response=${response:-$default}
 
     [[ "$response" =~ ^[Yy]$ ]] && return 0 || return 1
@@ -164,8 +165,7 @@ install_dependencies() {
         postgresql postgresql-contrib libpq-dev \
         redis-server \
         > "$install_log" 2>&1; then
-        error "Ошибка apt. Лог: $install_log
-$(tail -20 "$install_log")"
+        error "Ошибка apt. Лог: $install_log\n$(tail -20 "$install_log")"
     fi
 
     rm -f "$install_log"
@@ -197,6 +197,7 @@ setup_postgresql() {
     fi
 
     local wait_count=0
+
     while ! ss -tlnp | grep -qE ":${PG_PORT}\s"; do
         sleep 1
         wait_count=$((wait_count + 1))
@@ -219,8 +220,8 @@ setup_postgresql() {
 
         [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
 
-        printf '%s
-' "$DB_PASSWORD" > "$PG_PASS_FILE"
+        printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
+
         return
     fi
 
@@ -254,8 +255,7 @@ EOF
 
     success "Пользователь projectx и база projectx_bot созданы"
 
-    printf '%s
-' "$DB_PASSWORD" > "$PG_PASS_FILE"
+    printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
 }
 
 setup_redis() {
@@ -320,6 +320,7 @@ setup_redis() {
             redis_check=1
             break
         fi
+
         sleep 1
     done
 
@@ -382,6 +383,7 @@ setup_firewall() {
     ufw allow "$SSH_PORT"/tcp comment 'SSH' >/dev/null 2>&1 || true
     ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
     ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
+
     ufw deny 8080/tcp comment 'Webhook Internal' >/dev/null 2>&1 || true
     ufw deny 6379/tcp comment 'Redis (blocked external)' >/dev/null 2>&1 || true
 
@@ -443,6 +445,7 @@ setup_env() {
     echo -e "${BLUE}[1/4]${NC} Telegram Bot Token"
     read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN
     echo ""
+
     [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
 
     echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
@@ -461,6 +464,7 @@ setup_env() {
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
         read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET
         echo ""
+
         [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET обязателен"
 
         read -p "Введите домен для callback: " PLATEGA_CALLBACK_DOMAIN
@@ -517,6 +521,22 @@ setup_env() {
 
     write_env_var "REDIS_PASSWORD" "$REDIS_PASSWORD"
     write_env_var "REDIS_URL" "redis://:${REDIS_PASSWORD}@localhost:6379/0"
+
+    #
+    # Production-safe defaults для SSRF protection.
+    #
+    # Если Amnezia API находится локально, например:
+    #   http://127.0.0.1:4001
+    # то при необходимости можно вручную изменить:
+    #   ALLOW_LOCAL_HTTP=true
+    #
+    # Для внешнего HTTPS API рекомендуется оставить:
+    #   ALLOW_LOCAL_HTTP=false
+    #   ALLOW_LOCAL_HTTPS=false
+    #
+    write_env_var "ALLOW_LOCAL_HTTP" "false"
+    write_env_var "ALLOW_LOCAL_HTTPS" "false"
+
     write_env_var "REDIS_KEY_PREFIX" "projectx_bot:"
 
     if [ -n "$PLATEGA_MERCHANT_ID" ]; then
@@ -583,6 +603,7 @@ init_database() {
     if ! runuser -u projectx -- "$VENV_DIR/bin/python" -c "
 import asyncio
 from database.connection import init_db
+
 asyncio.run(init_db())
 "; then
         warn "Ошибка инициализации БД"
@@ -613,6 +634,7 @@ EnvironmentFile=$PROJECT_DIR/.env
 ExecStart=$VENV_DIR/bin/python -m bot.main
 Restart=always
 RestartSec=10
+
 ProtectSystem=strict
 PrivateTmp=true
 ProtectHome=true
@@ -753,6 +775,7 @@ echo "Будет восстановлено:"
 echo "  DB:  $DB_FILE"
 echo "  ENV: ${ENV_FILE:-не найден}"
 echo ""
+
 read -p "Продолжить восстановление? (yes/no): " CONFIRM
 
 if [[ "$CONFIRM" != "yes" ]]; then
@@ -881,10 +904,10 @@ start_bot() {
 }
 
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v8.0 (Redis Auth + Restore + Hardened Healthcheck)${NC}
-"
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v8.0 (Redis Auth + Restore + Hardened Healthcheck)${NC}\n"
 
     mkdir -p /var/log "$SNAPSHOT_DIR"
+
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 
     preflight_checks      || rollback "preflight_checks" "Pre-flight failed"

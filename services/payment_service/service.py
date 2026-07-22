@@ -631,7 +631,9 @@ class PaymentService:
         - сумма в БД хранится как Decimal;
         - описание платежа не содержит личных ID;
         - payload содержит только ID платежа;
-        - при ошибке провайдера платёж остаётся в БД со статусом failed.
+        - при ошибке провайдера платёж остаётся в БД со статусом failed;
+        - если провайдер не вернул ID транзакции или платёжную ссылку,
+          платёж считается failed.
         """
         from config.settings import get_settings
 
@@ -711,19 +713,56 @@ class PaymentService:
         external_id = (
             transaction.get("transactionId")
             or transaction.get("id")
+            or transaction.get("paymentId")
+            or transaction.get("invoiceId")
         )
 
-        payment.external_id = (
-            str(external_id)
-            if external_id is not None
-            else None
+        payment_url = (
+            transaction.get("redirect")
+            or transaction.get("redirectUrl")
+            or transaction.get("paymentUrl")
+            or transaction.get("url")
+            or transaction.get("link")
         )
 
-        payment.payment_url = transaction.get("redirect")
+        if external_id is None or not payment_url:
+            payment.status = "failed"
 
-        payment.payment_method = transaction.get(
-            "paymentMethod",
-            "SBPQR",
+            try:
+                await session.flush()
+            except Exception:
+                pass
+
+            try:
+                await AuditService.log_action(
+                    session,
+                    admin_id=0,
+                    action="PAYMENT_FAILED",
+                    target_type="Payment",
+                    target_id=payment.id,
+                    details=(
+                        f"user={user_id}, "
+                        f"amount={decimal_amount} RUB, "
+                        f"missing transaction id or payment url"
+                    ),
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to log payment failure to audit: %s",
+                    e,
+                )
+
+            return None, None
+
+        payment.external_id = str(external_id)
+        payment.payment_url = str(payment_url)
+
+        raw_payment_method = transaction.get("paymentMethod")
+
+        payment.payment_method = (
+            str(raw_payment_method)
+            if raw_payment_method is not None
+            else "SBPQR"
         )
 
         return payment, None
@@ -805,6 +844,14 @@ class PaymentService:
                 )
 
                 return True, "paid_after_cancel"
+
+            if payment.status == "refunded":
+                logger.warning(
+                    "Payment provider callback: CONFIRMED received "
+                    "for refunded payment %s",
+                    payment.id,
+                )
+                return False, "refunded"
 
             # Верификация суммы.
             if callback_amount is None:
@@ -939,6 +986,14 @@ class PaymentService:
             return success, result_code
 
         elif status == "CANCELED":
+            if payment.status == "refunded":
+                logger.info(
+                    "Payment provider callback: payment %s already "
+                    "refunded, ignoring CANCELED",
+                    payment.id,
+                )
+                return True, "already_processed"
+
             if payment.status == "cancelled":
                 logger.info(
                     "Payment provider callback: payment %s already "
@@ -1107,7 +1162,6 @@ class PaymentService:
                 )
 
                 snapshot = _build_payment_snapshot(payment)
-
                 transaction_id = payment.external_id or "—"
 
                 await AuditService.log_action(
@@ -1198,7 +1252,6 @@ class PaymentService:
         )
 
         result = await session.execute(stmt)
-
         await session.flush()
 
         if result.rowcount == 0:
@@ -1279,134 +1332,143 @@ class PaymentService:
                 if user:
                     current_time = now_utc()
 
-                    # Отзываем доступ.
-                    user.subscription_end = current_time
-                    user.current_tariff_id = None
-                    user.device_limit = 0
+                    if was_completed:
+                        # Отзываем доступ только если платёж реально
+                        # был completed.
+                        user.subscription_end = current_time
+                        user.current_tariff_id = None
+                        user.device_limit = 0
 
-                    await session.flush()
+                        await session.flush()
 
-                    # Откатываем реферальные бонусы.
-                    tariff = payment.tariff
+                        # Откатываем реферальные бонусы.
+                        tariff = payment.tariff
 
-                    if (
-                        was_completed
-                        and user.referred_by
-                        and tariff
-                        and tariff.duration_days >= 30
-                    ):
-                        try:
-                            completed_before = await session.scalar(
-                                select(func.count(Payment.id))
-                                .where(
-                                    Payment.user_id == user.id,
-                                    Payment.status == "completed",
-                                    Payment.id != payment.id,
-                                )
-                            )
-
-                            was_first_payment = (
-                                completed_before == 0
-                            )
-
-                            if was_first_payment:
-                                bonus_referrer = 3
-                                bonus_user = 5
-                            else:
-                                bonus_referrer = 1
-                                bonus_user = 0
-
-                            # Откатываем бонус реферера.
-                            referrer = await get_user_by_telegram_id(
-                                session,
-                                user.referred_by,
-                            )
-
-                            if referrer and bonus_referrer > 0:
-                                if (
-                                    referrer.referral_days
-                                    and referrer.referral_days
-                                    >= bonus_referrer
-                                ):
-                                    referrer.referral_days -= (
-                                        bonus_referrer
+                        if (
+                            user.referred_by
+                            and tariff
+                            and tariff.duration_days >= 30
+                        ):
+                            try:
+                                completed_before = await session.scalar(
+                                    select(func.count(Payment.id))
+                                    .where(
+                                        Payment.user_id == user.id,
+                                        Payment.status == "completed",
+                                        Payment.id != payment.id,
                                     )
+                                )
 
-                                # Не вычитаем дни из вечной подписки.
-                                if (
-                                    referrer.subscription_end
-                                    and referrer.subscription_end
-                                    > current_time
-                                    and referrer.subscription_end.year
-                                    < 2100
-                                ):
-                                    referrer.subscription_end = (
-                                        referrer.subscription_end
-                                        - timedelta(
-                                            days=bonus_referrer,
+                                was_first_payment = (
+                                    completed_before == 0
+                                )
+
+                                if was_first_payment:
+                                    bonus_referrer = 3
+                                    bonus_user = 5
+                                else:
+                                    bonus_referrer = 1
+                                    bonus_user = 0
+
+                                # Откатываем бонус реферера.
+                                referrer = await get_user_by_telegram_id(
+                                    session,
+                                    user.referred_by,
+                                )
+
+                                if referrer and bonus_referrer > 0:
+                                    if (
+                                        referrer.referral_days
+                                        and referrer.referral_days
+                                        >= bonus_referrer
+                                    ):
+                                        referrer.referral_days -= (
+                                            bonus_referrer
                                         )
+
+                                    # Не вычитаем дни из вечной подписки.
+                                    if (
+                                        referrer.subscription_end
+                                        and referrer.subscription_end
+                                        > current_time
+                                        and referrer.subscription_end.year
+                                        < 2100
+                                    ):
+                                        referrer.subscription_end = (
+                                            referrer.subscription_end
+                                            - timedelta(
+                                                days=bonus_referrer,
+                                            )
+                                        )
+
+                                        logger.info(
+                                            "Chargeback: rolled back "
+                                            "referrer bonus for %s",
+                                            referrer.telegram_id,
+                                        )
+
+                                # Откатываем бонус самого пользователя,
+                                # если это была первая покупка.
+                                if (
+                                    bonus_user > 0
+                                    and user.subscription_end
+                                    and user.subscription_end
+                                    > current_time
+                                    and user.subscription_end.year < 2100
+                                ):
+                                    user.subscription_end = (
+                                        user.subscription_end
+                                        - timedelta(days=bonus_user)
                                     )
 
-                                logger.info(
-                                    "Chargeback: rolled back "
-                                    "referrer bonus for %s",
-                                    referrer.telegram_id,
+                                    logger.info(
+                                        "Chargeback: rolled back "
+                                        "first-purchase user bonus "
+                                        "for %s",
+                                        user.telegram_id,
+                                    )
+
+                            except Exception as e:
+                                logger.error(
+                                    "Chargeback: failed to rollback "
+                                    "referral bonuses: %s",
+                                    e,
+                                    exc_info=True,
                                 )
 
-                            # Откатываем бонус самого пользователя,
-                            # если это была первая покупка.
-                            if (
-                                bonus_user > 0
-                                and user.subscription_end
-                                and user.subscription_end
-                                > current_time
-                                and user.subscription_end.year < 2100
-                            ):
-                                user.subscription_end = (
-                                    user.subscription_end
-                                    - timedelta(days=bonus_user)
-                                )
-
-                                logger.info(
-                                    "Chargeback: rolled back "
-                                    "first-purchase user bonus "
-                                    "for %s",
-                                    user.telegram_id,
-                                )
-
+                        # Удаляем устройства пользователя.
+                        try:
+                            await ProfileDeletionService.delete_profiles_for_user(
+                                session,
+                                user.id,
+                                reason="chargeback_delete",
+                                background=True,
+                            )
                         except Exception as e:
                             logger.error(
-                                "Chargeback: failed to rollback "
-                                "referral bonuses: %s",
+                                "Chargeback: failed to delete profiles "
+                                "for user %s: %s",
+                                user.id,
                                 e,
                                 exc_info=True,
                             )
 
-                    # Удаляем устройства пользователя.
-                    try:
-                        await ProfileDeletionService.delete_profiles_for_user(
-                            session,
-                            user.id,
-                            reason="chargeback_delete",
-                            background=True,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "Chargeback: failed to delete profiles "
-                            "for user %s: %s",
-                            user.id,
-                            e,
-                            exc_info=True,
+                    else:
+                        logger.warning(
+                            "Chargeback for non-completed payment %s: "
+                            "access was not revoked",
+                            payment.id,
                         )
 
                     invalidate_user_cache(user.telegram_id)
 
-                    logger.warning(
-                        "CHARGEBACK processed: user %s, payment %s. "
-                        "Access revoked and devices deleted.",
-                        user.telegram_id,
-                        payment.id,
-                    )
+                logger.warning(
+                    "CHARGEBACK processed: user %s, payment %s. "
+                    "was_completed=%s",
+                    payment.user_id,
+                    payment.id,
+                    was_completed,
+                )
 
                 snapshot = _build_payment_snapshot(payment)
 
@@ -1420,7 +1482,8 @@ class PaymentService:
                         details=(
                             f"Payment provider chargeback: "
                             f"transaction={transaction_id}, "
-                            f"user={payment.user_id}"
+                            f"user={payment.user_id}, "
+                            f"was_completed={was_completed}"
                         ),
                     )
                 except Exception as e:

@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from typing import Optional
-from database.connection import queue_post_commit_task
+
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +11,7 @@ from bot.constants import (
     PERMANENT_END_DATE,
 )
 from bot.middlewares.user_context import invalidate_user_cache
+from database.connection import queue_post_commit_task
 from database.models import User, VPNProfile
 from database.repositories.profiles_repo import (
     get_user_profiles,
@@ -28,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 class SubscriptionService:
-
     @staticmethod
     async def sync_access_state(
         session: AsyncSession,
@@ -38,7 +38,6 @@ class SubscriptionService:
         Публичная обёртка для админских действий.
         """
         await SubscriptionService._sync_access_state(session, user)
-
 
     @staticmethod
     async def check_access(
@@ -124,7 +123,9 @@ class SubscriptionService:
                 if is_valid:
                     user.referred_by = ref_id
                     await session.flush()
+
                     invalidate_user_cache(telegram_id)
+
                     logger.info(
                         "Late referral binding: user %s bound to "
                         "referrer %s",
@@ -145,6 +146,7 @@ class SubscriptionService:
 
             if is_valid:
                 referred_by = ref_id
+
                 logger.info(
                     "New user %s referred by %s",
                     telegram_id,
@@ -191,12 +193,14 @@ class SubscriptionService:
             user.subscription_end and user.subscription_end > now
         )
 
+        #
         # Если days == 0 и активной подписки нет,
         # не делаем подписку "активной до сейчас".
         #
         # Это нужно для сценария админской смены тарифа без продления:
         # тариф/лимит можно поменять, но доступ не должен внезапно
         # стать активным.
+        #
         if days == 0 and not had_active_subscription:
             new_end = user.subscription_end
         else:
@@ -218,8 +222,10 @@ class SubscriptionService:
         user.notified_1d = False
         user.notified_2h = False
 
+        #
         # Сбрасываем grace-уведомления, чтобы после продления
         # пользователь не получал старые уведомления об истечении.
+        #
         user.notified_expired = False
         user.notified_grace_12h = False
 
@@ -248,11 +254,13 @@ class SubscriptionService:
 
         invalidate_user_cache(telegram_id)
 
+        #
         # После изменения подписки синхронизируем статус устройств:
         # - если доступ активен и пользователь не забанен —
         #   устройства активны;
         # - если доступ неактивен или пользователь забанен —
         #   устройства неактивны.
+        #
         await SubscriptionService._sync_access_state(session, user)
 
         return user
@@ -281,6 +289,7 @@ class SubscriptionService:
         )
 
         profiles = await get_user_profiles(session, user.id)
+
         if not profiles:
             return
 
@@ -291,6 +300,7 @@ class SubscriptionService:
             .where(VPNProfile.id.in_(profile_ids))
             .values(is_active=target_active)
         )
+
         await session.flush()
 
         expires_ts = (
@@ -351,6 +361,18 @@ class SubscriptionService:
                             server.api_key,
                         )
 
+                        #
+                        # Для вечной подписки expires_ts=None.
+                        #
+                        # Если целевой статус active и expires_ts=None,
+                        # нужно явно очистить expiresAt на сервере.
+                        # Иначе API может сохранить старый срок истечения.
+                        #
+                        clear_expires_at = (
+                            target_status == "active"
+                            and expires_ts is None
+                        )
+
                         tasks.append(
                             client.update_client(
                                 client_id=profile.peer_id,
@@ -360,6 +382,7 @@ class SubscriptionService:
                                     else None
                                 ),
                                 status=target_status,
+                                clear_expires_at=clear_expires_at,
                             )
                         )
 

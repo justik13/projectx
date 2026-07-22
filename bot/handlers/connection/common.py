@@ -45,6 +45,17 @@ async def _get_effective_device_limit(
     user: User,
     session: AsyncSession,
 ) -> int:
+    """
+    Возвращает актуальный лимит устройств.
+
+    Приоритет:
+    1. device_limit текущего тарифа;
+    2. fallback на user.device_limit;
+    3. 0, если данных нет.
+
+    Это защищает от ситуации, когда current_tariff_id по какой-то
+    причине не найден, но у пользователя сохранён device_limit.
+    """
     if user.current_tariff_id:
         tariff = await get_tariff_by_id(
             session,
@@ -54,7 +65,7 @@ async def _get_effective_device_limit(
         if tariff:
             return tariff.device_limit
 
-    return 0
+    return user.device_limit or 0
 
 
 def _get_grace_deletion_time(user: User):
@@ -95,6 +106,7 @@ def _format_grace_countdown(deletion_time) -> str:
         return f"{days} дн. {hours} ч."
 
     minutes = (delta.seconds % 3600) // 60
+
     return f"{hours} ч. {minutes} мин."
 
 
@@ -237,7 +249,6 @@ async def _render_connections(
                 text="🚀 Купить доступ",
                 callback_data="menu_buy",
             )
-
             builder.button(
                 text="🏠 В главное меню",
                 callback_data="back_to_main_menu",
@@ -259,7 +270,6 @@ async def _render_connections(
             text="🚀 Купить доступ",
             callback_data="menu_buy",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",

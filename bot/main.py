@@ -14,6 +14,7 @@ from aiogram.types import (
     MenuButtonCommands,
 )
 from aiogram.utils.chat_action import ChatActionMiddleware
+from cachetools import TTLCache
 from cryptography.fernet import Fernet
 from aiohttp import web
 
@@ -53,6 +54,17 @@ for handler in root_logger.handlers:
     handler.addFilter(CorrelationFilter())
 
 logger = logging.getLogger(__name__)
+
+#
+# Анти-спам кэш для глобальных error-алертов.
+#
+# Если одна и та же ошибка повторяется, админам не отправляется
+# новый алерт чаще одного раза в 5 минут.
+#
+_error_alert_cache: TTLCache[str, bool] = TTLCache(
+    maxsize=10000,
+    ttl=300.0,
+)
 
 _SECRET_PATTERNS = [
     (
@@ -116,6 +128,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
     from bot.middlewares.correlation import get_current_request_id
 
     request_id = get_current_request_id()
+
     exception = event.exception
     error_type = type(exception).__name__
 
@@ -125,6 +138,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             exception,
             exception.__traceback__,
         )
+
         tb_text = "".join(tb_lines)
         tb_sanitized = _sanitize_text(tb_text)
 
@@ -137,6 +151,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             error_type,
             tb_sanitized,
         )
+
     except Exception:
         logger.critical(
             "[%s] Unhandled exception: %s",
@@ -145,6 +160,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         )
 
     state = kwargs.get("state")
+
     if state:
         try:
             await state.clear()
@@ -155,6 +171,7 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         settings = get_settings()
 
         error_type_safe = html.escape(error_type)
+
         error_short = html.escape(
             _sanitize_short(str(exception), 200)
         )
@@ -170,15 +187,26 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             f"<code>journalctl -u projectx-bot | grep {request_id}</code></i>"
         )
 
-        for admin_id in settings.ADMIN_IDS:
-            try:
-                await event.bot.send_message(
-                    admin_id,
-                    error_msg,
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
+        alert_key = f"{error_type_safe}:{error_short}"
+
+        if alert_key not in _error_alert_cache:
+            _error_alert_cache[alert_key] = True
+
+            for admin_id in settings.ADMIN_IDS:
+                try:
+                    await event.bot.send_message(
+                        admin_id,
+                        error_msg,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+        else:
+            logger.debug(
+                "[%s] Error alert throttled: %s",
+                request_id,
+                alert_key,
+            )
 
     except Exception as e:
         logger.error("[%s] Failed to send error alert: %s", request_id, e)
@@ -189,16 +217,19 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
                 texts.ERROR_TECHNICAL_ALERT,
                 show_alert=True,
             )
+
         elif event.update.message:
             await event.update.message.answer(
                 texts.ERROR_TECHNICAL_MESSAGE,
                 parse_mode="HTML",
             )
+
         elif getattr(event.update, "pre_checkout_query", None):
             await event.update.pre_checkout_query.answer(
                 ok=False,
                 error_message="Техническая ошибка. Попробуйте позже.",
             )
+
     except Exception:
         pass
 
@@ -220,7 +251,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     settings = get_settings()
 
     bot = Bot(token=settings.BOT_TOKEN)
-
     storage = RedisStorage.from_url(settings.REDIS_URL)
 
     dp = Dispatcher(storage=storage)
@@ -255,7 +285,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     # Throttling and action locks.
     dp.message.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ThrottlingMiddleware())
-
     dp.callback_query.middleware(ActionLockMiddleware())
 
     # UX helper.
@@ -401,6 +430,7 @@ async def main():
 
         if shutdown_event.is_set():
             logger.info("Shutdown requested, stopping polling...")
+
             await dp.stop_polling()
 
             polling_task.cancel()
@@ -440,12 +470,14 @@ async def main():
 
         try:
             from services.device_service import close_redis as close_device_redis
+
             await close_device_redis()
         except Exception as e:
             logger.error("Failed to close device Redis: %s", e)
 
         try:
             from services.payment_service import close_redis as close_payment_redis
+
             await close_payment_redis()
         except Exception as e:
             logger.error("Failed to close payment Redis: %s", e)

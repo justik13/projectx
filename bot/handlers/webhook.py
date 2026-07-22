@@ -9,6 +9,7 @@ from bot.middlewares.correlation import set_request_id
 from database.connection import session_scope
 from services.audit_service import AuditService
 from services.payment_service import PaymentService
+from services.payment_service.alerts import _send_payment_not_found_alert_now
 from services.platega_client import PlategaClient
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,21 @@ class PlategaCallbackData(BaseModel):
         return self.transactionId or self.id
 
     def normalize_status(self) -> str:
-        return self.status.upper()
+        status = str(self.status or "").upper()
+
+        mapping = {
+            "SUCCESS": "CONFIRMED",
+            "PAID": "CONFIRMED",
+            "COMPLETED": "CONFIRMED",
+            "CANCELLED": "CANCELED",
+            "EXPIRED": "CANCELED",
+            "FAILED": "CANCELED",
+            "REFUND": "CHARGEBACKED",
+            "REFUNDED": "CHARGEBACKED",
+            "CHARGEBACK": "CHARGEBACKED",
+        }
+
+        return mapping.get(status, status)
 
 
 async def platega_webhook_handler(
@@ -59,7 +74,6 @@ async def platega_webhook_handler(
                 request_id,
                 merchant_id,
             )
-
             return web.Response(
                 status=401,
                 text="Unauthorized",
@@ -73,7 +87,6 @@ async def platega_webhook_handler(
                 request_id,
                 e,
             )
-
             return web.Response(
                 status=400,
                 text="Invalid JSON",
@@ -87,7 +100,6 @@ async def platega_webhook_handler(
                 request_id,
                 e,
             )
-
             return web.Response(
                 status=400,
                 text=f"Validation error: {e.errors()}",
@@ -102,7 +114,6 @@ async def platega_webhook_handler(
                 "[%s] Payment webhook missing transaction ID.",
                 request_id,
             )
-
             return web.Response(
                 status=400,
                 text=(
@@ -125,7 +136,6 @@ async def platega_webhook_handler(
                 status,
                 transaction_id,
             )
-
             return web.Response(
                 status=400,
                 text="Invalid webhook status",
@@ -185,6 +195,22 @@ async def platega_webhook_handler(
                         transaction_id,
                     )
 
+                    try:
+                        await _send_payment_not_found_alert_now(
+                            {
+                                "transaction_id": transaction_id,
+                                "status": status,
+                                "source": "platega_webhook",
+                            }
+                        )
+                    except Exception as alert_error:
+                        logger.error(
+                            "[%s] Failed to send payment not found "
+                            "alert: %s",
+                            request_id,
+                            alert_error,
+                        )
+
                     return web.Response(
                         status=404,
                         text="Payment not found",
@@ -198,7 +224,6 @@ async def platega_webhook_handler(
                         transaction_id,
                         status,
                     )
-
                     return web.Response(
                         status=200,
                         text="OK",
@@ -212,7 +237,6 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
-
                     return web.Response(
                         status=200,
                         text="OK",
@@ -226,7 +250,6 @@ async def platega_webhook_handler(
                         transaction_id,
                         status,
                     )
-
                     return web.Response(
                         status=200,
                         text="OK",
@@ -240,7 +263,6 @@ async def platega_webhook_handler(
                         transaction_id,
                         result_code,
                     )
-
                     return web.Response(
                         status=200,
                         text="OK",
@@ -255,6 +277,22 @@ async def platega_webhook_handler(
                         transaction_id,
                     )
 
+                    try:
+                        await _send_payment_not_found_alert_now(
+                            {
+                                "transaction_id": transaction_id,
+                                "status": status,
+                                "source": "platega_webhook",
+                            }
+                        )
+                    except Exception as alert_error:
+                        logger.error(
+                            "[%s] Failed to send payment not found "
+                            "alert: %s",
+                            request_id,
+                            alert_error,
+                        )
+
                     return web.Response(
                         status=404,
                         text="Payment not found",
@@ -267,7 +305,6 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
-
                     return web.Response(
                         status=200,
                         text="OK",
@@ -280,7 +317,6 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
-
                     return web.Response(
                         status=200,
                         text="OK",
@@ -293,7 +329,6 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
-
                     return web.Response(
                         status=200,
                         text="OK",
@@ -306,7 +341,6 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
-
                     return web.Response(
                         status=200,
                         text="OK",
@@ -320,7 +354,6 @@ async def platega_webhook_handler(
                         transaction_id,
                         status,
                     )
-
                     return web.Response(
                         status=500,
                         text="Processing failed",
@@ -334,7 +367,6 @@ async def platega_webhook_handler(
                         result_code,
                         transaction_id,
                     )
-
                     return web.Response(
                         status=500,
                         text="Unknown error",
@@ -347,7 +379,6 @@ async def platega_webhook_handler(
             e,
             exc_info=True,
         )
-
         return web.Response(
             status=500,
             text="Internal server error",
@@ -377,7 +408,6 @@ def setup_webhook_routes(app: web.Application):
     logger.info(
         "Payment webhook route registered: POST /webhook/platega"
     )
-
     logger.info(
         "Healthcheck endpoint registered: GET /health"
     )

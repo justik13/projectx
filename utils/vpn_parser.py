@@ -34,11 +34,13 @@ def _decompress_amnezia_format(data: bytes) -> Optional[str]:
 
     try:
         decompressed = zlib.decompress(compressed)
+
         if len(decompressed) != original_length:
             logger.warning(
                 f"Length mismatch: header says {original_length}, "
                 f"got {len(decompressed)}"
             )
+
         return decompressed.decode("utf-8")
     except Exception as e:
         logger.warning(f"_decompress_amnezia_format zlib failed: {e}")
@@ -77,14 +79,22 @@ def decode_vpn_uri_to_json(uri: str) -> Optional[dict]:
 
 
 def build_vpn_file_from_dict(data: dict) -> str:
-    """Сериализует декодированный vpn:// JSON в содержимое .vpn файла."""
+    """
+    Сериализует декодированный vpn:// JSON в содержимое .vpn файла.
+    """
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
 def build_conf_file_from_dict(data: dict) -> Optional[str]:
-    """Извлекает WireGuard INI из декодированного vpn:// JSON.
+    """
+    Извлекает WireGuard INI из декодированного vpn:// JSON.
 
-    Приоритет №1: берёт готовый INI из last_config.config.
+    Приоритет №1:
+    - берёт готовый INI из last_config.config.
+
+    Важно:
+    - мы НЕ логируем содержимое last_config, потому что там могут быть
+      приватные ключи и другие чувствительные данные.
     """
     try:
         containers = data.get("containers", [])
@@ -124,9 +134,8 @@ def build_conf_file_from_dict(data: dict) -> Optional[str]:
             last_config = json.loads(last_config_str)
         except json.JSONDecodeError as e:
             logger.error(
-                f"build_conf_file_from_dict: failed to parse "
-                f"'last_config' JSON: {e}. "
-                f"First 200 chars: {last_config_str[:200]}"
+                "build_conf_file_from_dict: failed to parse "
+                f"'last_config' JSON: {e}"
             )
             return None
 
@@ -163,19 +172,25 @@ def build_conf_file_from_dict(data: dict) -> Optional[str]:
 
 
 def build_vpn_file(uri: str) -> Optional[str]:
-    """Декодирует vpn:// URI и возвращает содержимое .vpn файла."""
+    """
+    Декодирует vpn:// URI и возвращает содержимое .vpn файла.
+    """
     data = decode_vpn_uri_to_json(uri)
     if data is None:
         return None
+
     return build_vpn_file_from_dict(data)
 
 
 def build_conf_file(uri: str) -> Optional[str]:
-    """Декодирует vpn:// URI и возвращает содержимое .conf файла."""
+    """
+    Декодирует vpn:// URI и возвращает содержимое .conf файла.
+    """
     data = decode_vpn_uri_to_json(uri)
     if data is None:
         logger.error("build_conf_file: failed to decode vpn:// URI")
         return None
+
     return build_conf_file_from_dict(data)
 
 
@@ -191,9 +206,11 @@ def is_valid_vpn_uri(uri: str) -> bool:
     for container in containers:
         if not isinstance(container, dict):
             continue
+
         awg = container.get("awg")
         if not awg or not isinstance(awg, dict):
             continue
+
         protocol_version = awg.get("protocol_version")
         if str(protocol_version) == "2":
             return True

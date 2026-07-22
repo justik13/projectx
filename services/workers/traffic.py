@@ -18,7 +18,6 @@ from config.settings import get_settings
 logger = logging.getLogger("BackgroundWorker")
 
 BATCH_SIZE = 100
-
 TRAFFIC_QUOTA_BYTES = 1 * 1024 * 1024 * 1024 * 1024
 TRAFFIC_MAX_BACKOFF = 900
 
@@ -39,7 +38,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
             shutdown_event.wait(),
             timeout=WORKER_START_DELAY,
         )
-
         logger.info("Traffic sync worker stopped during start delay (shutdown)")
         return
     except asyncio.TimeoutError:
@@ -66,7 +64,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                     Server.name,
                     Server.is_active,
                 )
-
                 result = await session.execute(stmt)
 
                 servers = [
@@ -105,7 +102,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                         server_info["name"],
                         e,
                     )
-
                     return server_info["id"], None
 
             tasks = [_fetch_server_traffic(s) for s in servers]
@@ -283,6 +279,7 @@ async def _process_server_traffic(server_info, api_clients):
                                 "reason": reason,
                                 "target_status": "disabled",
                                 "expires_at": None,
+                                "clear_expires_at": False,
                             }
                         )
 
@@ -311,6 +308,7 @@ async def _process_server_traffic(server_info, api_clients):
                             "reason": "api_desync",
                             "target_status": "active",
                             "expires_at": expires_ts,
+                            "clear_expires_at": expires_ts is None,
                         }
                     )
 
@@ -364,11 +362,11 @@ async def _process_server_traffic(server_info, api_clients):
                 server_info["name"],
             )
 
-    if healing_tasks:
-        await _self_heal_peers(healing_tasks)
+        if healing_tasks:
+            await _self_heal_peers(healing_tasks)
 
-    if reverse_healing_tasks:
-        await _self_heal_peers(reverse_healing_tasks)
+        if reverse_healing_tasks:
+            await _self_heal_peers(reverse_healing_tasks)
 
 
 async def _send_quota_alert(
@@ -511,6 +509,7 @@ async def _self_heal_peers(healing_tasks: list):
                     client_id=task["peer_id"],
                     status=task["target_status"],
                     expires_at=task.get("expires_at"),
+                    clear_expires_at=task.get("clear_expires_at", False),
                 )
 
                 if result:

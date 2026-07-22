@@ -8,6 +8,7 @@ from .common import (
     MANUAL_REVIEW_REASONS,
     _alerted_manual_review,
     _alerted_paid_after_cancel,
+    _alerted_payment_not_found,
     _notified_paid_after_cancel,
 )
 
@@ -385,3 +386,52 @@ async def _send_chargeback_alert_now(
     )
 
     await _send_alert_to_admins(message, keyboard)
+
+
+async def _send_payment_not_found_alert_now(
+    snapshot: dict,
+) -> None:
+    """
+    Отправляет админам алерт, если платёж не найден
+    или не может быть сопоставлен с пользователем.
+    """
+    transaction_id = snapshot.get("transaction_id") or "—"
+    source = snapshot.get("source") or "unknown"
+    status = snapshot.get("status") or "unknown"
+    user_telegram_id = snapshot.get("user_telegram_id") or "—"
+
+    alert_key = (
+        f"{source}:{transaction_id}:{status}:{user_telegram_id}"
+    )
+
+    if alert_key in _alerted_payment_not_found:
+        return
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="🛠 В админку",
+        callback_data="admin_menu",
+    )
+
+    builder.adjust(1)
+
+    keyboard = builder.as_markup()
+
+    message = (
+        f"🚨 <b>Платёж не найден / не сопоставлен</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <b>Transaction / payload:</b> "
+        f"<code>{transaction_id}</code>\n"
+        f"📦 <b>Статус события:</b> <code>{status}</code>\n"
+        f"👤 <b>Telegram ID:</b> "
+        f"<code>{user_telegram_id}</code>\n"
+        f"📍 <b>Источник:</b> <code>{source}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Проверьте платёж вручную.</i>"
+    )
+
+    sent = await _send_alert_to_admins(message, keyboard)
+
+    if sent:
+        _alerted_payment_not_found[alert_key] = True

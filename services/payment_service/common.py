@@ -24,6 +24,11 @@ _alerted_manual_review: TTLCache = TTLCache(
     ttl=86400,
 )
 
+_alerted_payment_not_found: TTLCache = TTLCache(
+    maxsize=100000,
+    ttl=3600,
+)
+
 _redis_client: aioredis.Redis | None = None
 
 MANUAL_REVIEW_REASONS = {
@@ -38,6 +43,8 @@ MANUAL_REVIEW_REASONS = {
     "stars_not_confirmed": "Платёж не подтверждён",
     "status_failed": "Платёж находился в статусе failed",
     "cancel_after_completed": "Отмена после успешной оплаты",
+    "not_found": "Платёж не найден",
+    "owner_mismatch": "Платёж не принадлежит пользователю",
 }
 
 MANUAL_GRANT_ALLOWED_STATUSES = {
@@ -53,7 +60,6 @@ async def _get_redis() -> aioredis.Redis:
 
     if _redis_client is None:
         settings = get_settings()
-
         _redis_client = aioredis.from_url(
             settings.REDIS_URL,
             decode_responses=True,
@@ -119,7 +125,6 @@ def _build_payment_snapshot(payment: Payment) -> dict:
     tariff = payment.tariff
 
     tariff_name = "—"
-
     if tariff:
         tariff_name = (
             f"{tariff.duration_days} дн. / "

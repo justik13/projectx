@@ -11,17 +11,14 @@ from bot.constants import (
 )
 from config.settings import get_settings
 from database.connection import session_scope
-from database.models import Payment
+from database.models import Payment, User
 from services.audit_service import AuditService
 from services.payment_service import PaymentService
 from utils.datetime_helpers import now_utc
 
-
 logger = logging.getLogger("BackgroundWorker")
 
-
 _alerted_stale_payments: set[int] = set()
-
 
 # Короткая стартовая задержка вместо длительного ожидания.
 PAYMENTS_START_DELAY = 60.0
@@ -42,14 +39,11 @@ async def stale_payments_checker_loop(
             shutdown_event.wait(),
             timeout=PAYMENTS_START_DELAY,
         )
-
         logger.info(
             "Stale payments worker stopped during start delay "
             "(shutdown)"
         )
-
         return
-
     except asyncio.TimeoutError:
         pass
 
@@ -72,7 +66,6 @@ async def stale_payments_checker_loop(
                 break
 
             await asyncio.sleep(WORKER_ERROR_SLEEP_INTERVAL)
-
             continue
 
         try:
@@ -80,9 +73,7 @@ async def stale_payments_checker_loop(
                 shutdown_event.wait(),
                 timeout=STALE_PAYMENT_THRESHOLD,
             )
-
             break
-
         except asyncio.TimeoutError:
             continue
 
@@ -98,7 +89,8 @@ async def _process_stale_payments(bot: Bot, settings):
 
     async with session_scope() as session:
         stmt = (
-            select(Payment)
+            select(Payment, User.telegram_id)
+            .join(User, Payment.user_id == User.id)
             .where(
                 Payment.status == "pending",
                 Payment.created_at < threshold,
@@ -108,9 +100,8 @@ async def _process_stale_payments(bot: Bot, settings):
         )
 
         result = await session.execute(stmt)
-        stale_payments = result.scalars().all()
 
-        for payment in stale_payments:
+        for payment, telegram_id in result.all():
             # ВАЖНО:
             #
             # Раньше проверка была:
@@ -130,7 +121,9 @@ async def _process_stale_payments(bot: Bot, settings):
                 )
 
                 if payment.created_at < stars_threshold:
-                    stars_payments_for_review.append(payment)
+                    stars_payments_for_review.append(
+                        (payment, telegram_id)
+                    )
 
     # Проверяем SBP/RUB-платежи через платёжную систему.
     for payment_id in sbp_payment_ids:
@@ -140,7 +133,6 @@ async def _process_stale_payments(bot: Bot, settings):
                     session,
                     payment_id,
                 )
-
         except Exception as e:
             logger.warning(
                 "Failed to check external payment %s: %s",
@@ -166,10 +158,10 @@ async def _process_stale_payments(bot: Bot, settings):
 
 
 async def _mark_stars_payments_manual_review(
-    stars_payments: list[Payment],
+    stars_payments: list[tuple[Payment, int]],
 ):
     async with session_scope() as session:
-        for payment in stars_payments:
+        for payment, telegram_id in stars_payments:
             try:
                 await session.execute(
                     update(Payment)
@@ -197,15 +189,15 @@ async def _mark_stars_payments_manual_review(
                             f"after {STARS_MANUAL_REVIEW_HOURS}h"
                         ),
                     )
-
                 except Exception:
                     pass
 
                 logger.info(
                     "Stars payment %s moved to manual review "
-                    "(not confirmed after %s hours)",
+                    "(not confirmed after %s hours), user=%s",
                     payment.id,
                     STARS_MANUAL_REVIEW_HOURS,
+                    telegram_id,
                 )
 
             except Exception as e:
@@ -220,7 +212,7 @@ async def _mark_stars_payments_manual_review(
 async def _send_stars_manual_review_alert(
     bot: Bot,
     settings,
-    stars_payments: list[Payment],
+    stars_payments: list[tuple[Payment, int]],
 ):
     if not stars_payments:
         return
@@ -237,10 +229,10 @@ async def _send_stars_manual_review_alert(
         f"{STARS_MANUAL_REVIEW_HOURS} ч.\n"
     )
 
-    for payment in stars_payments[:10]:
+    for payment, telegram_id in stars_payments[:10]:
         msg += (
             f"ID: <code>{payment.id}</code> · "
-            f"User: <code>{payment.user_id}</code> · "
+            f"User: <code>{telegram_id}</code> · "
             f"{payment.amount} {payment.currency}\n"
         )
 
@@ -254,7 +246,6 @@ async def _send_stars_manual_review_alert(
                 msg,
                 parse_mode="HTML",
             )
-
         except Exception as e:
             logger.error(
                 "Stars manual review alert failed to %s: %s",
@@ -271,25 +262,31 @@ async def _alert_new_stale_payments(bot: Bot, settings):
 
     async with session_scope() as session:
         fresh_stmt = (
-            select(Payment)
+            select(Payment, User.telegram_id)
+            .join(User, Payment.user_id == User.id)
             .where(
                 Payment.status == "pending",
                 Payment.created_at < threshold,
             )
+            .order_by(Payment.created_at.desc())
         )
 
         fresh_result = await session.execute(fresh_stmt)
-        fresh_stale = fresh_result.scalars().all()
 
-        current_stale_ids = {p.id for p in fresh_stale}
+        fresh_stale = [
+            (payment, telegram_id)
+            for payment, telegram_id in fresh_result.all()
+        ]
+
+        current_stale_ids = {p.id for p, _ in fresh_stale}
 
         _alerted_stale_payments.intersection_update(
             current_stale_ids,
         )
 
         new_stale_for_alert = [
-            p
-            for p in fresh_stale
+            (p, tg)
+            for p, tg in fresh_stale
             if p.id not in _alerted_stale_payments
         ]
 
@@ -302,13 +299,13 @@ async def _alert_new_stale_payments(bot: Bot, settings):
         f"Количество: <b>{len(new_stale_for_alert)}</b>\n"
     )
 
-    for p in new_stale_for_alert[:10]:
-        method = p.payment_method or "—"
+    for payment, telegram_id in new_stale_for_alert[:10]:
+        method = payment.payment_method or "—"
 
         msg += (
-            f"ID: <code>{p.id}</code> · "
-            f"User: <code>{p.user_id}</code> · "
-            f"{p.amount} {p.currency} · {method}\n"
+            f"ID: <code>{payment.id}</code> · "
+            f"User: <code>{telegram_id}</code> · "
+            f"{payment.amount} {payment.currency} · {method}\n"
         )
 
     if len(new_stale_for_alert) > 10:
@@ -323,7 +320,6 @@ async def _alert_new_stale_payments(bot: Bot, settings):
                 msg,
                 parse_mode="HTML",
             )
-
         except Exception as e:
             logger.error(
                 "Stale alert failed to %s: %s",
@@ -331,5 +327,5 @@ async def _alert_new_stale_payments(bot: Bot, settings):
                 e,
             )
 
-    for p in new_stale_for_alert:
-        _alerted_stale_payments.add(p.id)
+    for payment, _ in new_stale_for_alert:
+        _alerted_stale_payments.add(payment.id)

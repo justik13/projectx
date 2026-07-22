@@ -13,14 +13,13 @@ def get_tariff_showcase_keyboard(
         group_name = get_tariff_group_name(limit)
         builder.button(
             text=group_name,
-            callback_data=f"select_tariff_type:{limit}",
+            callback_data=f"select_tariff_type:{limit}:showcase",
         )
 
     builder.button(
         text="🏠 В главное меню",
         callback_data="back_to_main_menu",
     )
-
     builder.adjust(1)
     return builder.as_markup()
 
@@ -28,7 +27,7 @@ def get_tariff_showcase_keyboard(
 def get_tariff_duration_keyboard(
     tariffs: list,
     *,
-    back_to: str = "payment_showcase",
+    source: str = "showcase",
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
@@ -47,10 +46,15 @@ def get_tariff_duration_keyboard(
 
         builder.button(
             text=text,
-            callback_data=f"select_tariff:{t.id}",
+            callback_data=f"select_tariff:{t.id}:{source}",
         )
 
-    if back_to == "subscription":
+    if source == "change":
+        builder.button(
+            text="← Назад",
+            callback_data="payment_change_tariff",
+        )
+    elif source == "renew":
         builder.button(
             text="← Назад",
             callback_data="menu_subscription",
@@ -83,14 +87,13 @@ def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
 
         builder.button(
             text=text,
-            callback_data=f"select_tariff:{t.id}",
+            callback_data=f"select_tariff:{t.id}:renew",
         )
 
     builder.button(
         text="← Назад",
         callback_data="menu_subscription",
     )
-
     builder.adjust(1)
     return builder.as_markup()
 
@@ -104,7 +107,6 @@ def get_change_tariff_keyboard(
     builder = InlineKeyboardBuilder()
 
     grouped: dict[int, list] = {}
-
     for t in tariffs:
         limit = getattr(t, "device_limit", 2)
 
@@ -113,7 +115,6 @@ def get_change_tariff_keyboard(
 
         if limit not in grouped:
             grouped[limit] = []
-
         grouped[limit].append(t)
 
     for limit in sorted(grouped.keys()):
@@ -126,14 +127,13 @@ def get_change_tariff_keyboard(
 
         builder.button(
             text=group_name,
-            callback_data=f"select_tariff_type:{limit}",
+            callback_data=f"select_tariff_type:{limit}:change",
         )
 
     builder.button(
         text="← Назад",
         callback_data="back_to_main_menu",
     )
-
     builder.adjust(1)
     return builder.as_markup()
 
@@ -142,6 +142,7 @@ def get_payment_method_keyboard(
     tariff_id: int,
     device_limit: int | None = None,
     sbp_enabled: bool = False,
+    source: str = "showcase",
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура способов оплаты.
@@ -157,19 +158,24 @@ def get_payment_method_keyboard(
 
     builder.button(
         text="⭐ Telegram Stars",
-        callback_data=f"pay_stars:{tariff_id}",
+        callback_data=f"pay_stars:{tariff_id}:{source}",
     )
 
     if sbp_enabled:
         builder.button(
             text="🏦 СБП / Карта",
-            callback_data=f"pay_sbp:{tariff_id}",
+            callback_data=f"pay_sbp:{tariff_id}:{source}",
         )
 
-    if device_limit is not None:
+    if source == "renew":
         builder.button(
             text="← Назад",
-            callback_data=f"select_tariff_type:{device_limit}",
+            callback_data="payment_quick_renew",
+        )
+    elif device_limit is not None:
+        builder.button(
+            text="← Назад",
+            callback_data=f"select_tariff_type:{device_limit}:{source}",
         )
     else:
         builder.button(
@@ -205,6 +211,7 @@ def get_sbp_payment_keyboard(
     payment_url: str,
     payment_id: int,
     tariff_id: int,
+    source: str = "showcase",
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
@@ -218,7 +225,7 @@ def get_sbp_payment_keyboard(
     )
     builder.button(
         text="❌ Отменить",
-        callback_data=f"cancel_invoice:{payment_id}:{tariff_id}",
+        callback_data=f"cancel_invoice:{payment_id}:{tariff_id}:{source}",
     )
 
     builder.adjust(1, 1, 1)
