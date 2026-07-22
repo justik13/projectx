@@ -37,7 +37,6 @@ GRACE_PERIOD_HOURS = 48
 def _format_protocol(raw_protocol: str | None) -> str:
     if not raw_protocol:
         return "—"
-
     return _PROTOCOL_DISPLAY.get(raw_protocol, raw_protocol)
 
 
@@ -45,45 +44,21 @@ async def _get_effective_device_limit(
     user: User,
     session: AsyncSession,
 ) -> int:
-    """
-    Возвращает актуальный лимит устройств.
-
-    Приоритет:
-    1. device_limit текущего тарифа;
-    2. fallback на user.device_limit;
-    3. 0, если данных нет.
-
-    Это защищает от ситуации, когда current_tariff_id по какой-то
-    причине не найден, но у пользователя сохранён device_limit.
-    """
     if user.current_tariff_id:
         tariff = await get_tariff_by_id(
             session,
             user.current_tariff_id,
         )
-
         if tariff:
             return tariff.device_limit
-
     return user.device_limit or 0
 
 
 def _get_grace_deletion_time(user: User):
-    """
-    Возвращает время, когда устройства пользователя будут удалены
-    после истечения подписки.
-
-    Правила:
-    - если подписки нет — None;
-    - если подписка вечная — None;
-    - иначе subscription_end + 48 часов.
-    """
     if not user.subscription_end:
         return None
-
     if user.subscription_end.year >= 2100:
         return None
-
     return user.subscription_end + timedelta(
         hours=GRACE_PERIOD_HOURS,
     )
@@ -92,21 +67,15 @@ def _get_grace_deletion_time(user: User):
 def _format_grace_countdown(deletion_time) -> str:
     if not deletion_time:
         return "в ближайшее время"
-
     current_time = now_utc()
     delta = deletion_time - current_time
-
     if delta.total_seconds() <= 0:
         return "в ближайшее время"
-
     days = delta.days
     hours = delta.seconds // 3600
-
     if days > 0:
         return f"{days} дн. {hours} ч."
-
     minutes = (delta.seconds % 3600) // 60
-
     return f"{hours} ч. {minutes} мин."
 
 
@@ -117,7 +86,6 @@ async def _render_maintenance(
     back_to: str = "back_to_connections",
 ) -> None:
     message = await MaintenanceService.get_message(session)
-
     await render_hub(
         target.bot,
         target.chat.id,
@@ -134,7 +102,6 @@ async def _build_connections_screen(
 ) -> tuple[str, InlineKeyboardBuilder]:
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
-
     device_limit = await _get_effective_device_limit(
         user,
         session,
@@ -147,20 +114,23 @@ async def _build_connections_screen(
 
     if read_only:
         deletion_time = _get_grace_deletion_time(user)
-
         if deletion_time:
             countdown = _format_grace_countdown(deletion_time)
-
+            # ИСПРАВЛЕНО: текст read-only.
+            # Раньше: «Устройства можно удалить, но они не будут работать»
+            # Теперь: «Устройства неактивны. Удаление доступно, но они не работают.»
             rendered += (
                 "\n⚠️ <b>Подписка истекла</b>\n"
-                "Устройства можно удалить, но они не будут работать.\n"
+                "Устройства неактивны. "
+                "Удаление доступно, но они не работают.\n"
                 f"Устройства будут удалены через: <b>{countdown}</b>\n"
-                "Продлите доступ, чтобы сохранить их.\n"
+                "Продлите доступ, чтобы восстановить их.\n"
             )
         else:
             rendered += (
                 "\n⚠️ <b>Подписка истекла</b>\n"
-                "Устройства можно удалить, но они не будут работать.\n"
+                "Устройства неактивны. "
+                "Удаление доступно, но они не работают.\n"
             )
 
     builder = InlineKeyboardBuilder()
@@ -170,7 +140,6 @@ async def _build_connections_screen(
     else:
         for profile in profiles:
             server = profile.server
-
             flag = server.country_flag if server else "🌍"
             server_name = server.name if server else "Неизвестно"
 
@@ -209,7 +178,6 @@ async def _build_connections_screen(
         )
 
     builder.adjust(1)
-
     return rendered, builder
 
 
@@ -231,7 +199,6 @@ async def _render_connections(
         session,
         user.telegram_id,
     )
-
     profiles_count = await get_user_profiles_count(
         session,
         user.id,
@@ -244,7 +211,6 @@ async def _render_connections(
                 session,
                 read_only=True,
             )
-
             builder.button(
                 text="🚀 Купить доступ",
                 callback_data="menu_buy",
@@ -253,9 +219,7 @@ async def _render_connections(
                 text="🏠 В главное меню",
                 callback_data="back_to_main_menu",
             )
-
             builder.adjust(1)
-
             await render_hub(
                 target.bot,
                 target.chat.id,
@@ -265,7 +229,6 @@ async def _render_connections(
             return
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="🚀 Купить доступ",
             callback_data="menu_buy",
@@ -274,9 +237,7 @@ async def _render_connections(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1)
-
         await render_hub(
             target.bot,
             target.chat.id,
@@ -290,14 +251,11 @@ async def _render_connections(
         session,
         read_only=False,
     )
-
     builder.button(
         text="🏠 В главное меню",
         callback_data="back_to_main_menu",
     )
-
     builder.adjust(1)
-
     await render_hub(
         target.bot,
         target.chat.id,

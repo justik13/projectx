@@ -91,8 +91,21 @@ async def pay_stars(
         return
 
     tariff = await get_tariff_by_id(session, tariff_id)
-    if not tariff or not db_user:
-        await callback.answer()
+
+    # ИСПРАВЛЕНО: раньше был тихий return.
+    # Теперь пользователь видит понятную ошибку.
+    if not tariff:
+        await callback.answer(
+            texts.ERROR_TARIFF_NOT_FOUND,
+            show_alert=True,
+        )
+        return
+
+    if not db_user:
+        await callback.answer(
+            texts.ERROR_USER_NOT_FOUND,
+            show_alert=True,
+        )
         return
 
     if not tariff.is_active:
@@ -148,7 +161,6 @@ async def pay_stars(
             )
 
             device_limit = getattr(tariff, "device_limit", 2)
-
             await send_hub_invoice(
                 callback.bot,
                 callback.message.chat.id,
@@ -180,16 +192,6 @@ async def pay_stars(
 
         except TelegramAPIError as e:
             logger.error(f"Failed to send invoice: {e}")
-            #
-            # ИСПРАВЛЕНО (БАГ C):
-            #
-            # Раньше если render_hub тоже падал (например, бот
-            # заблокирован пользователем), payment.status = "failed"
-            # не выполнялся, и платёж оставался pending навсегда.
-            #
-            # Теперь render_hub обёрнут в try/except, и
-            # payment.status = "failed" выполняется всегда.
-            #
             try:
                 await render_hub(
                     callback.bot,
@@ -218,19 +220,6 @@ async def process_pre_checkout(
     pre_checkout_query: PreCheckoutQuery,
     session: AsyncSession | None = None,
 ) -> None:
-    """
-    Полная серверная валидация перед оплатой Stars.
-
-    Проверяется:
-    - платёж существует;
-    - платёж находится в статусе pending;
-    - владелец платежа совпадает;
-    - пользователь не забанен и не удалён;
-    - тариф существует и активен;
-    - режим технических работ не включён;
-    - сумма платежа совпадает с тарифом.
-    """
-
     async def _validate(
         pre_checkout_query: PreCheckoutQuery,
         db_session: AsyncSession,
@@ -373,13 +362,6 @@ async def process_successful_payment(
     state: FSMContext,
     session: AsyncSession = None,
 ) -> None:
-    #
-    # ИСПРАВЛЕНО (БАГ E):
-    #
-    # Раньше если session был None (middleware не сработал),
-    # код падал на get_payment_by_id(session, payment_id).
-    # Теперь есть явный guard.
-    #
     if session is None:
         logger.error(
             "process_successful_payment: session is None, "
@@ -400,7 +382,6 @@ async def process_successful_payment(
         return
 
     payment = await get_payment_by_id(session, payment_id)
-
     if not payment:
         try:
             await _send_payment_not_found_alert_now(
@@ -506,14 +487,12 @@ async def process_successful_payment(
             else 2
         )
         tariff_name = get_tariff_display_name(device_limit)
-
         text = texts.PAYMENT_PAID_AFTER_CANCEL.format(
             amount=payment.amount,
             currency=payment.currency,
             tariff_name=tariff_name,
             payment_id=payment.id,
         )
-
         builder = InlineKeyboardBuilder()
         builder.button(
             text="💬 Написать в поддержку",
@@ -524,7 +503,6 @@ async def process_successful_payment(
             callback_data="back_to_main_menu",
         )
         builder.adjust(1, 1)
-
         await render_hub(
             message.bot,
             message.chat.id,
@@ -535,7 +513,6 @@ async def process_successful_payment(
     elif result_code == "manual_review":
         settings = get_settings()
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
-
         builder = InlineKeyboardBuilder()
         builder.button(
             text="💬 Написать в поддержку",
@@ -546,7 +523,6 @@ async def process_successful_payment(
             callback_data="back_to_main_menu",
         )
         builder.adjust(1, 1)
-
         await render_hub(
             message.bot,
             message.chat.id,
@@ -620,22 +596,22 @@ async def cancel_invoice(
     await callback.answer("❌ Инвойс отменен")
 
     tariff = await get_tariff_by_id(session, tariff_id)
-    if tariff:
+
+    # ИСПРАВЛЕНО: проверка tariff.is_active.
+    # Если тариф отключён, показываем витрину/хаб вместо checkout.
+    if tariff and tariff.is_active:
         device_limit = getattr(tariff, "device_limit", 2)
         tariff_name = get_tariff_display_name(device_limit)
-
         text = texts.PAYMENT_CHECKOUT_TEXT.format(
             tariff_name=tariff_name,
             duration_days=tariff.duration_days,
             price_rub=tariff.price_rub,
             price_stars=tariff.price_stars,
         )
-
         settings = get_settings()
         sbp_enabled = bool(
             settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET
         )
-
         await render_hub(
             callback.bot,
             callback.message.chat.id,
@@ -649,6 +625,7 @@ async def cancel_invoice(
         )
         return
 
+    # Тариф не найден или отключён — показываем витрину/хаб
     user = await get_user_by_telegram_id(
         session,
         callback.from_user.id,

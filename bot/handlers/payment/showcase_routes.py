@@ -33,16 +33,6 @@ from .common import (
 
 router = Router()
 
-
-#
-# ИСПРАВЛЕНО (БАГ 7):
-#
-# Раньше при db_user=None был тихий return — пользователь
-# нажимал кнопку и ничего не происходило.
-#
-# Теперь показывается понятное сообщение с кнопкой «Начать»,
-# которая вызывает /start и создаёт пользователя в БД.
-#
 _USER_NOT_REGISTERED_TEXT = (
     "⚠️ <b>Профиль не найден</b>\n"
     "Похоже, вы ещё не зарегистрированы в боте.\n"
@@ -51,7 +41,6 @@ _USER_NOT_REGISTERED_TEXT = (
 
 
 def _get_start_keyboard():
-    """Клавиатура с кнопкой /start для незарегистрированных."""
     builder = InlineKeyboardBuilder()
     builder.button(
         text="🚀 Начать",
@@ -95,7 +84,6 @@ async def hub_menu_payment(
         return
 
     is_active = await _is_subscription_active(db_user)
-
     if is_active:
         await _show_hub(callback, db_user, session)
     else:
@@ -108,10 +96,8 @@ async def show_tariff_showcase_callback(
     session: AsyncSession,
 ) -> None:
     await callback.answer()
-
     if session is None:
         return
-
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
@@ -122,7 +108,6 @@ async def show_tariff_showcase_callback(
             back_to="back_to_main_menu",
         )
         return
-
     await _show_showcase(callback, session)
 
 
@@ -150,16 +135,6 @@ async def select_tariff(
         "renew": "payment_quick_renew",
     }.get(source, "payment_showcase")
 
-    #
-    # ИСПРАВЛЕНО (БАГ 7):
-    #
-    # Раньше при db_user=None проверка даунгрейда просто
-    # пропускалась, и пользователь видел экран оплаты.
-    # Потом pay_stars/pay_sbp тоже проверяли, но это лишний шаг.
-    #
-    # Теперь: если db_user=None, показываем сообщение
-    # о необходимости регистрации.
-    #
     if not db_user:
         await callback.answer()
         await render_hub(
@@ -211,16 +186,13 @@ async def select_tariff(
     sbp_enabled = bool(
         settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET
     )
-
     tariff_name = get_tariff_display_name(device_limit)
-
     text = texts.PAYMENT_CHECKOUT_TEXT.format(
         tariff_name=tariff_name,
         duration_days=tariff.duration_days,
         price_rub=tariff.price_rub,
         price_stars=tariff.price_stars,
     )
-
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -243,15 +215,6 @@ async def show_quick_renew(
 ) -> None:
     await callback.answer()
 
-    #
-    # ИСПРАВЛЕНО (БАГ 6):
-    #
-    # Раньше db_user был без default и без проверки.
-    # Если пользователь не найден в БД (db_user=None),
-    # код падал на db_user.device_limit → AttributeError.
-    #
-    # Теперь: явный guard с понятным сообщением.
-    #
     if not db_user:
         await render_hub(
             callback.bot,
@@ -276,14 +239,14 @@ async def show_quick_renew(
         return
 
     tariffs = await get_active_tariffs(session)
-    current_limit = db_user.device_limit
+    # ИСПРАВЛЕНО: device_limit or 0 — защита от None
+    current_limit = db_user.device_limit or 0
 
     renew_tariffs = [
         tariff
         for tariff in tariffs
         if getattr(tariff, "device_limit", 2) == current_limit
     ]
-
     if not renew_tariffs:
         await render_hub(
             callback.bot,
@@ -294,14 +257,11 @@ async def show_quick_renew(
         return
 
     tariff_name = get_tariff_display_name(current_limit)
-
     text = texts.PAYMENT_QUICK_RENEW_HEADER.format(
         tariff_name=tariff_name,
         valid_until=format_datetime(db_user.subscription_end),
     )
-
     keyboard = get_renew_keyboard(renew_tariffs)
-
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -318,11 +278,6 @@ async def show_change_tariff(
 ) -> None:
     await callback.answer()
 
-    #
-    # ИСПРАВЛЕНО (БАГ 6):
-    #
-    # Аналогично show_quick_renew — guard для db_user=None.
-    #
     if not db_user:
         await render_hub(
             callback.bot,
@@ -347,7 +302,6 @@ async def show_change_tariff(
         return
 
     tariffs = await get_active_tariffs(session)
-
     if not tariffs:
         await render_hub(
             callback.bot,
@@ -357,7 +311,8 @@ async def show_change_tariff(
         )
         return
 
-    current_limit = db_user.device_limit
+    # ИСПРАВЛЕНО: device_limit or 0 — защита от None
+    current_limit = db_user.device_limit or 0
     tariff_name = get_tariff_display_name(current_limit)
     is_active = await _is_subscription_active(db_user)
 
@@ -365,13 +320,11 @@ async def show_change_tariff(
         tariff_name=tariff_name,
         valid_until=format_datetime(db_user.subscription_end),
     )
-
     keyboard = get_change_tariff_keyboard(
         tariffs,
         current_limit,
         is_subscription_active=is_active,
     )
-
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -387,7 +340,6 @@ async def select_tariff_type(
     db_user=None,
 ) -> None:
     await callback.answer()
-
     if session is None:
         return
 
@@ -414,10 +366,8 @@ async def select_tariff_type(
         )
         return
 
-    # Дополнительная серверная проверка даунгрейда и лимита устройств.
     if db_user:
         is_active = await _is_subscription_active(db_user)
-
         if is_active:
             current_limit = db_user.device_limit or 0
             if device_limit < current_limit:
@@ -452,13 +402,11 @@ async def select_tariff_type(
             return
 
     tariffs = await get_active_tariffs(session)
-
     type_tariffs = [
         tariff
         for tariff in tariffs
         if getattr(tariff, "device_limit", 2) == device_limit
     ]
-
     if not type_tariffs:
         await render_hub(
             callback.bot,
@@ -472,14 +420,11 @@ async def select_tariff_type(
         device_limit,
         "",
     )
-
     text = description + texts.PAYMENT_DURATION_HEADER
-
     keyboard = get_tariff_duration_keyboard(
         type_tariffs,
         source=source,
     )
-
     await render_hub(
         callback.bot,
         callback.message.chat.id,

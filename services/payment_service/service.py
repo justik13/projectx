@@ -23,6 +23,7 @@ from services.subscription import SubscriptionService
 from utils.datetime_helpers import now_utc
 
 from .alerts import (
+    _notify_client_chargeback_now,
     _notify_client_paid_after_cancel_now,
     _send_cancel_after_completed_alert_now,
     _send_chargeback_alert_now,
@@ -776,14 +777,6 @@ class PaymentService:
                 return False, "refunded"
 
             # ── Верификация суммы ──────────────────────────
-            #
-            # ИСПРАВЛЕНО (БАГ B):
-            # Раньше здесь был float(status_data["amount"]),
-            # который падал при строке или None.
-            # Теперь используем _to_decimal для безопасной
-            # конвертации. Если значение невалидное,
-            # callback_amount остаётся None → manual_review.
-            #
             if callback_amount is None:
                 client = PlategaClient()
                 status_data = await client.check_status(
@@ -1027,17 +1020,8 @@ class PaymentService:
 
                 if provider_status == "CONFIRMED":
                     #
-                    # ИСПРАВЛЕНО (БАГ A):
-                    #
-                    # Раньше если callback_amount был None,
-                    # верификация суммы полностью пропускалась
-                    # и платёж обрабатывался без проверки.
-                    #
-                    # Теперь: если amount отсутствует →
-                    # manual_review. Это закрывает вектор,
-                    # когда злоумышленник создаёт платёж на 1₽,
-                    # отменяет, оплачивает, и жмёт "Я оплатил"
-                    # без верификации суммы.
+                    # Верификация суммы.
+                    # Если amount отсутствует → manual_review.
                     #
                     callback_amount = status_data.get("amount")
 
@@ -1076,6 +1060,10 @@ class PaymentService:
                         )
                         return False, "manual_review"
 
+                    #
+                    # Верификация валюты.
+                    # ВНУТРИ if provider_status == "CONFIRMED".
+                    #
                     callback_currency = status_data.get(
                         "currency"
                     )
@@ -1152,25 +1140,25 @@ class PaymentService:
                     )
                     return False, "manual_review"
 
-                callback_currency = status_data.get("currency")
-                if callback_currency:
-                    callback_currency_norm = str(
-                        callback_currency
-                    ).upper()
-                    payment_currency_norm = str(
-                        payment.currency
-                    ).upper()
-                    if (
-                        payment_currency_norm
-                        != callback_currency_norm
-                    ):
-                        await PaymentService._set_manual_review(
-                            session,
-                            payment.id,
-                            "currency_mismatch",
-                            source="check_platega_payment",
-                        )
-                        return False, "manual_review"
+            callback_currency = status_data.get("currency")
+            if callback_currency:
+                callback_currency_norm = str(
+                    callback_currency
+                ).upper()
+                payment_currency_norm = str(
+                    payment.currency
+                ).upper()
+                if (
+                    payment_currency_norm
+                    != callback_currency_norm
+                ):
+                    await PaymentService._set_manual_review(
+                        session,
+                        payment.id,
+                        "currency_mismatch",
+                        source="check_platega_payment",
+                    )
+                    return False, "manual_review"
 
             success, result_code = (
                 await PaymentService.handle_successful_payment(
@@ -1464,7 +1452,6 @@ class PaymentService:
                                         "bonus for %s",
                                         user.telegram_id,
                                     )
-
                             except Exception as e:
                                 logger.error(
                                     "Chargeback: failed to "
@@ -1536,6 +1523,14 @@ class PaymentService:
                     session,
                     lambda s=snapshot, tid=transaction_id: (
                         _send_chargeback_alert_now(s, tid)
+                    ),
+                )
+
+                # НОВОЕ: уведомление клиента при chargeback.
+                queue_post_commit_task(
+                    session,
+                    lambda s=snapshot: (
+                        _notify_client_chargeback_now(s)
                     ),
                 )
 
