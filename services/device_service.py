@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 import uuid
 from datetime import date
 
@@ -37,14 +38,74 @@ logger = logging.getLogger(__name__)
 CRITICAL_SLOTS_THRESHOLD = 5
 
 _redis_client: aioredis.Redis | None = None
-_server_locks: dict[int, asyncio.Lock] = {}
+
+#
+# ИСПРАВЛЕНО (БАГ 9):
+#
+# Раньше _user_locks и _server_locks были dict[int, asyncio.Lock]
+# и росли бесконечно. При тысячах пользователей это приводило
+# к утечке памяти.
+#
+# Теперь каждый lock хранится как (lock, last_used_timestamp).
+# Функция _cleanup_locks() вызывается каждые 3600 секунд
+# и удаляет незаблокированные locks старше 1 часа.
+#
+_user_locks: dict[int, tuple[asyncio.Lock, float]] = {}
+_server_locks: dict[int, tuple[asyncio.Lock, float]] = {}
+_last_lock_cleanup: float = 0.0
+_LOCK_CLEANUP_INTERVAL = 3600.0
+_LOCK_TTL = 3600.0
+
+
+def _cleanup_locks(now: float) -> None:
+    """
+    Удаляет незаблокированные locks, которые не использовались
+    дольше _LOCK_TTL секунд.
+
+    Вызывается периодически из _get_user_lock / _get_server_lock.
+    """
+    old_users = [
+        uid
+        for uid, (lock, last_used) in _user_locks.items()
+        if now - last_used > _LOCK_TTL and not lock.locked()
+    ]
+    for uid in old_users:
+        del _user_locks[uid]
+
+    old_servers = [
+        sid
+        for sid, (lock, last_used) in _server_locks.items()
+        if now - last_used > _LOCK_TTL and not lock.locked()
+    ]
+    for sid in old_servers:
+        del _server_locks[sid]
+
+    if old_users or old_servers:
+        logger.debug(
+            "Device locks cleanup: removed %s user locks, "
+            "%s server locks. Remaining: %s user, %s server",
+            len(old_users),
+            len(old_servers),
+            len(_user_locks),
+            len(_server_locks),
+        )
 
 
 def _get_server_lock(server_id: int) -> asyncio.Lock:
-    if server_id not in _server_locks:
-        _server_locks[server_id] = asyncio.Lock()
+    global _last_lock_cleanup
 
-    return _server_locks[server_id]
+    now = time.monotonic()
+    if now - _last_lock_cleanup > _LOCK_CLEANUP_INTERVAL:
+        _cleanup_locks(now)
+        _last_lock_cleanup = now
+
+    if server_id not in _server_locks:
+        _server_locks[server_id] = (asyncio.Lock(), now)
+    else:
+        lock, _ = _server_locks[server_id]
+        _server_locks[server_id] = (lock, now)
+
+    return _server_locks[server_id][0]
 
 
 async def _queue_failed_rollback_deletion(
@@ -73,10 +134,8 @@ async def _queue_failed_rollback_deletion(
                 last_attempt_at=now_utc(),
                 last_error=reason,
             )
-
             session.add(pending)
             await session.flush()
-
     except Exception as e:
         logger.error(
             "Failed to queue rollback pending deletion: %s",
@@ -87,7 +146,6 @@ async def _queue_failed_rollback_deletion(
 
 async def close_redis() -> None:
     global _redis_client
-
     if _redis_client is not None:
         try:
             await _redis_client.close()
@@ -97,16 +155,13 @@ async def close_redis() -> None:
 
 async def _get_redis() -> aioredis.Redis:
     global _redis_client
-
     if _redis_client is None:
         settings = get_settings()
-
         _redis_client = aioredis.from_url(
             settings.REDIS_URL,
             decode_responses=True,
             socket_timeout=5.0,
         )
-
     return _redis_client
 
 
@@ -134,14 +189,21 @@ class InvalidConfig(DeviceCreationError):
     pass
 
 
-_user_locks: dict[int, asyncio.Lock] = {}
-
-
 def _get_user_lock(user_id: int) -> asyncio.Lock:
-    if user_id not in _user_locks:
-        _user_locks[user_id] = asyncio.Lock()
+    global _last_lock_cleanup
 
-    return _user_locks[user_id]
+    now = time.monotonic()
+    if now - _last_lock_cleanup > _LOCK_CLEANUP_INTERVAL:
+        _cleanup_locks(now)
+        _last_lock_cleanup = now
+
+    if user_id not in _user_locks:
+        _user_locks[user_id] = (asyncio.Lock(), now)
+    else:
+        lock, _ = _user_locks[user_id]
+        _user_locks[user_id] = (lock, now)
+
+    return _user_locks[user_id][0]
 
 
 def _is_same_day_msk(
@@ -150,7 +212,6 @@ def _is_same_day_msk(
 ) -> bool:
     if stored_date is None:
         return False
-
     return stored_date == now_msk_date
 
 
@@ -161,13 +222,12 @@ async def _get_server_profiles_count(
     stmt = select(func.count(VPNProfile.id)).where(
         VPNProfile.server_id == server_id,
     )
-
     result = await session.execute(stmt)
-
     return result.scalar_one() or 0
 
 
 class DeviceService:
+
     @staticmethod
     async def create_device(
         session: AsyncSession,
@@ -176,7 +236,6 @@ class DeviceService:
         device_name: str,
     ) -> VPNProfile:
         server = await get_server_by_id(session, server_id)
-
         if not server or server.protocol != AMNEZIA_PROTOCOL:
             logger.warning(
                 "create_device: invalid server %s "
@@ -212,16 +271,13 @@ class DeviceService:
         local_lock = None
         acquired = False
         using_redis = False
-
         peer_id = None
         client = None
 
         try:
             try:
                 redis = await _get_redis()
-
                 lock_key = f"lock:create_device:server:{server.id}"
-
                 #
                 # Увеличенный timeout Redis-lock.
                 # Раньше было 30 секунд, что могло быть мало при медленном API
@@ -232,17 +288,14 @@ class DeviceService:
                     timeout=60,
                     blocking_timeout=10,
                 )
-
                 acquired = await redis_lock.acquire()
                 using_redis = True
-
             except Exception as e:
                 logger.warning(
                     "create_device: Redis lock unavailable, "
                     "falling back to local lock: %s",
                     e,
                 )
-
                 local_lock = _get_server_lock(server.id)
                 await local_lock.acquire()
                 acquired = True
@@ -260,7 +313,6 @@ class DeviceService:
                 session,
                 server.id,
             )
-
             free_slots = server.max_clients - local_count
 
             if free_slots <= 0:
@@ -281,12 +333,10 @@ class DeviceService:
                     free_slots,
                     CRITICAL_SLOTS_THRESHOLD,
                 )
-
                 real_count = await get_real_peer_count(
                     server,
                     force_refresh=True,
                 )
-
                 if real_count == -1:
                     logger.warning(
                         "create_device: cannot verify real peer count "
@@ -297,7 +347,6 @@ class DeviceService:
                     raise ServerUnavailable(
                         "Cannot verify server slots, try later",
                     )
-
                 if real_count >= server.max_clients:
                     logger.warning(
                         "create_device: server %s is full "
@@ -309,16 +358,13 @@ class DeviceService:
                     raise ServerUnavailable("Server is full")
 
             lock = _get_user_lock(user.id)
-
             async with lock:
                 result = await session.execute(
                     select(User)
                     .where(User.telegram_id == user.telegram_id)
                     .with_for_update()
                 )
-
                 user = result.scalar_one_or_none()
-
                 if not user:
                     raise ServerUnavailable("User disappeared")
 
@@ -341,7 +387,6 @@ class DeviceService:
 
                 if not is_admin(user.telegram_id):
                     now_msk_date = now_msk().date()
-
                     if not _is_same_day_msk(
                         user.last_creation_date,
                         now_msk_date,
@@ -359,7 +404,6 @@ class DeviceService:
                             "daily limit",
                             user.telegram_id,
                         )
-
                         try:
                             await AuditService.log_action(
                                 session,
@@ -379,19 +423,16 @@ class DeviceService:
                                 "DEVICE_CREATE_BLOCKED: %s",
                                 audit_error,
                             )
-
                         raise DailyLimitExceeded(
                             "Daily limit exceeded",
                         )
 
                 short_hash = uuid.uuid4().hex[:4]
-
                 clean_device_name = re.sub(
                     r"[^a-zA-Z0-9]",
                     "",
                     device_name,
                 )[:10]
-
                 if not clean_device_name:
                     clean_device_name = "Device"
 
@@ -416,7 +457,6 @@ class DeviceService:
                         client_name=client_name,
                         expires_at=expires_ts,
                     )
-
                     if not api_result:
                         raise ServerUnavailable(
                             "API create_user failed",
@@ -433,12 +473,10 @@ class DeviceService:
                             "create_device: API returned invalid "
                             "configuration URI. Rolling back."
                         )
-
                         try:
                             deleted = await client.delete_user(
                                 client_id=peer_id,
                             )
-
                             if not deleted:
                                 await _queue_failed_rollback_deletion(
                                     server,
@@ -446,7 +484,6 @@ class DeviceService:
                                     user.telegram_id,
                                     "invalid_config_delete_false",
                                 )
-
                         except Exception as rollback_error:
                             await _queue_failed_rollback_deletion(
                                 server,
@@ -454,7 +491,6 @@ class DeviceService:
                                 user.telegram_id,
                                 f"invalid_config_delete_error: {rollback_error}",
                             )
-
                         raise InvalidConfig(
                             "Invalid configuration URI"
                         )
@@ -464,18 +500,15 @@ class DeviceService:
                     # Если конфиг битый, откатываем создание пира.
                     #
                     conf_content = build_conf_file(raw_config)
-
                     if not conf_content:
                         logger.error(
                             "create_device: API returned vpn:// URI "
                             "without usable .conf content. Rolling back."
                         )
-
                         try:
                             deleted = await client.delete_user(
                                 client_id=peer_id,
                             )
-
                             if not deleted:
                                 await _queue_failed_rollback_deletion(
                                     server,
@@ -483,7 +516,6 @@ class DeviceService:
                                     user.telegram_id,
                                     "broken_conf_delete_false",
                                 )
-
                         except Exception as rollback_error:
                             await _queue_failed_rollback_deletion(
                                 server,
@@ -491,7 +523,6 @@ class DeviceService:
                                 user.telegram_id,
                                 f"broken_conf_delete_error: {rollback_error}",
                             )
-
                         raise InvalidConfig(
                             "Broken configuration content"
                         )
@@ -504,7 +535,6 @@ class DeviceService:
                                     user.id,
                                 )
                             )
-
                             if profiles_count >= user.device_limit:
                                 raise DeviceLimitExceeded(
                                     "Device limit reached",
@@ -548,7 +578,6 @@ class DeviceService:
                             deleted = await client.delete_user(
                                 client_id=peer_id,
                             )
-
                             if not deleted:
                                 await _queue_failed_rollback_deletion(
                                     server,
@@ -556,7 +585,6 @@ class DeviceService:
                                     user.telegram_id,
                                     "device_limit_delete_false",
                                 )
-
                         except Exception as rollback_error:
                             await _queue_failed_rollback_deletion(
                                 server,
@@ -564,22 +592,18 @@ class DeviceService:
                                 user.telegram_id,
                                 f"device_limit_delete_error: {rollback_error}",
                             )
-
                         raise
 
                     except IntegrityError as e:
                         await session.rollback()
-
                         logger.error(
                             "create_device: IntegrityError: %s",
                             e,
                         )
-
                         try:
                             deleted = await client.delete_user(
                                 client_id=peer_id,
                             )
-
                             if not deleted:
                                 await _queue_failed_rollback_deletion(
                                     server,
@@ -587,7 +611,6 @@ class DeviceService:
                                     user.telegram_id,
                                     "integrity_error_delete_false",
                                 )
-
                         except Exception as rollback_error:
                             await _queue_failed_rollback_deletion(
                                 server,
@@ -595,7 +618,6 @@ class DeviceService:
                                 user.telegram_id,
                                 f"integrity_error_delete_error: {rollback_error}",
                             )
-
                         raise
 
                 except (
@@ -609,19 +631,16 @@ class DeviceService:
 
                 except Exception as e:
                     await session.rollback()
-
                     logger.error(
                         "create_device: DB error: %s",
                         e,
                         exc_info=True,
                     )
-
                     if peer_id and client:
                         try:
                             deleted = await client.delete_user(
                                 client_id=peer_id,
                             )
-
                             if not deleted:
                                 await _queue_failed_rollback_deletion(
                                     server,
@@ -629,7 +648,6 @@ class DeviceService:
                                     user.telegram_id,
                                     "unexpected_error_delete_false",
                                 )
-
                         except Exception as rollback_error:
                             await _queue_failed_rollback_deletion(
                                 server,
@@ -637,7 +655,6 @@ class DeviceService:
                                 user.telegram_id,
                                 f"unexpected_error_delete_error: {rollback_error}",
                             )
-
                     raise ServerUnavailable(f"DB error: {e}")
 
         finally:
@@ -646,7 +663,6 @@ class DeviceService:
                     await redis_lock.release()
                 except Exception:
                     pass
-
             elif local_lock is not None and acquired:
                 try:
                     local_lock.release()
@@ -671,27 +687,23 @@ class DeviceService:
                 profile.server_id,
                 profile.id,
             )
-
             try:
                 await delete_profile(session, profile)
                 return True
             except Exception as e:
                 await session.rollback()
-
                 logger.error(
                     "delete_device: failed to delete profile %s "
                     "from DB: %s",
                     profile.id,
                     e,
                 )
-
                 return False
 
         client = AmneziaClient(
             server.api_url,
             server.api_key,
         )
-
         deleted = await client.delete_user(
             client_id=profile.peer_id,
         )
@@ -704,7 +716,6 @@ class DeviceService:
                 "Queuing pending API deletion.",
                 profile.peer_id[:16],
             )
-
             if server.api_url and server.api_key:
                 pending = PendingAPIDeletion(
                     server_name=server.name,
@@ -719,7 +730,6 @@ class DeviceService:
                     last_attempt_at=now_utc(),
                     last_error="API delete_user returned False",
                 )
-
                 session.add(pending)
 
         try:
@@ -748,11 +758,9 @@ class DeviceService:
 
         except Exception as e:
             await session.rollback()
-
             logger.error(
                 "delete_device: DB error: %s",
                 e,
                 exc_info=True,
             )
-
             return False

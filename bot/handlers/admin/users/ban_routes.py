@@ -25,8 +25,20 @@ async def admin_ban_confirm(
     callback: CallbackQuery,
     session: AsyncSession,
 ):
-    await callback.answer()
-
+    #
+    # ИСПРАВЛЕНО (БАГ 5):
+    #
+    # Раньше было два callback.answer():
+    #   1) await callback.answer()          ← пустой
+    #   2) await callback.answer(ERROR...)  ← не сработает
+    #
+    # Telegram позволяет ответить на callback только один раз.
+    # Второй answer молча игнорируется.
+    #
+    # Теперь: проверка админа ПЕРЕД answer.
+    # Не-админ получает один answer с текстом ошибки.
+    # Админ получает один пустой answer (снять часики).
+    #
     if not is_admin(callback.from_user.id):
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -34,8 +46,9 @@ async def admin_ban_confirm(
         )
         return
 
-    telegram_id = int(callback.data.split(":")[1])
+    await callback.answer()
 
+    telegram_id = int(callback.data.split(":")[1])
     settings = get_settings()
 
     if telegram_id in settings.ADMIN_IDS:
@@ -75,8 +88,6 @@ async def admin_ban_apply(
     callback: CallbackQuery,
     session: AsyncSession,
 ):
-    await callback.answer()
-
     if not is_admin(callback.from_user.id):
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -84,8 +95,9 @@ async def admin_ban_apply(
         )
         return
 
-    telegram_id = int(callback.data.split(":")[1])
+    await callback.answer()
 
+    telegram_id = int(callback.data.split(":")[1])
     settings = get_settings()
 
     if telegram_id in settings.ADMIN_IDS:
@@ -114,7 +126,6 @@ async def admin_ban_apply(
     )
 
     user = await _get_user_with_profiles(session, telegram_id)
-
     if user:
         await _render_user_card(callback, user, session)
 
@@ -124,14 +135,14 @@ async def admin_unban_confirm(
     callback: CallbackQuery,
     session: AsyncSession,
 ):
-    await callback.answer()
-
     if not is_admin(callback.from_user.id):
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
             show_alert=True,
         )
         return
+
+    await callback.answer()
 
     telegram_id = int(callback.data.split(":")[1])
 
@@ -163,14 +174,14 @@ async def admin_unban_apply(
     callback: CallbackQuery,
     session: AsyncSession,
 ):
-    await callback.answer()
-
     if not is_admin(callback.from_user.id):
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
             show_alert=True,
         )
         return
+
+    await callback.answer()
 
     telegram_id = int(callback.data.split(":")[1])
 
@@ -193,6 +204,5 @@ async def admin_unban_apply(
     )
 
     user = await _get_user_with_profiles(session, telegram_id)
-
     if user:
         await _render_user_card(callback, user, session)

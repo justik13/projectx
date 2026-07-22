@@ -33,7 +33,9 @@ from database.repositories.tariffs_repo import get_tariff_by_id
 from database.repositories.users_repo import get_user_by_telegram_id
 from services.maintenance_service import MaintenanceService
 from services.payment_service import PaymentService
-from services.payment_service.alerts import _send_payment_not_found_alert_now
+from services.payment_service.alerts import (
+    _send_payment_not_found_alert_now,
+)
 from utils.formatters import format_datetime
 from utils.tariff_names import get_tariff_display_name
 from utils.telegram import render_hub, send_hub_invoice
@@ -139,7 +141,8 @@ async def pay_stars(
                 InlineKeyboardButton(
                     text="❌ Отменить",
                     callback_data=(
-                        f"cancel_invoice:{payment.id}:{tariff.id}:{source}"
+                        f"cancel_invoice:"
+                        f"{payment.id}:{tariff.id}:{source}"
                     ),
                 ),
             )
@@ -177,14 +180,29 @@ async def pay_stars(
 
         except TelegramAPIError as e:
             logger.error(f"Failed to send invoice: {e}")
-
-            await render_hub(
-                callback.bot,
-                callback.message.chat.id,
-                texts.ERROR_PAYMENT_SERVICE,
-                get_back_button(back_callback),
-            )
-
+            #
+            # ИСПРАВЛЕНО (БАГ C):
+            #
+            # Раньше если render_hub тоже падал (например, бот
+            # заблокирован пользователем), payment.status = "failed"
+            # не выполнялся, и платёж оставался pending навсегда.
+            #
+            # Теперь render_hub обёрнут в try/except, и
+            # payment.status = "failed" выполняется всегда.
+            #
+            try:
+                await render_hub(
+                    callback.bot,
+                    callback.message.chat.id,
+                    texts.ERROR_PAYMENT_SERVICE,
+                    get_back_button(back_callback),
+                )
+            except Exception as render_error:
+                logger.error(
+                    "Failed to render error hub after invoice "
+                    "failure: %s",
+                    render_error,
+                )
             payment.status = "failed"
 
     except Exception as e:
@@ -218,7 +236,6 @@ async def process_pre_checkout(
         db_session: AsyncSession,
     ):
         payload = pre_checkout_query.invoice_payload
-
         if not payload or not payload.startswith("stars_payment:"):
             await pre_checkout_query.answer(
                 ok=False,
@@ -236,7 +253,6 @@ async def process_pre_checkout(
             return
 
         payment = await get_payment_by_id(db_session, payment_id)
-
         if not payment:
             await pre_checkout_query.answer(
                 ok=False,
@@ -308,11 +324,10 @@ async def process_pre_checkout(
             return
 
         expected_amount = Decimal(str(payment.tariff.price_stars))
-
         if payment.amount != expected_amount:
             logger.error(
-                "Pre-checkout amount mismatch: payment=%s, expected=%s, "
-                "payment_id=%s",
+                "Pre-checkout amount mismatch: payment=%s, "
+                "expected=%s, payment_id=%s",
                 payment.amount,
                 expected_amount,
                 payment_id,
@@ -326,14 +341,13 @@ async def process_pre_checkout(
         telegram_amount = _to_decimal(
             pre_checkout_query.total_amount
         )
-
         if (
             telegram_amount is None
             or telegram_amount != expected_amount
         ):
             logger.error(
-                "Pre-checkout Telegram amount mismatch: telegram=%s, "
-                "expected=%s, payment_id=%s",
+                "Pre-checkout Telegram amount mismatch: "
+                "telegram=%s, expected=%s, payment_id=%s",
                 telegram_amount,
                 expected_amount,
                 payment_id,
@@ -359,10 +373,24 @@ async def process_successful_payment(
     state: FSMContext,
     session: AsyncSession = None,
 ) -> None:
+    #
+    # ИСПРАВЛЕНО (БАГ E):
+    #
+    # Раньше если session был None (middleware не сработал),
+    # код падал на get_payment_by_id(session, payment_id).
+    # Теперь есть явный guard.
+    #
+    if session is None:
+        logger.error(
+            "process_successful_payment: session is None, "
+            "cannot process payment for user %s",
+            message.from_user.id if message.from_user else "?",
+        )
+        return
+
     await state.clear()
 
     payload = message.successful_payment.invoice_payload
-
     if not payload.startswith("stars_payment:"):
         return
 
@@ -388,7 +416,6 @@ async def process_successful_payment(
                 "Failed to send payment not found alert: %s",
                 e,
             )
-
         await render_hub(
             message.bot,
             message.chat.id,
@@ -415,7 +442,6 @@ async def process_successful_payment(
                 "Failed to send payment owner mismatch alert: %s",
                 e,
             )
-
         await render_hub(
             message.bot,
             message.chat.id,
@@ -436,25 +462,21 @@ async def process_successful_payment(
             session,
             message.from_user.id,
         )
-
         profiles = (
             await get_user_profiles(session, user.id)
             if user
             else []
         )
-
         valid_until = (
             format_datetime(user.subscription_end)
             if user and user.subscription_end
             else "—"
         )
-
         device_limit = (
             getattr(payment.tariff, "device_limit", 2)
             if payment.tariff
             else 2
         )
-
         tariff_name = get_tariff_display_name(device_limit)
 
         text = (
@@ -468,7 +490,6 @@ async def process_successful_payment(
                 valid_until=valid_until,
             )
         )
-
         await render_hub(
             message.bot,
             message.chat.id,
@@ -479,13 +500,11 @@ async def process_successful_payment(
     elif success and result_code == "paid_after_cancel":
         settings = get_settings()
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
-
         device_limit = (
             getattr(payment.tariff, "device_limit", 2)
             if payment.tariff
             else 2
         )
-
         tariff_name = get_tariff_display_name(device_limit)
 
         text = texts.PAYMENT_PAID_AFTER_CANCEL.format(
@@ -552,7 +571,6 @@ async def cancel_invoice(
     db_user=None,
 ) -> None:
     parts = callback.data.split(":")
-
     try:
         payment_id = int(parts[1])
         tariff_id = int(parts[2])
@@ -572,7 +590,6 @@ async def cancel_invoice(
         return
 
     payment = await get_payment_by_id_simple(session, payment_id)
-
     if not payment:
         await callback.answer(
             "Платёж не найден",
@@ -603,10 +620,8 @@ async def cancel_invoice(
     await callback.answer("❌ Инвойс отменен")
 
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if tariff:
         device_limit = getattr(tariff, "device_limit", 2)
-
         tariff_name = get_tariff_display_name(device_limit)
 
         text = texts.PAYMENT_CHECKOUT_TEXT.format(
@@ -638,7 +653,6 @@ async def cancel_invoice(
         session,
         callback.from_user.id,
     )
-
     if user and await _is_subscription_active(user):
         await _show_hub(callback, user, session)
     else:

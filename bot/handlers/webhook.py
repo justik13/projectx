@@ -1,5 +1,7 @@
 import logging
+import time
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from aiohttp import web
@@ -13,6 +15,63 @@ from services.payment_service.alerts import _send_payment_not_found_alert_now
 from services.platega_client import PlategaClient
 
 logger = logging.getLogger(__name__)
+
+#
+# Максимальный возраст webhook'а в секундах.
+# Если createdAt старше этого значения, webhook отклоняется.
+#
+WEBHOOK_MAX_AGE_SECONDS = 600  # 10 минут
+
+
+def _is_recent_timestamp(
+    created_at: str,
+    max_age_seconds: int = WEBHOOK_MAX_AGE_SECONDS,
+) -> bool:
+    """
+    Проверяет, что timestamp не старше max_age_seconds.
+
+    Поддерживает:
+    - Unix timestamp в секундах (например "1721750400")
+    - Unix timestamp в миллисекундах (например "1721750400000")
+    - ISO 8601 (например "2026-07-23T12:00:00Z")
+
+    Если формат не распознан, возвращает True (не отклоняем).
+    Это защищает от ложных срабатываний при изменении формата API.
+    """
+    if not created_at or not isinstance(created_at, str):
+        return True
+
+    created_at = created_at.strip()
+    if not created_at:
+        return True
+
+    # Пробуем Unix timestamp (секунды или миллисекунды)
+    try:
+        ts = float(created_at)
+        if ts > 1e12:
+            # Миллисекунды → секунды
+            ts = ts / 1000.0
+        age = time.time() - ts
+        return age <= max_age_seconds
+    except (ValueError, TypeError, OverflowError):
+        pass
+
+    # Пробуем ISO 8601
+    try:
+        dt = datetime.fromisoformat(
+            created_at.replace("Z", "+00:00")
+        )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age = (
+            datetime.now(timezone.utc) - dt
+        ).total_seconds()
+        return age <= max_age_seconds
+    except (ValueError, TypeError, OverflowError):
+        pass
+
+    # Не распознали формат — не отклоняем
+    return True
 
 
 class PlategaCallbackData(BaseModel):
@@ -37,7 +96,6 @@ class PlategaCallbackData(BaseModel):
 
     def normalize_status(self) -> str:
         status = str(self.status or "").upper()
-
         mapping = {
             "SUCCESS": "CONFIRMED",
             "PAID": "CONFIRMED",
@@ -49,7 +107,6 @@ class PlategaCallbackData(BaseModel):
             "REFUNDED": "CHARGEBACKED",
             "CHARGEBACK": "CHARGEBACKED",
         }
-
         return mapping.get(status, status)
 
 
@@ -67,7 +124,6 @@ async def platega_webhook_handler(
         secret = request.headers.get("X-Secret", "")
 
         client = PlategaClient()
-
         if not client.validate_callback(merchant_id, secret):
             logger.warning(
                 "[%s] Invalid payment callback credentials: %s",
@@ -122,12 +178,42 @@ async def platega_webhook_handler(
                 ),
             )
 
+        #
+        # ИСПРАВЛЕНО (БАГ 8):
+        #
+        # Replay-защита по createdAt.
+        #
+        # Если Platega прислал webhook с createdAt старше
+        # WEBHOOK_MAX_AGE_SECONDS (10 минут), отклоняем.
+        #
+        # Это защищает от replay-атак, когда злоумышленник
+        # перехватывает старый webhook и отправляет его повторно.
+        #
+        # Если createdAt отсутствует или формат не распознан,
+        # НЕ отклоняем — это защищает от ложных срабатываний
+        # при изменении формата API провайдером.
+        #
+        if callback_data.createdAt:
+            if not _is_recent_timestamp(callback_data.createdAt):
+                logger.warning(
+                    "[%s] Payment webhook rejected: stale "
+                    "createdAt=%s (older than %s seconds). "
+                    "transaction=%s",
+                    request_id,
+                    callback_data.createdAt,
+                    WEBHOOK_MAX_AGE_SECONDS,
+                    transaction_id,
+                )
+                return web.Response(
+                    status=400,
+                    text="Stale webhook",
+                )
+
         valid_statuses = {
             "CONFIRMED",
             "CANCELED",
             "CHARGEBACKED",
         }
-
         if status not in valid_statuses:
             logger.warning(
                 "[%s] Payment webhook unknown status: %s "
@@ -194,7 +280,6 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
-
                     try:
                         await _send_payment_not_found_alert_now(
                             {
@@ -210,7 +295,6 @@ async def platega_webhook_handler(
                             request_id,
                             alert_error,
                         )
-
                     return web.Response(
                         status=404,
                         text="Payment not found",
@@ -276,7 +360,6 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
-
                     try:
                         await _send_payment_not_found_alert_now(
                             {
@@ -292,7 +375,6 @@ async def platega_webhook_handler(
                             request_id,
                             alert_error,
                         )
-
                     return web.Response(
                         status=404,
                         text="Payment not found",
@@ -399,12 +481,10 @@ def setup_webhook_routes(app: web.Application):
         "/webhook/platega",
         platega_webhook_handler,
     )
-
     app.router.add_get(
         "/health",
         healthcheck_handler,
     )
-
     logger.info(
         "Payment webhook route registered: POST /webhook/platega"
     )

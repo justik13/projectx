@@ -49,6 +49,7 @@ _last_old_cleanup: float = 0.0
 
 
 async def cleanup_dangling_peers_loop(shutdown_event: asyncio.Event):
+    global _last_old_cleanup
     try:
         await asyncio.wait_for(
             shutdown_event.wait(),

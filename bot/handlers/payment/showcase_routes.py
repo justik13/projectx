@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
@@ -33,6 +34,33 @@ from .common import (
 router = Router()
 
 
+#
+# ИСПРАВЛЕНО (БАГ 7):
+#
+# Раньше при db_user=None был тихий return — пользователь
+# нажимал кнопку и ничего не происходило.
+#
+# Теперь показывается понятное сообщение с кнопкой «Начать»,
+# которая вызывает /start и создаёт пользователя в БД.
+#
+_USER_NOT_REGISTERED_TEXT = (
+    "⚠️ <b>Профиль не найден</b>\n"
+    "Похоже, вы ещё не зарегистрированы в боте.\n"
+    "Нажмите кнопку ниже, чтобы начать."
+)
+
+
+def _get_start_keyboard():
+    """Клавиатура с кнопкой /start для незарегистрированных."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🚀 Начать",
+        callback_data="back_to_main_menu",
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 @router.callback_query(F.data.in_(["menu_buy", "menu_subscription"]))
 async def hub_menu_payment(
     callback: CallbackQuery,
@@ -44,6 +72,12 @@ async def hub_menu_payment(
     await state.clear()
 
     if not db_user:
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            _USER_NOT_REGISTERED_TEXT,
+            _get_start_keyboard(),
+        )
         return
 
     if session is None:
@@ -116,6 +150,26 @@ async def select_tariff(
         "renew": "payment_quick_renew",
     }.get(source, "payment_showcase")
 
+    #
+    # ИСПРАВЛЕНО (БАГ 7):
+    #
+    # Раньше при db_user=None проверка даунгрейда просто
+    # пропускалась, и пользователь видел экран оплаты.
+    # Потом pay_stars/pay_sbp тоже проверяли, но это лишний шаг.
+    #
+    # Теперь: если db_user=None, показываем сообщение
+    # о необходимости регистрации.
+    #
+    if not db_user:
+        await callback.answer()
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            _USER_NOT_REGISTERED_TEXT,
+            _get_start_keyboard(),
+        )
+        return
+
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
@@ -138,21 +192,20 @@ async def select_tariff(
 
     device_limit = getattr(tariff, "device_limit", 2)
 
-    if db_user:
-        error_text = await _check_tariff_change_allowed(
-            session,
-            db_user,
-            tariff,
+    error_text = await _check_tariff_change_allowed(
+        session,
+        db_user,
+        tariff,
+    )
+    if error_text:
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            error_text,
+            get_back_button(back_to),
         )
-        if error_text:
-            await render_hub(
-                callback.bot,
-                callback.message.chat.id,
-                error_text,
-                get_back_button(back_to),
-            )
-            await callback.answer()
-            return
+        await callback.answer()
+        return
 
     settings = get_settings()
     sbp_enabled = bool(
@@ -160,6 +213,7 @@ async def select_tariff(
     )
 
     tariff_name = get_tariff_display_name(device_limit)
+
     text = texts.PAYMENT_CHECKOUT_TEXT.format(
         tariff_name=tariff_name,
         duration_days=tariff.duration_days,
@@ -184,10 +238,28 @@ async def select_tariff(
 @router.callback_query(F.data.in_(["payment_quick_renew", "payment_renew"]))
 async def show_quick_renew(
     callback: CallbackQuery,
-    db_user,
-    session: AsyncSession,
+    db_user=None,
+    session: AsyncSession = None,
 ) -> None:
     await callback.answer()
+
+    #
+    # ИСПРАВЛЕНО (БАГ 6):
+    #
+    # Раньше db_user был без default и без проверки.
+    # Если пользователь не найден в БД (db_user=None),
+    # код падал на db_user.device_limit → AttributeError.
+    #
+    # Теперь: явный guard с понятным сообщением.
+    #
+    if not db_user:
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            _USER_NOT_REGISTERED_TEXT,
+            _get_start_keyboard(),
+        )
+        return
 
     if session is None:
         return
@@ -222,6 +294,7 @@ async def show_quick_renew(
         return
 
     tariff_name = get_tariff_display_name(current_limit)
+
     text = texts.PAYMENT_QUICK_RENEW_HEADER.format(
         tariff_name=tariff_name,
         valid_until=format_datetime(db_user.subscription_end),
@@ -240,10 +313,24 @@ async def show_quick_renew(
 @router.callback_query(F.data == "payment_change_tariff")
 async def show_change_tariff(
     callback: CallbackQuery,
-    db_user,
-    session: AsyncSession,
+    db_user=None,
+    session: AsyncSession = None,
 ) -> None:
     await callback.answer()
+
+    #
+    # ИСПРАВЛЕНО (БАГ 6):
+    #
+    # Аналогично show_quick_renew — guard для db_user=None.
+    #
+    if not db_user:
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            _USER_NOT_REGISTERED_TEXT,
+            _get_start_keyboard(),
+        )
+        return
 
     if session is None:
         return
@@ -260,6 +347,7 @@ async def show_change_tariff(
         return
 
     tariffs = await get_active_tariffs(session)
+
     if not tariffs:
         await render_hub(
             callback.bot,
@@ -329,6 +417,7 @@ async def select_tariff_type(
     # Дополнительная серверная проверка даунгрейда и лимита устройств.
     if db_user:
         is_active = await _is_subscription_active(db_user)
+
         if is_active:
             current_limit = db_user.device_limit or 0
             if device_limit < current_limit:
@@ -363,6 +452,7 @@ async def select_tariff_type(
             return
 
     tariffs = await get_active_tariffs(session)
+
     type_tariffs = [
         tariff
         for tariff in tariffs
@@ -382,6 +472,7 @@ async def select_tariff_type(
         device_limit,
         "",
     )
+
     text = description + texts.PAYMENT_DURATION_HEADER
 
     keyboard = get_tariff_duration_keyboard(

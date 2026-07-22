@@ -40,6 +40,85 @@ logger = logging.getLogger(__name__)
 _creating_devices: set[int] = set()
 
 
+def _get_no_subscription_keyboard():
+    """
+    Клавиатура для ошибки «нет подписки».
+    Содержит кнопку «Купить доступ» и «В главное меню».
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🚀 Купить доступ",
+        callback_data="menu_buy",
+    )
+    builder.button(
+        text="🏠 В главное меню",
+        callback_data="back_to_main_menu",
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _get_device_limit_keyboard():
+    """
+    Клавиатура для ошибки «лимит устройств».
+    Содержит кнопку «Сменить тариф» и «Назад».
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="⚙️ Сменить тариф",
+        callback_data="payment_change_tariff",
+    )
+    builder.button(
+        text="← К списку устройств",
+        callback_data="back_to_connections",
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _classify_server_error(error_msg: str) -> str:
+    """
+    Определяет тип ошибки ServerUnavailable по тексту исключения.
+
+    Это нужно, потому что device_service.py выбрасывает
+    ServerUnavailable с разным текстом для разных ситуаций.
+
+    Возвращает ключ текста из texts.py.
+    """
+    msg_lower = error_msg.lower()
+
+    if "full" in msg_lower:
+        return "full"
+    if "disabled" in msg_lower:
+        return "disabled"
+    if "busy" in msg_lower:
+        return "busy"
+    if "verify" in msg_lower or "slots" in msg_lower:
+        return "slots_unknown"
+    if "api" in msg_lower or "create_user" in msg_lower:
+        return "api_failed"
+    if "db error" in msg_lower:
+        return "db_error"
+
+    return "unknown"
+
+
+def _get_server_error_text(error_type: str) -> str:
+    """
+    Возвращает текст ошибки для пользователя по типу.
+    """
+    mapping = {
+        "full": texts.ERROR_SERVER_FULL,
+        "disabled": texts.ERROR_SERVER_DISABLED,
+        "busy": texts.ERROR_SERVER_BUSY,
+        "slots_unknown": texts.ERROR_SERVER_SLOTS_UNKNOWN,
+        "api_failed": texts.ERROR_API_CREATE_FAILED,
+        "db_error": texts.ERROR_TECHNICAL_MESSAGE,
+        "unknown": texts.ERROR_SERVER_UNAVAILABLE,
+    }
+    return mapping.get(error_type, texts.ERROR_SERVER_UNAVAILABLE)
+
+
 @router.callback_query(F.data == "add_device")
 async def start_add_device(
     callback: CallbackQuery,
@@ -77,10 +156,19 @@ async def start_add_device(
         session,
         user.telegram_id,
     ):
-        await callback.answer(
+        #
+        # ИСПРАВЛЕНО (БЛОК 4):
+        #
+        # Раньше показывался короткий текст без кнопки покупки.
+        # Теперь показывается понятный текст с кнопкой «Купить доступ».
+        #
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
             texts.ERROR_NO_SUBSCRIPTION,
-            show_alert=True,
+            _get_no_subscription_keyboard(),
         )
+        await callback.answer()
         return
 
     _creating_devices.add(user_id)
@@ -101,20 +189,16 @@ async def start_add_device(
             return
 
         builder = InlineKeyboardBuilder()
-
         for server in servers:
             flag = server.country_flag or "🌍"
-
             builder.button(
                 text=f"{flag} {server.name}",
                 callback_data=f"select_server:{server.id}",
             )
-
         builder.button(
             text="← Назад",
             callback_data="back_to_connections",
         )
-
         builder.adjust(1)
 
         await render_hub(
@@ -123,7 +207,6 @@ async def start_add_device(
             texts.CONNECTION_SELECT_SERVER,
             builder.as_markup(),
         )
-
         await state.set_state(DeviceCreationStates.choose_server)
 
     finally:
@@ -163,15 +246,16 @@ async def select_server(
         session,
         user.telegram_id,
     ):
-        await callback.answer(
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
             texts.ERROR_NO_SUBSCRIPTION,
-            show_alert=True,
+            _get_no_subscription_keyboard(),
         )
         await state.clear()
         return
 
     server_id = int(callback.data.split(":")[1])
-
     server = await get_server_by_id(session, server_id)
 
     if not server:
@@ -183,10 +267,17 @@ async def select_server(
         return
 
     if not server.is_active:
-        await callback.answer(
-            "⚠️ Сервер временно недоступен. "
-            "Выберите другую локацию.",
-            show_alert=True,
+        #
+        # ИСПРАВЛЕНО (БЛОК 4):
+        #
+        # Раньше показывался короткий alert.
+        # Теперь показывается понятный текст с кнопкой «Назад».
+        #
+        await render_hub(
+            callback.bot,
+            callback.message.chat.id,
+            texts.ERROR_SERVER_DISABLED,
+            get_back_button("add_device"),
         )
         await state.clear()
         return
@@ -241,7 +332,7 @@ async def enter_device_name(
             message.bot,
             message.chat.id,
             texts.ERROR_NO_SUBSCRIPTION,
-            get_back_button("back_to_connections"),
+            _get_no_subscription_keyboard(),
         )
         await state.clear()
         return
@@ -314,11 +405,17 @@ async def enter_device_name(
             )
 
         except NoActiveSubscription:
+            #
+            # ИСПРАВЛЕНО (БЛОК 4):
+            #
+            # Раньше показывался короткий текст с кнопкой «Назад».
+            # Теперь показывается понятный текст с кнопкой «Купить доступ».
+            #
             await render_hub(
                 message.bot,
                 message.chat.id,
                 texts.ERROR_NO_SUBSCRIPTION,
-                get_back_button("back_to_connections"),
+                _get_no_subscription_keyboard(),
             )
             await state.clear()
             return
@@ -335,27 +432,67 @@ async def enter_device_name(
             return
 
         except DeviceLimitExceeded:
+            #
+            # ИСПРАВЛЕНО (БЛОК 4):
+            #
+            # Раньше показывался короткий текст с кнопкой «Назад».
+            # Теперь показывается текст с кнопкой «Сменить тариф».
+            #
             device_limit = await _get_effective_device_limit(
                 user,
                 session,
             )
-
             await render_hub(
                 message.bot,
                 message.chat.id,
-                texts.ERROR_DEVICE_LIMIT_REACHED.format(
+                texts.ERROR_DEVICE_LIMIT_UPGRADE.format(
                     limit=device_limit,
                 ),
+                _get_device_limit_keyboard(),
+            )
+            await state.clear()
+            return
+
+        except InvalidConfig:
+            await render_hub(
+                message.bot,
+                message.chat.id,
+                texts.ERROR_API_CREATE_FAILED,
                 get_back_button("back_to_connections"),
             )
             await state.clear()
             return
 
-        except (ServerUnavailable, InvalidConfig):
+        except ServerUnavailable as e:
+            #
+            # ИСПРАВЛЕНО (БЛОК 4):
+            #
+            # Раньше все ServerUnavailable показывали один и тот же
+            # текст ERROR_SERVER_UNAVAILABLE.
+            #
+            # Теперь текст зависит от типа ошибки:
+            # - сервер полон → ERROR_SERVER_FULL
+            # - сервер отключён → ERROR_SERVER_DISABLED
+            # - сервер занят → ERROR_SERVER_BUSY
+            # - не удалось проверить слоты → ERROR_SERVER_SLOTS_UNKNOWN
+            # - API не создало → ERROR_API_CREATE_FAILED
+            # - неизвестная ошибка → ERROR_SERVER_UNAVAILABLE
+            #
+            error_msg = str(e)
+            error_type = _classify_server_error(error_msg)
+            error_text = _get_server_error_text(error_type)
+
+            logger.warning(
+                "ServerUnavailable in enter_device_name: "
+                "type=%s, msg=%s",
+                error_type,
+                error_msg,
+            )
+
             await render_hub(
                 message.bot,
                 message.chat.id,
-                texts.ERROR_SERVER_UNAVAILABLE,
+                error_text,
                 get_back_button("back_to_connections"),
             )
             await state.clear()
@@ -366,7 +503,6 @@ async def enter_device_name(
                 f"Unexpected error in enter_device_name: {e}",
                 exc_info=True,
             )
-
             await render_hub(
                 message.bot,
                 message.chat.id,
@@ -394,7 +530,6 @@ async def enter_device_name(
             success_text,
             get_device_keyboard(profile.id),
         )
-
         await state.clear()
 
     finally:
