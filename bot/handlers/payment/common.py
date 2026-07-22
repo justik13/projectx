@@ -1,3 +1,6 @@
+import logging
+from decimal import Decimal, InvalidOperation
+
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +21,8 @@ from utils.formatters import format_datetime, format_days_left
 from utils.tariff_names import get_tariff_display_name
 from utils.telegram import render_hub
 
+logger = logging.getLogger(__name__)
+
 PAYMENT_MANUAL_REVIEW_TEXT = (
     "💳 <b>Оплата получена</b>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
@@ -29,10 +34,23 @@ PAYMENT_MANUAL_REVIEW_TEXT = (
 )
 
 
+def _to_decimal(value) -> Decimal | None:
+    """
+    Безопасно конвертирует значение в Decimal.
+    Использовать для финансовых данных.
+    Никогда не использовать float-сравнения для денег.
+    """
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
 async def _is_subscription_active(user) -> bool:
     if not user or not user.subscription_end:
         return False
-
     return not is_expired(user.subscription_end)
 
 
@@ -43,7 +61,6 @@ async def _render_maintenance(
     back_to: str = "back_to_main_menu",
 ) -> None:
     message = await MaintenanceService.get_message(session)
-
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -111,10 +128,8 @@ async def _show_showcase(
 
     for tariff in tariffs:
         limit = getattr(tariff, "device_limit", 2)
-
         if limit not in grouped:
             grouped[limit] = []
-
         grouped[limit].append(tariff)
 
     keyboard = get_tariff_showcase_keyboard(grouped)
