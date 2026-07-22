@@ -51,6 +51,7 @@ async def _render_profile(
     back_to: str = "back_to_main_menu",
 ):
     profiles = await get_user_profiles(session, user.id)
+
     profiles_count = len(profiles)
 
     total_traffic = sum(
@@ -90,6 +91,7 @@ async def _render_profile(
 
             if tariff:
                 device_limit = tariff.device_limit
+
                 tariff_name = (
                     f"{get_tariff_display_name(device_limit)} "
                     f"({device_limit} устр.)"
@@ -126,10 +128,12 @@ async def _render_profile(
             text="🚀 Купить доступ",
             callback_data="menu_buy",
         )
+
         builder.button(
             text="🎁 Пригласить друга",
             callback_data="referral",
         )
+
         builder.button(
             text="🧾 История оплат",
             callback_data="user_history",
@@ -351,9 +355,9 @@ async def show_referrals_list(
                 f"рефералов</i>"
             )
 
-    rendered += texts.REFERRAL_LIST_FOOTER.format(
-        count=len(referrals),
-    )
+        rendered += texts.REFERRAL_LIST_FOOTER.format(
+            count=len(referrals),
+        )
 
     await render_hub(
         callback.bot,

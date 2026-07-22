@@ -4,7 +4,6 @@ import time
 from typing import Optional, List
 
 import aiohttp
-from aiohttp.resolver import DefaultResolver
 from pydantic import BaseModel, Field
 
 from bot.constants import (
@@ -47,8 +46,10 @@ class CircuitBreaker:
                         "(was OPEN for %.0fs)",
                         elapsed,
                     )
+
                     self.state = "CLOSED"
                     self.failure_count = 0
+
                     return True
 
                 return False
@@ -489,6 +490,7 @@ class AmneziaClient:
                     "Failed to parse create_user response: %s",
                     e,
                 )
+
                 return None
 
         return None
@@ -559,6 +561,7 @@ class AmneziaClient:
                     "Failed to parse get_server_info response: %s",
                     e,
                 )
+
                 return None
 
         return None
@@ -606,6 +609,7 @@ class AmneziaClient:
                     "Returning None instead of partial result.",
                     page_count,
                 )
+
                 return None
 
             items_raw = result.get("items", [])
@@ -659,6 +663,7 @@ class AmneziaClient:
                 "cannot be safely fetched.",
                 MAX_SAFETY_PAGES * page_size,
             )
+
             return None
 
         logger.info(
@@ -734,6 +739,7 @@ class AmneziaClient:
                         e,
                         peer,
                     )
+
                     continue
 
         return clients
