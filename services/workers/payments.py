@@ -23,10 +23,6 @@ _alerted_stale_payments: set[int] = set()
 # Короткая стартовая задержка вместо длительного ожидания.
 PAYMENTS_START_DELAY = 60.0
 
-# Через сколько часов Stars-платёж считается подозрительным
-# и переводится в ручную проверку.
-STARS_MANUAL_REVIEW_HOURS = 24
-
 
 async def _preload_alerted_stale_payments():
     """
@@ -129,9 +125,7 @@ async def stale_payments_checker_loop(
 async def _process_stale_payments(bot: Bot, settings):
     current_time = now_utc()
     threshold = current_time - timedelta(hours=1)
-
     sbp_payment_ids = []
-    stars_payments_for_review = []
 
     async with session_scope() as session:
         stmt = (
@@ -145,7 +139,6 @@ async def _process_stale_payments(bot: Bot, settings):
             .limit(50)
         )
         result = await session.execute(stmt)
-
         for payment, telegram_id in result.all():
             # ВАЖНО:
             #
@@ -159,14 +152,6 @@ async def _process_stale_payments(bot: Bot, settings):
             #   external_id + currency == "RUB"
             if payment.external_id and payment.currency == "RUB":
                 sbp_payment_ids.append(payment.id)
-            elif payment.currency == "stars":
-                stars_threshold = current_time - timedelta(
-                    hours=STARS_MANUAL_REVIEW_HOURS,
-                )
-                if payment.created_at < stars_threshold:
-                    stars_payments_for_review.append(
-                        (payment, telegram_id)
-                    )
 
     # Проверяем SBP/RUB-платежи через платёжную систему.
     for payment_id in sbp_payment_ids:
@@ -183,118 +168,13 @@ async def _process_stale_payments(bot: Bot, settings):
                 e,
             )
 
-    # Stars-платежи, которые не подтвердились за 24 часа,
-    # переводятся в requires_manual_review.
-    if stars_payments_for_review:
-        await _mark_stars_payments_manual_review(
-            stars_payments_for_review,
-        )
-        await _send_stars_manual_review_alert(
-            bot,
-            settings,
-            stars_payments_for_review,
-        )
-
     # Алерт по новым зависшим pending-платежам.
     await _alert_new_stale_payments(bot, settings)
-
-
-async def _mark_stars_payments_manual_review(
-    stars_payments: list[tuple[Payment, int]],
-):
-    async with session_scope() as session:
-        for payment, telegram_id in stars_payments:
-            try:
-                await session.execute(
-                    update(Payment)
-                    .where(
-                        Payment.id == payment.id,
-                        Payment.status == "pending",
-                    )
-                    .values(
-                        status="requires_manual_review",
-                        manual_review_reason="stars_not_confirmed",
-                    )
-                )
-                await session.flush()
-
-                try:
-                    await AuditService.log_action(
-                        session,
-                        admin_id=0,
-                        action="STARS_PAYMENT_MANUAL_REVIEW",
-                        target_type="Payment",
-                        target_id=payment.id,
-                        details=(
-                            "Stars payment was not confirmed "
-                            f"after {STARS_MANUAL_REVIEW_HOURS}h"
-                        ),
-                    )
-                except Exception:
-                    pass
-
-                logger.info(
-                    "Stars payment %s moved to manual review "
-                    "(not confirmed after %s hours), user=%s",
-                    payment.id,
-                    STARS_MANUAL_REVIEW_HOURS,
-                    telegram_id,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to move Stars payment %s to manual "
-                    "review: %s",
-                    payment.id,
-                    e,
-                )
-
-
-async def _send_stars_manual_review_alert(
-    bot: Bot,
-    settings,
-    stars_payments: list[tuple[Payment, int]],
-):
-    if not stars_payments:
-        return
-
-    admin_ids = settings.ADMIN_IDS
-    if not admin_ids:
-        return
-
-    msg = (
-        f"⚠️ <b>Stars-платежи требуют проверки</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Платежи не подтвердились автоматически за "
-        f"{STARS_MANUAL_REVIEW_HOURS} ч.\n"
-    )
-    for payment, telegram_id in stars_payments[:10]:
-        msg += (
-            f"ID: <code>{payment.id}</code> · "
-            f"User: <code>{telegram_id}</code> · "
-            f"{payment.amount} {payment.currency}\n"
-        )
-    if len(stars_payments) > 10:
-        msg += f"\n<i>... и ещё {len(stars_payments) - 10}</i>"
-
-    for admin_id in admin_ids:
-        try:
-            await bot.send_message(
-                admin_id,
-                msg,
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.error(
-                "Stars manual review alert failed to %s: %s",
-                admin_id,
-                e,
-            )
 
 
 async def _alert_new_stale_payments(bot: Bot, settings):
     current_time = now_utc()
     threshold = current_time - timedelta(hours=1)
-
     new_stale_for_alert = []
 
     async with session_scope() as session:

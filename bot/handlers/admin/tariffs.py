@@ -49,7 +49,6 @@ async def _build_tariffs_list_text_and_kb(
         f"🛠 Админка › 💰 <b>Тарифы</b>\n"
         f"(стр. {page}/{total_pages}) · Всего: {total}\n"
     )
-
     builder = InlineKeyboardBuilder()
 
     if not tariffs:
@@ -62,7 +61,7 @@ async def _build_tariffs_list_text_and_kb(
                 text=(
                     f"{status} {tariff.duration_days} дн. · "
                     f"{device_limit} устр. · "
-                    f"{tariff.price_rub}₽ / {tariff.price_stars}⭐"
+                    f"{tariff.price_rub}₽"
                 ),
                 callback_data=f"admin_tariff_card:{tariff.id}",
             )
@@ -77,12 +76,10 @@ async def _build_tariffs_list_text_and_kb(
             text="➡️",
             callback_data=f"admin_tariffs_page:{page + 1}",
         )
-
     builder.button(
         text="← В админку",
         callback_data="admin_menu",
     )
-
     builder.adjust(1)
     return rendered, builder
 
@@ -97,20 +94,17 @@ async def _show_tariffs_list(
         1,
         math.ceil(total_tariffs / TARIFFS_PER_PAGE),
     )
-
     tariffs = await get_tariffs_paginated(
         session,
         page=page,
         per_page=TARIFFS_PER_PAGE,
     )
-
     rendered, kb = await _build_tariffs_list_text_and_kb(
         tariffs,
         page,
         total_pages,
         total_tariffs,
     )
-
     try:
         await callback.message.edit_text(
             rendered,
@@ -202,7 +196,6 @@ async def _show_tariff_card(
         duration_days=tariff.duration_days,
         device_limit=device_limit,
         price_rub=tariff.price_rub,
-        price_stars=tariff.price_stars,
         status=status,
     )
 
@@ -234,7 +227,6 @@ async def show_tariff_card(
 
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
@@ -262,7 +254,6 @@ async def toggle_tariff_confirm(
 
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
@@ -315,7 +306,6 @@ async def toggle_tariff_apply(
 
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
@@ -391,7 +381,6 @@ async def delete_tariff_handler(
 
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
@@ -444,7 +433,6 @@ async def delete_tariff_handler(
         duration_days=tariff.duration_days,
         device_limit=device_limit,
         price_rub=tariff.price_rub,
-        price_stars=tariff.price_stars,
     )
 
     try:
@@ -477,7 +465,6 @@ async def delete_tariff_apply(
 
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
@@ -530,9 +517,7 @@ async def delete_tariff_apply(
         await delete_tariff(session, tariff)
     except IntegrityError:
         await session.rollback()
-
         text = texts.ADMIN_TARIFF_DELETE_BLOCKED_RELATIONS
-
         try:
             await callback.message.edit_text(
                 text,
@@ -583,7 +568,6 @@ async def _start_edit_tariff(
 
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
-
     await state.update_data(tariff_id=tariff_id)
     await state.set_state(field_state)
 
@@ -647,7 +631,6 @@ async def _apply_tariff_int_edit(
 
     data = await state.get_data()
     tariff_id = data["tariff_id"]
-
     tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await render_hub(
@@ -702,7 +685,6 @@ async def _apply_tariff_int_edit(
         )
         result = await session.execute(stmt)
         first_blocked_user = result.first()
-
         if first_blocked_user:
             await render_hub(
                 message.bot,
@@ -784,7 +766,6 @@ async def _apply_tariff_int_edit(
         f"Admin {message.from_user.id} updated tariff {tariff_id} "
         f"{field_name}: {old_value} -> {new_value}"
     )
-
     await state.clear()
 
 
@@ -878,35 +859,4 @@ async def process_edit_tariff_rub(
         validator_error=texts.ERROR_POSITIVE_NUMBER,
         success_message=lambda v: texts.ADMIN_TARIFF_EDIT_RUB_SUCCESS.format(value=v),
         audit_detail_fn=lambda old, new: f"RUB: {old} -> {new}",
-    )
-
-
-@router.callback_query(F.data.startswith("admin_tariff_edit_stars:"))
-async def start_edit_tariff_stars(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-    await _start_edit_tariff(
-        callback,
-        state,
-        AdminStates.editing_tariff_stars,
-        texts.ADMIN_TARIFF_EDIT_STARS_PROMPT,
-    )
-
-
-@router.message(AdminStates.editing_tariff_stars)
-async def process_edit_tariff_stars(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-):
-    await _apply_tariff_int_edit(
-        message,
-        state,
-        session,
-        field_name="price_stars",
-        validator=lambda x: x > 0,
-        validator_error=texts.ERROR_STARS_POSITIVE,
-        success_message=lambda v: texts.ADMIN_TARIFF_EDIT_STARS_SUCCESS.format(value=v),
-        audit_detail_fn=lambda old, new: f"Stars: {old} -> {new}",
     )

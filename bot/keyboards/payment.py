@@ -1,5 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
 from utils.tariff_names import get_tariff_group_name
 
 
@@ -31,7 +32,7 @@ def get_tariff_duration_keyboard(
     for t in tariffs_sorted:
         text = (
             f"⏱ {t.duration_days} дн. — "
-            f"{t.price_rub}₽ / {t.price_stars}⭐"
+            f"{t.price_rub}₽"
         )
         if t.duration_days >= 90:
             text += " 🔥"
@@ -41,6 +42,7 @@ def get_tariff_duration_keyboard(
             text=text,
             callback_data=f"select_tariff:{t.id}:{source}",
         )
+
     if source == "change":
         builder.button(
             text="← Назад",
@@ -66,7 +68,7 @@ def get_renew_keyboard(tariffs: list) -> InlineKeyboardMarkup:
     for t in tariffs_sorted:
         text = (
             f"⏱ {t.duration_days} дн. — "
-            f"{t.price_rub}₽ / {t.price_stars}⭐"
+            f"{t.price_rub}₽"
         )
         if t.duration_days >= 90:
             text += " 🔥"
@@ -95,10 +97,12 @@ def get_change_tariff_keyboard(
 
     Если подписка активна, тарифы с меньшим лимитом
     показываются с 🔒, но НЕ скрываются.
+
     При нажатии пользователь получит понятное объяснение
     в select_tariff_type (серверная проверка даунгрейда).
     """
     builder = InlineKeyboardBuilder()
+
     grouped: dict[int, list] = {}
     for t in tariffs:
         limit = getattr(t, "device_limit", 2)
@@ -134,15 +138,13 @@ def get_payment_method_keyboard(
     source: str = "showcase",
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="⭐ Telegram Stars",
-        callback_data=f"pay_stars:{tariff_id}:{source}",
-    )
+
     if sbp_enabled:
         builder.button(
             text="🏦 СБП / Карта",
             callback_data=f"pay_sbp:{tariff_id}:{source}",
         )
+
     if source == "renew":
         builder.button(
             text="← Назад",
@@ -158,6 +160,7 @@ def get_payment_method_keyboard(
             text="← В главное меню",
             callback_data="back_to_main_menu",
         )
+
     builder.adjust(1)
     return builder.as_markup()
 

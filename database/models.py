@@ -1,6 +1,5 @@
 from datetime import datetime, timezone, date
 from decimal import Decimal
-
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -20,7 +19,6 @@ from sqlalchemy.orm import (
     mapped_column,
     relationship,
 )
-
 from utils.datetime_helpers import now_utc
 from utils.encryption import EncryptedString
 
@@ -68,13 +66,11 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
-
     payments = relationship(
         "Payment",
         back_populates="user",
         cascade="all, delete-orphan",
     )
-
     current_tariff = relationship(
         "Tariff",
         foreign_keys=[current_tariff_id],
@@ -137,7 +133,6 @@ class Tariff(Base):
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
     device_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     price_rub: Mapped[int] = mapped_column(Integer, nullable=False)
-    price_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
@@ -172,18 +167,10 @@ class Payment(Base):
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     manual_review_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
-
-    #
-    # Snapshot тарифа на момент создания платежа.
-    #
-    # Это защищает от ситуации, когда админ изменил тариф,
-    # пока платёж был pending.
-    #
     snapshot_duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     snapshot_device_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     snapshot_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     snapshot_currency: Mapped[str | None] = mapped_column(String(20), nullable=True)
-
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -198,7 +185,6 @@ class Payment(Base):
 
     user = relationship("User", back_populates="payments")
     tariff = relationship("Tariff")
-
     events = relationship(
         "PaymentEvent",
         back_populates="payment",
@@ -207,22 +193,6 @@ class Payment(Base):
 
 
 class PaymentEvent(Base):
-    """
-    Технический журнал событий платежа.
-
-    Используется для диагностики платёжных инцидентов:
-    - создан;
-    - отправлен инвойс;
-    - получен webhook;
-    - подтверждён провайдером;
-    - amount mismatch;
-    - manual review;
-    - completed;
-    - cancelled;
-    - chargeback;
-    - paid after cancel.
-    """
-
     __tablename__ = "payment_events"
     __table_args__ = (
         Index("ix_payment_events_payment_created", "payment_id", "created_at"),

@@ -50,7 +50,6 @@ logging.basicConfig(
 
 root_logger = logging.getLogger()
 root_logger.addFilter(CorrelationFilter())
-
 for handler in root_logger.handlers:
     handler.addFilter(CorrelationFilter())
 
@@ -89,7 +88,6 @@ _SECRET_PATTERNS = [
         re.compile(r"[A-Za-z0-9+/]{40,}={0,2}"),
         "[LONG_TOKEN_REDACTED]",
     ),
-    # ═══ НОВОЕ (Спринт 4.1): vpn:// URI с base64url ═══
     (
         re.compile(r"vpn://[A-Za-z0-9_-]{20,}"),
         "[VPN_URI_REDACTED]",
@@ -100,23 +98,12 @@ _SECRET_PATTERNS = [
 def _sanitize_text(text: str) -> str:
     """
     Удаляет потенциальные секреты из текста исключения/трейсбека.
-
-    Это нужно, чтобы:
-    - API-ключи;
-    - токены;
-    - секреты;
-    - пароли;
-    - длинные base64/JWT-подобные строки;
-    - vpn:// URI (содержат приватные ключи WireGuard)
-    не попадали в journalctl и админские алерты.
     """
     if not text:
         return ""
-
     sanitized = text
     for pattern, replacement in _SECRET_PATTERNS:
         sanitized = pattern.sub(replacement, sanitized)
-
     return sanitized
 
 
@@ -168,7 +155,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
 
     try:
         settings = get_settings()
-
         error_type_safe = html.escape(error_type)
         error_short = html.escape(
             _sanitize_short(str(exception), 200)
@@ -200,7 +186,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
                 request_id,
                 alert_key,
             )
-
     except Exception as e:
         logger.error("[%s] Failed to send error alert: %s", request_id, e)
 
@@ -214,11 +199,6 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             await event.update.message.answer(
                 texts.ERROR_TECHNICAL_MESSAGE,
                 parse_mode="HTML",
-            )
-        elif getattr(event.update, "pre_checkout_query", None):
-            await event.update.pre_checkout_query.answer(
-                ok=False,
-                error_message="Техническая ошибка. Попробуйте позже.",
             )
     except Exception:
         pass
@@ -245,19 +225,14 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     # Correlation/request_id.
     dp.message.middleware(CorrelationMiddleware())
     dp.callback_query.middleware(CorrelationMiddleware())
-    dp.pre_checkout_query.middleware(CorrelationMiddleware())
 
     # Private chat only.
-    #
-    # Важно: этот middleware должен быть ДО CleanChatMiddleware,
-    # чтобы бот не удалял сообщения в группах.
     dp.message.middleware(PrivateChatMiddleware())
     dp.callback_query.middleware(PrivateChatMiddleware())
 
     # DB session.
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
-    dp.pre_checkout_query.middleware(DBSessionMiddleware())
 
     # Clean chat only for private messages.
     dp.message.middleware(CleanChatMiddleware())
@@ -304,7 +279,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
         dp.include_router(r)
 
     dp.errors.register(global_error_handler)
-
     await setup_bot_commands(bot)
 
     return bot, dp
@@ -316,10 +290,8 @@ async def start_webhook_server(port: int):
 
     runner = web.AppRunner(app)
     await runner.setup()
-
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
-
     logger.info("Webhook server started on 127.0.0.1:%d", port)
     return runner
 
@@ -383,10 +355,6 @@ async def main():
         #
         # bot_ref должен быть доступен ДО старта webhook-сервера
         # и ДО resume_pending_broadcasts.
-        #
-        # Иначе ранние платёжные callback'и или возобновление рассылки
-        # могут не отправить алерты/уведомления, потому что get_bot_ref()
-        # вернёт None.
         #
         set_bot_ref(bot)
 
@@ -469,7 +437,6 @@ async def main():
             logger.error("Failed to close payment Redis: %s", e)
 
         await close_db()
-
         logger.info("Работа бота завершена")
 
 

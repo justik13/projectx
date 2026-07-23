@@ -24,7 +24,6 @@ class AdminStates(StatesGroup):
     editing_tariff_days = State()
     editing_tariff_device_limit = State()
     editing_tariff_rub = State()
-    editing_tariff_stars = State()
     admin_reducing_days = State()
     admin_extending_custom = State()
     admin_grant_custom_days = State()

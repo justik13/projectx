@@ -16,13 +16,13 @@ _engine = None
 _sessionmaker = None
 
 DEFAULT_TARIFFS = [
-    {"duration_days": 7, "device_limit": 2, "price_rub": 35, "price_stars": 35, "sort_order": 10},
-    {"duration_days": 30, "device_limit": 2, "price_rub": 90, "price_stars": 90, "sort_order": 11},
-    {"duration_days": 90, "device_limit": 2, "price_rub": 240, "price_stars": 240, "sort_order": 12},
-    {"duration_days": 30, "device_limit": 5, "price_rub": 180, "price_stars": 180, "sort_order": 20},
-    {"duration_days": 90, "device_limit": 5, "price_rub": 480, "price_stars": 480, "sort_order": 21},
-    {"duration_days": 30, "device_limit": 10, "price_rub": 320, "price_stars": 320, "sort_order": 30},
-    {"duration_days": 90, "device_limit": 10, "price_rub": 850, "price_stars": 850, "sort_order": 31},
+    {"duration_days": 7, "device_limit": 2, "price_rub": 35, "sort_order": 10},
+    {"duration_days": 30, "device_limit": 2, "price_rub": 90, "sort_order": 11},
+    {"duration_days": 90, "device_limit": 2, "price_rub": 240, "sort_order": 12},
+    {"duration_days": 30, "device_limit": 5, "price_rub": 180, "sort_order": 20},
+    {"duration_days": 90, "device_limit": 5, "price_rub": 480, "sort_order": 21},
+    {"duration_days": 30, "device_limit": 10, "price_rub": 320, "sort_order": 30},
+    {"duration_days": 90, "device_limit": 10, "price_rub": 850, "sort_order": 31},
 ]
 
 
@@ -110,18 +110,18 @@ async def _apply_additional_indexes(conn):
         CREATE INDEX IF NOT EXISTS ix_users_expiring_subscription
         ON users (subscription_end, telegram_id)
         WHERE is_deleted = false
-          AND is_bot_blocked = false
-          AND is_banned = false
-          AND subscription_end IS NOT NULL
-          AND (notified_3d = false OR notified_1d = false OR notified_2h = false)
+        AND is_bot_blocked = false
+        AND is_banned = false
+        AND subscription_end IS NOT NULL
+        AND (notified_3d = false OR notified_1d = false OR notified_2h = false)
         """,
         """
         CREATE INDEX IF NOT EXISTS ix_users_expired_grace_notify
         ON users (subscription_end, telegram_id)
         WHERE is_deleted = false
-          AND is_bot_blocked = false
-          AND subscription_end IS NOT NULL
-          AND (notified_expired = false OR notified_grace_12h = false)
+        AND is_bot_blocked = false
+        AND subscription_end IS NOT NULL
+        AND (notified_expired = false OR notified_grace_12h = false)
         """,
         """
         CREATE INDEX IF NOT EXISTS ix_broadcast_in_progress
@@ -143,13 +143,11 @@ async def _apply_additional_indexes(conn):
         ON hub_messages (chat_id)
         """,
     ]
-
     for sql in indexes_sql:
         try:
             await conn.execute(text(sql))
         except Exception as e:
             logging.warning("Index creation warning: %s", e)
-
     logging.info("Additional indexes applied successfully.")
 
 
@@ -166,7 +164,6 @@ async def _run_post_commit_tasks(session: AsyncSession) -> None:
     )
     if not tasks:
         return
-
     for task in tasks:
         try:
             await task()

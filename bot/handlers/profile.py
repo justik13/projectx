@@ -45,12 +45,10 @@ async def _render_profile(
         p.traffic_down + p.traffic_up
         for p in profiles
     )
-
     has_access = await SubscriptionService.check_access(
         session,
         user.telegram_id,
     )
-
     referrals_count = len(
         await get_user_referrals(session, user.telegram_id)
     )
@@ -93,7 +91,6 @@ async def _render_profile(
             referrals_count=referrals_count,
             referral_days=user.referral_days,
         )
-
         builder = InlineKeyboardBuilder()
         builder.button(
             text="🚀 Купить доступ",
@@ -201,11 +198,7 @@ async def show_history(
             date = format_datetime(
                 payment.paid_at or payment.created_at
             )
-            currency = (
-                "⭐"
-                if payment.currency == "stars"
-                else "₽"
-            )
+            currency = "₽"
             rendered += (
                 f"{status_icon} {date} | "
                 f"{payment.amount} {currency}\n"
@@ -251,7 +244,6 @@ async def show_referral(
         f"https://t.me/{bot_info.username}"
         f"?start=ref_{db_user.telegram_id}"
     )
-
     invited_count = len(referrals)
 
     await render_hub(

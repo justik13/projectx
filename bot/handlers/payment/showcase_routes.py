@@ -79,7 +79,6 @@ async def hub_menu_payment(
         return
 
     is_active = await _is_subscription_active(db_user)
-
     if is_active:
         await _show_hub(callback, db_user, session)
     else:
@@ -192,7 +191,6 @@ async def select_tariff(
         tariff_name=tariff_name,
         duration_days=tariff.duration_days,
         price_rub=tariff.price_rub,
-        price_stars=tariff.price_stars,
     )
 
     await render_hub(
@@ -206,7 +204,6 @@ async def select_tariff(
             source=source,
         ),
     )
-
     await callback.answer()
 
 
@@ -246,7 +243,6 @@ async def show_quick_renew(
         session,
         db_user,
     )
-
     renew_tariffs = [
         tariff
         for tariff in tariffs
@@ -263,12 +259,10 @@ async def show_quick_renew(
         return
 
     tariff_name = get_tariff_display_name(current_limit)
-
     text = texts.PAYMENT_QUICK_RENEW_HEADER.format(
         tariff_name=tariff_name,
         valid_until=format_datetime(db_user.subscription_end),
     )
-
     keyboard = get_renew_keyboard(renew_tariffs)
 
     await render_hub(
@@ -331,7 +325,6 @@ async def show_change_tariff(
         tariff_name=tariff_name,
         valid_until=format_datetime(db_user.subscription_end),
     )
-
     keyboard = get_change_tariff_keyboard(
         tariffs,
         current_limit,
@@ -382,7 +375,6 @@ async def select_tariff_type(
 
     if db_user:
         is_active = await _is_subscription_active(db_user)
-
         if is_active:
             current_limit = await _get_effective_device_limit(
                 session,
@@ -439,9 +431,7 @@ async def select_tariff_type(
         device_limit,
         "",
     )
-
     text = description + texts.PAYMENT_DURATION_HEADER
-
     keyboard = get_tariff_duration_keyboard(
         type_tariffs,
         source=source,

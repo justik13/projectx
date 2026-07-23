@@ -12,24 +12,20 @@ _alerted_paid_after_cancel: TTLCache = TTLCache(
     maxsize=100000,
     ttl=86400,
 )
-
 _notified_paid_after_cancel: TTLCache = TTLCache(
     maxsize=100000,
     ttl=86400,
 )
-
 _alerted_manual_review: TTLCache = TTLCache(
     maxsize=100000,
     ttl=86400,
 )
-
 _alerted_payment_not_found: TTLCache = TTLCache(
     maxsize=100000,
     ttl=3600,
 )
 
 _redis_client: aioredis.Redis | None = None
-
 
 MANUAL_REVIEW_REASONS = {
     "banned_or_deleted": "Пользователь заблокирован или удалён",
@@ -41,15 +37,12 @@ MANUAL_REVIEW_REASONS = {
     "missing_tariff_or_user": "Не найден тариф или пользователь",
     "missing_snapshot": "Не найдены условия покупки",
     "device_limit_exceeded": "Превышен лимит устройств",
-    "stars_not_confirmed": "Платёж не подтверждён",
     "status_failed": "Платёж находился в статусе failed",
-    "invoice_send_error": "Не удалось отправить инвойс",
     "payment_create_error": "Ошибка создания платежа",
     "cancel_after_completed": "Отмена после успешной оплаты",
     "not_found": "Платёж не найден",
     "owner_mismatch": "Платёж не принадлежит пользователю",
 }
-
 
 MANUAL_GRANT_ALLOWED_STATUSES = {
     "pending",
@@ -61,7 +54,6 @@ MANUAL_GRANT_ALLOWED_STATUSES = {
 
 async def _get_redis() -> aioredis.Redis:
     global _redis_client
-
     if _redis_client is None:
         settings = get_settings()
         _redis_client = aioredis.from_url(
@@ -69,13 +61,11 @@ async def _get_redis() -> aioredis.Redis:
             decode_responses=True,
             socket_timeout=5.0,
         )
-
     return _redis_client
 
 
 async def close_redis() -> None:
     global _redis_client
-
     if _redis_client is not None:
         try:
             await _redis_client.close()
@@ -86,13 +76,11 @@ async def close_redis() -> None:
 def _to_decimal(value) -> Decimal | None:
     """
     Безопасно конвертирует значение в Decimal.
-
     Использовать для финансовых данных.
     Никогда не использовать float-сравнения для денег.
     """
     if value is None:
         return None
-
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
@@ -102,7 +90,6 @@ def _to_decimal(value) -> Decimal | None:
 def _get_payment_snapshot_duration(payment) -> int | None:
     """
     Возвращает длительность покупки.
-
     Приоритет:
     1. snapshot_duration_days из платежа;
     2. текущий тариф, если snapshot отсутствует.
@@ -112,25 +99,20 @@ def _get_payment_snapshot_duration(payment) -> int | None:
         "snapshot_duration_days",
         None,
     )
-
     if snapshot_value is not None:
         try:
             return int(snapshot_value)
         except (TypeError, ValueError):
             pass
-
     tariff = getattr(payment, "tariff", None)
-
     if tariff:
         return getattr(tariff, "duration_days", None)
-
     return None
 
 
 def _get_payment_snapshot_device_limit(payment) -> int | None:
     """
     Возвращает лимит устройств покупки.
-
     Приоритет:
     1. snapshot_device_limit из платежа;
     2. текущий тариф, если snapshot отсутствует.
@@ -140,18 +122,14 @@ def _get_payment_snapshot_device_limit(payment) -> int | None:
         "snapshot_device_limit",
         None,
     )
-
     if snapshot_value is not None:
         try:
             return int(snapshot_value)
         except (TypeError, ValueError):
             pass
-
     tariff = getattr(payment, "tariff", None)
-
     if tariff:
         return getattr(tariff, "device_limit", None)
-
     return None
 
 
@@ -166,12 +144,10 @@ def _build_payment_snapshot(payment) -> dict:
     - личные данные минимизированы.
     """
     user = getattr(payment, "user", None)
-
     duration_days = _get_payment_snapshot_duration(payment)
     device_limit = _get_payment_snapshot_device_limit(payment)
 
     tariff_name = "—"
-
     if duration_days is not None and device_limit is not None:
         tariff_name = f"{duration_days} дн. / {device_limit} устр."
 

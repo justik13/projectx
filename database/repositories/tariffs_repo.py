@@ -9,7 +9,6 @@ ALLOWED_TARIFF_UPDATE_FIELDS = {
     "duration_days",
     "device_limit",
     "price_rub",
-    "price_stars",
     "is_active",
     "sort_order",
 }
@@ -43,14 +42,10 @@ async def update_tariff(
     tariff: Tariff,
     **kwargs,
 ) -> Tariff:
-    """
-    Обновляет тариф только по whitelist-полям.
-    """
     for key, value in kwargs.items():
         if key not in ALLOWED_TARIFF_UPDATE_FIELDS:
             continue
         setattr(tariff, key, value)
-
     await session.flush()
     await session.refresh(tariff)
     return tariff
@@ -76,7 +71,6 @@ async def get_tariffs_paginated(
     per_page: int = 10,
 ) -> list[Tariff]:
     offset = (page - 1) * per_page
-
     result = await session.execute(
         select(Tariff)
         .order_by(
@@ -87,5 +81,4 @@ async def get_tariffs_paginated(
         .offset(offset)
         .limit(per_page)
     )
-
     return result.scalars().all()

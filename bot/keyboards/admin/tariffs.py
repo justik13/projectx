@@ -12,20 +12,13 @@ def get_admin_tariff_card_keyboard(
         text="✏️ Изменить дни",
         callback_data=f"admin_tariff_edit_days:{tariff_id}",
     )
-
     builder.button(
         text="✏️ Изменить лимит устр.",
         callback_data=f"admin_tariff_edit_devices:{tariff_id}",
     )
-
     builder.button(
         text="✏️ Изменить цену ₽",
         callback_data=f"admin_tariff_edit_rub:{tariff_id}",
-    )
-
-    builder.button(
-        text="✏️ Изменить цену ⭐",
-        callback_data=f"admin_tariff_edit_stars:{tariff_id}",
     )
 
     if is_active:
@@ -37,17 +30,14 @@ def get_admin_tariff_card_keyboard(
         text=status_text,
         callback_data=f"admin_tariff_toggle:{tariff_id}",
     )
-
     builder.button(
         text="🗑 Удалить тариф",
         callback_data=f"admin_tariff_delete:{tariff_id}",
     )
-
     builder.button(
         text="← К списку тарифов",
         callback_data="admin_tariffs",
     )
 
-    builder.adjust(1, 1, 1, 1, 1, 1, 1)
-
+    builder.adjust(1, 1, 1, 1, 1, 1)
     return builder.as_markup()
