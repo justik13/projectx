@@ -25,6 +25,7 @@ from utils.telegram import render_hub
 
 from .common import (
     _check_tariff_change_allowed,
+    _get_effective_device_limit,
     _is_subscription_active,
     _render_maintenance,
     _show_hub,
@@ -32,6 +33,7 @@ from .common import (
 )
 
 router = Router()
+
 
 _USER_NOT_REGISTERED_TEXT = (
     "⚠️ <b>Профиль не найден</b>\n"
@@ -42,11 +44,14 @@ _USER_NOT_REGISTERED_TEXT = (
 
 def _get_start_keyboard():
     builder = InlineKeyboardBuilder()
+
     builder.button(
         text="🚀 Начать",
         callback_data="back_to_main_menu",
     )
+
     builder.adjust(1)
+
     return builder.as_markup()
 
 
@@ -84,6 +89,7 @@ async def hub_menu_payment(
         return
 
     is_active = await _is_subscription_active(db_user)
+
     if is_active:
         await _show_hub(callback, db_user, session)
     else:
@@ -96,8 +102,10 @@ async def show_tariff_showcase_callback(
     session: AsyncSession,
 ) -> None:
     await callback.answer()
+
     if session is None:
         return
+
     if not await MaintenanceService.can_user_perform_action(
         session,
         callback.from_user.id,
@@ -108,6 +116,7 @@ async def show_tariff_showcase_callback(
             back_to="back_to_main_menu",
         )
         return
+
     await _show_showcase(callback, session)
 
 
@@ -123,6 +132,7 @@ async def select_tariff(
         return
 
     parts = callback.data.split(":")
+
     try:
         tariff_id = int(parts[1])
         source = parts[2] if len(parts) > 2 else "showcase"
@@ -137,6 +147,7 @@ async def select_tariff(
 
     if not db_user:
         await callback.answer()
+
         await render_hub(
             callback.bot,
             callback.message.chat.id,
@@ -150,6 +161,7 @@ async def select_tariff(
         callback.from_user.id,
     ):
         await callback.answer()
+
         await _render_maintenance(
             callback,
             session,
@@ -158,6 +170,7 @@ async def select_tariff(
         return
 
     tariff = await get_tariff_by_id(session, tariff_id)
+
     if not tariff or not tariff.is_active:
         await callback.answer(
             texts.ERROR_TARIFF_UNAVAILABLE,
@@ -172,6 +185,7 @@ async def select_tariff(
         db_user,
         tariff,
     )
+
     if error_text:
         await render_hub(
             callback.bot,
@@ -183,16 +197,20 @@ async def select_tariff(
         return
 
     settings = get_settings()
+
     sbp_enabled = bool(
         settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET
     )
+
     tariff_name = get_tariff_display_name(device_limit)
+
     text = texts.PAYMENT_CHECKOUT_TEXT.format(
         tariff_name=tariff_name,
         duration_days=tariff.duration_days,
         price_rub=tariff.price_rub,
         price_stars=tariff.price_stars,
     )
+
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -204,6 +222,7 @@ async def select_tariff(
             source=source,
         ),
     )
+
     await callback.answer()
 
 
@@ -239,14 +258,18 @@ async def show_quick_renew(
         return
 
     tariffs = await get_active_tariffs(session)
-    # ИСПРАВЛЕНО: device_limit or 0 — защита от None
-    current_limit = db_user.device_limit or 0
+
+    current_limit = await _get_effective_device_limit(
+        session,
+        db_user,
+    )
 
     renew_tariffs = [
         tariff
         for tariff in tariffs
         if getattr(tariff, "device_limit", 2) == current_limit
     ]
+
     if not renew_tariffs:
         await render_hub(
             callback.bot,
@@ -257,11 +280,14 @@ async def show_quick_renew(
         return
 
     tariff_name = get_tariff_display_name(current_limit)
+
     text = texts.PAYMENT_QUICK_RENEW_HEADER.format(
         tariff_name=tariff_name,
         valid_until=format_datetime(db_user.subscription_end),
     )
+
     keyboard = get_renew_keyboard(renew_tariffs)
+
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -302,6 +328,7 @@ async def show_change_tariff(
         return
 
     tariffs = await get_active_tariffs(session)
+
     if not tariffs:
         await render_hub(
             callback.bot,
@@ -311,20 +338,26 @@ async def show_change_tariff(
         )
         return
 
-    # ИСПРАВЛЕНО: device_limit or 0 — защита от None
-    current_limit = db_user.device_limit or 0
+    current_limit = await _get_effective_device_limit(
+        session,
+        db_user,
+    )
+
     tariff_name = get_tariff_display_name(current_limit)
+
     is_active = await _is_subscription_active(db_user)
 
     text = texts.PAYMENT_CHANGE_TARIFF_HEADER.format(
         tariff_name=tariff_name,
         valid_until=format_datetime(db_user.subscription_end),
     )
+
     keyboard = get_change_tariff_keyboard(
         tariffs,
         current_limit,
         is_subscription_active=is_active,
     )
+
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -340,10 +373,12 @@ async def select_tariff_type(
     db_user=None,
 ) -> None:
     await callback.answer()
+
     if session is None:
         return
 
     parts = callback.data.split(":")
+
     try:
         device_limit = int(parts[1])
         source = parts[2] if len(parts) > 2 else "showcase"
@@ -368,8 +403,13 @@ async def select_tariff_type(
 
     if db_user:
         is_active = await _is_subscription_active(db_user)
+
         if is_active:
-            current_limit = db_user.device_limit or 0
+            current_limit = await _get_effective_device_limit(
+                session,
+                db_user,
+            )
+
             if device_limit < current_limit:
                 await render_hub(
                     callback.bot,
@@ -389,6 +429,7 @@ async def select_tariff_type(
             session,
             db_user.id,
         )
+
         if profiles_count > device_limit:
             await render_hub(
                 callback.bot,
@@ -402,11 +443,13 @@ async def select_tariff_type(
             return
 
     tariffs = await get_active_tariffs(session)
+
     type_tariffs = [
         tariff
         for tariff in tariffs
         if getattr(tariff, "device_limit", 2) == device_limit
     ]
+
     if not type_tariffs:
         await render_hub(
             callback.bot,
@@ -420,11 +463,14 @@ async def select_tariff_type(
         device_limit,
         "",
     )
+
     text = description + texts.PAYMENT_DURATION_HEADER
+
     keyboard = get_tariff_duration_keyboard(
         type_tariffs,
         source=source,
     )
+
     await render_hub(
         callback.bot,
         callback.message.chat.id,

@@ -2,7 +2,6 @@ import logging
 from decimal import Decimal
 
 from aiogram import Router, F
-from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -54,6 +53,99 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
+def _stars_amount_matches(
+    telegram_amount: Decimal | None,
+    expected_amount: Decimal | None,
+) -> bool:
+    """
+    Сравнивает сумму Telegram Stars с ожидаемой суммой платежа.
+
+    Источник истины — payment.amount.
+
+    Дополнительно допускается нормализация minor units:
+    если Telegram присылает сумму в 100 раз больше,
+    например 9000 вместо 90, это тоже считается совпадением.
+    """
+    if telegram_amount is None or expected_amount is None:
+        return False
+
+    if telegram_amount == expected_amount:
+        return True
+
+    try:
+        if (
+            expected_amount > 0
+            and telegram_amount == expected_amount * 100
+        ):
+            logger.info(
+                "Stars amount normalized from minor units: "
+                "telegram_amount=%s, expected_amount=%s",
+                telegram_amount,
+                expected_amount,
+            )
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+async def _apply_payment_snapshot(
+    session: AsyncSession,
+    payment,
+    tariff,
+) -> None:
+    """
+    Заполняет snapshot-поля платежа, если они есть в модели.
+    """
+    if not tariff:
+        return
+
+    snapshot_fields = {
+        "snapshot_duration_days": getattr(
+            tariff,
+            "duration_days",
+            None,
+        ),
+        "snapshot_device_limit": getattr(
+            tariff,
+            "device_limit",
+            None,
+        ),
+        "snapshot_amount": payment.amount,
+        "snapshot_currency": payment.currency,
+    }
+
+    changed = False
+
+    for field_name, field_value in snapshot_fields.items():
+        if hasattr(payment, field_name):
+            setattr(payment, field_name, field_value)
+            changed = True
+
+    if changed:
+        await session.flush()
+
+
+def _get_payment_device_limit(payment) -> int:
+    snapshot_value = getattr(
+        payment,
+        "snapshot_device_limit",
+        None,
+    )
+
+    if snapshot_value is not None:
+        try:
+            return int(snapshot_value)
+        except (TypeError, ValueError):
+            pass
+
+    if payment.tariff:
+        return getattr(payment.tariff, "device_limit", 2)
+
+    return 2
+
+
 @router.callback_query(F.data.startswith("pay_stars:"))
 async def pay_stars(
     callback: CallbackQuery,
@@ -66,6 +158,7 @@ async def pay_stars(
         return
 
     parts = callback.data.split(":")
+
     try:
         tariff_id = int(parts[1])
         source = parts[2] if len(parts) > 2 else "showcase"
@@ -92,8 +185,6 @@ async def pay_stars(
 
     tariff = await get_tariff_by_id(session, tariff_id)
 
-    # ИСПРАВЛЕНО: раньше был тихий return.
-    # Теперь пользователь видит понятную ошибку.
     if not tariff:
         await callback.answer(
             texts.ERROR_TARIFF_NOT_FOUND,
@@ -123,6 +214,7 @@ async def pay_stars(
         db_user,
         tariff,
     )
+
     if error_text:
         await render_hub(
             callback.bot,
@@ -132,6 +224,8 @@ async def pay_stars(
         )
         await callback.answer()
         return
+
+    payment = None
 
     try:
         await callback.answer("💳 Отправляю инвойс...")
@@ -144,8 +238,15 @@ async def pay_stars(
             currency="stars",
         )
 
+        await _apply_payment_snapshot(
+            session,
+            payment,
+            tariff,
+        )
+
         try:
             invoice_builder = InlineKeyboardBuilder()
+
             invoice_builder.row(
                 InlineKeyboardButton(
                     text="💳 Оплатить",
@@ -161,6 +262,7 @@ async def pay_stars(
             )
 
             device_limit = getattr(tariff, "device_limit", 2)
+
             await send_hub_invoice(
                 callback.bot,
                 callback.message.chat.id,
@@ -190,8 +292,24 @@ async def pay_stars(
                 payment_id=payment.id,
             )
 
-        except TelegramAPIError as e:
-            logger.error(f"Failed to send invoice: {e}")
+        except Exception as invoice_error:
+            logger.error(
+                "Failed to send Stars invoice: %s",
+                invoice_error,
+                exc_info=True,
+            )
+
+            try:
+                payment.status = "failed"
+                payment.manual_review_reason = "invoice_send_error"
+                await session.flush()
+            except Exception as db_error:
+                logger.error(
+                    "Failed to mark Stars payment as failed: %s",
+                    db_error,
+                    exc_info=True,
+                )
+
             try:
                 await render_hub(
                     callback.bot,
@@ -205,14 +323,30 @@ async def pay_stars(
                     "failure: %s",
                     render_error,
                 )
-            payment.status = "failed"
 
     except Exception as e:
         logger.error(f"pay_stars error: {e}", exc_info=True)
-        await callback.answer(
-            "❌ Ошибка при создании платежа",
-            show_alert=True,
-        )
+
+        if payment is not None:
+            try:
+                payment.status = "failed"
+                payment.manual_review_reason = "payment_create_error"
+                await session.flush()
+            except Exception as db_error:
+                logger.error(
+                    "Failed to mark Stars payment as failed "
+                    "after unexpected error: %s",
+                    db_error,
+                    exc_info=True,
+                )
+
+        try:
+            await callback.answer(
+                "❌ Ошибка при создании платежа",
+                show_alert=True,
+            )
+        except Exception:
+            pass
 
 
 @router.pre_checkout_query()
@@ -225,6 +359,7 @@ async def process_pre_checkout(
         db_session: AsyncSession,
     ):
         payload = pre_checkout_query.invoice_payload
+
         if not payload or not payload.startswith("stars_payment:"):
             await pre_checkout_query.answer(
                 ok=False,
@@ -242,6 +377,7 @@ async def process_pre_checkout(
             return
 
         payment = await get_payment_by_id(db_session, payment_id)
+
         if not payment:
             await pre_checkout_query.answer(
                 ok=False,
@@ -312,15 +448,19 @@ async def process_pre_checkout(
             )
             return
 
-        expected_amount = Decimal(str(payment.tariff.price_stars))
-        if payment.amount != expected_amount:
+        #
+        # Источник истины — сумма, сохранённая в платеже.
+        #
+        expected_amount = _to_decimal(payment.amount)
+
+        if expected_amount is None:
             logger.error(
-                "Pre-checkout amount mismatch: payment=%s, "
-                "expected=%s, payment_id=%s",
-                payment.amount,
-                expected_amount,
+                "Pre-checkout invalid stored amount: "
+                "payment_id=%s, amount=%s",
                 payment_id,
+                payment.amount,
             )
+
             await pre_checkout_query.answer(
                 ok=False,
                 error_message="Некорректная сумма платежа",
@@ -330,9 +470,10 @@ async def process_pre_checkout(
         telegram_amount = _to_decimal(
             pre_checkout_query.total_amount
         )
-        if (
-            telegram_amount is None
-            or telegram_amount != expected_amount
+
+        if not _stars_amount_matches(
+            telegram_amount,
+            expected_amount,
         ):
             logger.error(
                 "Pre-checkout Telegram amount mismatch: "
@@ -341,6 +482,7 @@ async def process_pre_checkout(
                 expected_amount,
                 payment_id,
             )
+
             await pre_checkout_query.answer(
                 ok=False,
                 error_message="Некорректная сумма платежа",
@@ -373,6 +515,7 @@ async def process_successful_payment(
     await state.clear()
 
     payload = message.successful_payment.invoice_payload
+
     if not payload.startswith("stars_payment:"):
         return
 
@@ -382,6 +525,7 @@ async def process_successful_payment(
         return
 
     payment = await get_payment_by_id(session, payment_id)
+
     if not payment:
         try:
             await _send_payment_not_found_alert_now(
@@ -397,6 +541,7 @@ async def process_successful_payment(
                 "Failed to send payment not found alert: %s",
                 e,
             )
+
         await render_hub(
             message.bot,
             message.chat.id,
@@ -423,6 +568,7 @@ async def process_successful_payment(
                 "Failed to send payment owner mismatch alert: %s",
                 e,
             )
+
         await render_hub(
             message.bot,
             message.chat.id,
@@ -430,6 +576,54 @@ async def process_successful_payment(
             get_back_button("menu_subscription"),
         )
         return
+
+    #
+    # Дополнительная проверка суммы из successful_payment.
+    #
+    successful_total_amount = getattr(
+        message.successful_payment,
+        "total_amount",
+        None,
+    )
+
+    if successful_total_amount is not None:
+        telegram_amount = _to_decimal(successful_total_amount)
+        expected_amount = _to_decimal(payment.amount)
+
+        if not _stars_amount_matches(
+            telegram_amount,
+            expected_amount,
+        ):
+            logger.error(
+                "successful_payment amount mismatch: "
+                "telegram=%s, expected=%s, payment_id=%s",
+                telegram_amount,
+                expected_amount,
+                payment.id,
+            )
+
+            try:
+                await _send_payment_not_found_alert_now(
+                    {
+                        "transaction_id": payload,
+                        "status": "stars_amount_mismatch",
+                        "source": "stars_successful_payment",
+                        "user_telegram_id": message.from_user.id,
+                    }
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to send Stars amount mismatch alert: %s",
+                    e,
+                )
+
+            await render_hub(
+                message.bot,
+                message.chat.id,
+                texts.PAYMENT_DELAYED,
+                get_back_button("menu_subscription"),
+            )
+            return
 
     success, result_code = (
         await PaymentService.handle_successful_payment(
@@ -443,21 +637,20 @@ async def process_successful_payment(
             session,
             message.from_user.id,
         )
+
         profiles = (
             await get_user_profiles(session, user.id)
             if user
             else []
         )
+
         valid_until = (
             format_datetime(user.subscription_end)
             if user and user.subscription_end
             else "—"
         )
-        device_limit = (
-            getattr(payment.tariff, "device_limit", 2)
-            if payment.tariff
-            else 2
-        )
+
+        device_limit = _get_payment_device_limit(payment)
         tariff_name = get_tariff_display_name(device_limit)
 
         text = (
@@ -471,6 +664,7 @@ async def process_successful_payment(
                 valid_until=valid_until,
             )
         )
+
         await render_hub(
             message.bot,
             message.chat.id,
@@ -481,28 +675,31 @@ async def process_successful_payment(
     elif success and result_code == "paid_after_cancel":
         settings = get_settings()
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
-        device_limit = (
-            getattr(payment.tariff, "device_limit", 2)
-            if payment.tariff
-            else 2
-        )
+
+        device_limit = _get_payment_device_limit(payment)
         tariff_name = get_tariff_display_name(device_limit)
+
         text = texts.PAYMENT_PAID_AFTER_CANCEL.format(
             amount=payment.amount,
             currency=payment.currency,
             tariff_name=tariff_name,
             payment_id=payment.id,
         )
+
         builder = InlineKeyboardBuilder()
+
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
+
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
+
         builder.adjust(1, 1)
+
         await render_hub(
             message.bot,
             message.chat.id,
@@ -513,16 +710,21 @@ async def process_successful_payment(
     elif result_code == "manual_review":
         settings = get_settings()
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
+
         builder = InlineKeyboardBuilder()
+
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
+
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
+
         builder.adjust(1, 1)
+
         await render_hub(
             message.bot,
             message.chat.id,
@@ -547,6 +749,7 @@ async def cancel_invoice(
     db_user=None,
 ) -> None:
     parts = callback.data.split(":")
+
     try:
         payment_id = int(parts[1])
         tariff_id = int(parts[2])
@@ -566,6 +769,7 @@ async def cancel_invoice(
         return
 
     payment = await get_payment_by_id_simple(session, payment_id)
+
     if not payment:
         await callback.answer(
             "Платёж не найден",
@@ -597,21 +801,24 @@ async def cancel_invoice(
 
     tariff = await get_tariff_by_id(session, tariff_id)
 
-    # ИСПРАВЛЕНО: проверка tariff.is_active.
-    # Если тариф отключён, показываем витрину/хаб вместо checkout.
     if tariff and tariff.is_active:
         device_limit = getattr(tariff, "device_limit", 2)
+
         tariff_name = get_tariff_display_name(device_limit)
+
         text = texts.PAYMENT_CHECKOUT_TEXT.format(
             tariff_name=tariff_name,
             duration_days=tariff.duration_days,
             price_rub=tariff.price_rub,
             price_stars=tariff.price_stars,
         )
+
         settings = get_settings()
+
         sbp_enabled = bool(
             settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET
         )
+
         await render_hub(
             callback.bot,
             callback.message.chat.id,
@@ -625,11 +832,11 @@ async def cancel_invoice(
         )
         return
 
-    # Тариф не найден или отключён — показываем витрину/хаб
     user = await get_user_by_telegram_id(
         session,
         callback.from_user.id,
     )
+
     if user and await _is_subscription_active(user):
         await _show_hub(callback, user, session)
     else:

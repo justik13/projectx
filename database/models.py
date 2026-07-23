@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, date
 from decimal import Decimal
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -19,6 +20,7 @@ from sqlalchemy.orm import (
     mapped_column,
     relationship,
 )
+
 from utils.datetime_helpers import now_utc
 from utils.encryption import EncryptedString
 
@@ -66,11 +68,13 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+
     payments = relationship(
         "Payment",
         back_populates="user",
         cascade="all, delete-orphan",
     )
+
     current_tariff = relationship(
         "Tariff",
         foreign_keys=[current_tariff_id],
@@ -194,6 +198,7 @@ class Payment(Base):
 
     user = relationship("User", back_populates="payments")
     tariff = relationship("Tariff")
+
     events = relationship(
         "PaymentEvent",
         back_populates="payment",

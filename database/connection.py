@@ -1,12 +1,14 @@
 import logging
 from contextlib import asynccontextmanager
 from typing import Awaitable, Callable
+
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+
 from config.settings import get_settings
 from database.models import Base, MaintenanceMode, Tariff
 

@@ -11,14 +11,20 @@ from bot.middlewares.correlation import set_request_id
 from database.connection import session_scope
 from services.audit_service import AuditService
 from services.payment_service import PaymentService
-from services.payment_service.alerts import _send_payment_not_found_alert_now
+from services.payment_service.alerts import (
+    _send_payment_not_found_alert_now,
+)
+from services.payment_service.common import _to_decimal
 from services.platega_client import PlategaClient
 
 logger = logging.getLogger(__name__)
 
 #
 # Максимальный возраст webhook'а в секундах.
-# Если createdAt старше этого значения, webhook отклоняется.
+# Если createdAt старше этого значения, webhook считается stale.
+#
+# Однако stale webhook больше не отклоняется слепо:
+# он дополнительно проверяется через Platega API.
 #
 WEBHOOK_MAX_AGE_SECONDS = 600  # 10 минут
 
@@ -42,17 +48,21 @@ def _is_recent_timestamp(
         return True
 
     created_at = created_at.strip()
+
     if not created_at:
         return True
 
     # Пробуем Unix timestamp (секунды или миллисекунды)
     try:
         ts = float(created_at)
+
         if ts > 1e12:
             # Миллисекунды → секунды
             ts = ts / 1000.0
+
         age = time.time() - ts
         return age <= max_age_seconds
+
     except (ValueError, TypeError, OverflowError):
         pass
 
@@ -61,12 +71,16 @@ def _is_recent_timestamp(
         dt = datetime.fromisoformat(
             created_at.replace("Z", "+00:00")
         )
+
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
+
         age = (
             datetime.now(timezone.utc) - dt
         ).total_seconds()
+
         return age <= max_age_seconds
+
     except (ValueError, TypeError, OverflowError):
         pass
 
@@ -96,6 +110,7 @@ class PlategaCallbackData(BaseModel):
 
     def normalize_status(self) -> str:
         status = str(self.status or "").upper()
+
         mapping = {
             "SUCCESS": "CONFIRMED",
             "PAID": "CONFIRMED",
@@ -107,7 +122,78 @@ class PlategaCallbackData(BaseModel):
             "REFUNDED": "CHARGEBACKED",
             "CHARGEBACK": "CHARGEBACKED",
         }
+
         return mapping.get(status, status)
+
+
+async def _verify_stale_webhook_via_api(
+    callback_data: PlategaCallbackData,
+    normalized_status: str,
+) -> tuple[bool, Optional[float], Optional[str], Optional[str]]:
+    """
+    Дополнительная проверка старого webhook через Platega API.
+
+    Возвращает:
+    - ok;
+    - amount из API, если удалось получить;
+    - currency из API, если удалось получить;
+    - код ошибки, если проверка не прошла.
+    """
+    transaction_id = callback_data.get_transaction_id()
+
+    if not transaction_id:
+        return False, None, None, "missing_transaction_id"
+
+    client = PlategaClient()
+
+    status_data = await client.check_status(transaction_id)
+
+    if not status_data:
+        return False, None, None, "api_unavailable"
+
+    provider_status = status_data.get("status")
+
+    if provider_status != normalized_status:
+        logger.warning(
+            "Stale webhook status mismatch: "
+            "callback_status=%s, provider_status=%s, "
+            "transaction=%s",
+            normalized_status,
+            provider_status,
+            transaction_id,
+        )
+        return False, None, None, "status_mismatch"
+
+    api_amount = status_data.get("amount")
+    api_currency = status_data.get("currency")
+
+    #
+    # Если сумма есть и в callback, и в API,
+    # они должны совпадать.
+    #
+    if (
+        callback_data.amount is not None
+        and api_amount is not None
+    ):
+        callback_decimal = _to_decimal(callback_data.amount)
+        api_decimal = _to_decimal(api_amount)
+
+        if (
+            callback_decimal is None
+            or api_decimal is None
+            or callback_decimal != api_decimal
+        ):
+            logger.warning(
+                "Stale webhook amount mismatch: "
+                "callback_amount=%s, api_amount=%s, "
+                "transaction=%s",
+                callback_data.amount,
+                api_amount,
+                transaction_id,
+            )
+            return False, None, None, "amount_mismatch"
+
+    return True, api_amount, api_currency, None
 
 
 async def platega_webhook_handler(
@@ -124,12 +210,14 @@ async def platega_webhook_handler(
         secret = request.headers.get("X-Secret", "")
 
         client = PlategaClient()
+
         if not client.validate_callback(merchant_id, secret):
             logger.warning(
                 "[%s] Invalid payment callback credentials: %s",
                 request_id,
                 merchant_id,
             )
+
             return web.Response(
                 status=401,
                 text="Unauthorized",
@@ -143,6 +231,7 @@ async def platega_webhook_handler(
                 request_id,
                 e,
             )
+
             return web.Response(
                 status=400,
                 text="Invalid JSON",
@@ -156,6 +245,7 @@ async def platega_webhook_handler(
                 request_id,
                 e,
             )
+
             return web.Response(
                 status=400,
                 text=f"Validation error: {e.errors()}",
@@ -170,6 +260,7 @@ async def platega_webhook_handler(
                 "[%s] Payment webhook missing transaction ID.",
                 request_id,
             )
+
             return web.Response(
                 status=400,
                 text=(
@@ -178,42 +269,12 @@ async def platega_webhook_handler(
                 ),
             )
 
-        #
-        # ИСПРАВЛЕНО (БАГ 8):
-        #
-        # Replay-защита по createdAt.
-        #
-        # Если Platega прислал webhook с createdAt старше
-        # WEBHOOK_MAX_AGE_SECONDS (10 минут), отклоняем.
-        #
-        # Это защищает от replay-атак, когда злоумышленник
-        # перехватывает старый webhook и отправляет его повторно.
-        #
-        # Если createdAt отсутствует или формат не распознан,
-        # НЕ отклоняем — это защищает от ложных срабатываний
-        # при изменении формата API провайдером.
-        #
-        if callback_data.createdAt:
-            if not _is_recent_timestamp(callback_data.createdAt):
-                logger.warning(
-                    "[%s] Payment webhook rejected: stale "
-                    "createdAt=%s (older than %s seconds). "
-                    "transaction=%s",
-                    request_id,
-                    callback_data.createdAt,
-                    WEBHOOK_MAX_AGE_SECONDS,
-                    transaction_id,
-                )
-                return web.Response(
-                    status=400,
-                    text="Stale webhook",
-                )
-
         valid_statuses = {
             "CONFIRMED",
             "CANCELED",
             "CHARGEBACKED",
         }
+
         if status not in valid_statuses:
             logger.warning(
                 "[%s] Payment webhook unknown status: %s "
@@ -222,10 +283,68 @@ async def platega_webhook_handler(
                 status,
                 transaction_id,
             )
+
             return web.Response(
                 status=400,
                 text="Invalid webhook status",
             )
+
+        #
+        # Replay / stale защита.
+        #
+        # Если webhook старый, мы не отклоняем его автоматически.
+        # Вместо этого проверяем статус через Platega API.
+        #
+        callback_amount = callback_data.amount
+        callback_currency = callback_data.currency
+
+        if callback_data.createdAt:
+            if not _is_recent_timestamp(callback_data.createdAt):
+                logger.info(
+                    "[%s] Payment webhook is stale: createdAt=%s. "
+                    "Verifying via Platega API. transaction=%s",
+                    request_id,
+                    callback_data.createdAt,
+                    transaction_id,
+                )
+
+                (
+                    stale_ok,
+                    verified_amount,
+                    verified_currency,
+                    stale_error,
+                ) = await _verify_stale_webhook_via_api(
+                    callback_data,
+                    status,
+                )
+
+                if not stale_ok:
+                    logger.warning(
+                        "[%s] Stale webhook rejected: "
+                        "reason=%s, transaction=%s",
+                        request_id,
+                        stale_error,
+                        transaction_id,
+                    )
+
+                    return web.Response(
+                        status=400,
+                        text="Stale webhook unverified",
+                    )
+
+                if verified_amount is not None:
+                    callback_amount = verified_amount
+
+                if verified_currency is not None:
+                    callback_currency = verified_currency
+
+                logger.info(
+                    "[%s] Stale webhook verified via API. "
+                    "transaction=%s, status=%s",
+                    request_id,
+                    transaction_id,
+                    status,
+                )
 
         logger.info(
             "[%s] Payment webhook received: transaction=%s, "
@@ -233,8 +352,8 @@ async def platega_webhook_handler(
             request_id,
             transaction_id,
             status,
-            callback_data.amount,
-            callback_data.currency,
+            callback_amount,
+            callback_currency,
         )
 
         async with session_scope() as session:
@@ -249,7 +368,7 @@ async def platega_webhook_handler(
                         f"[{request_id}] "
                         f"transaction={transaction_id}, "
                         f"status={status}, "
-                        f"amount={callback_data.amount}"
+                        f"amount={callback_amount}"
                     ),
                 )
             except Exception as e:
@@ -266,9 +385,9 @@ async def platega_webhook_handler(
                     transaction_id=transaction_id,
                     status=status,
                     payload=payload,
-                    callback_amount=callback_data.amount,
+                    callback_amount=callback_amount,
                     callback_payload=callback_data.payload,
-                    callback_currency=callback_data.currency,
+                    callback_currency=callback_currency,
                 )
             )
 
@@ -280,6 +399,7 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
+
                     try:
                         await _send_payment_not_found_alert_now(
                             {
@@ -295,6 +415,7 @@ async def platega_webhook_handler(
                             request_id,
                             alert_error,
                         )
+
                     return web.Response(
                         status=404,
                         text="Payment not found",
@@ -308,6 +429,7 @@ async def platega_webhook_handler(
                         transaction_id,
                         status,
                     )
+
                     return web.Response(
                         status=200,
                         text="OK",
@@ -321,6 +443,7 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
+
                     return web.Response(
                         status=200,
                         text="OK",
@@ -334,6 +457,7 @@ async def platega_webhook_handler(
                         transaction_id,
                         status,
                     )
+
                     return web.Response(
                         status=200,
                         text="OK",
@@ -347,6 +471,7 @@ async def platega_webhook_handler(
                         transaction_id,
                         result_code,
                     )
+
                     return web.Response(
                         status=200,
                         text="OK",
@@ -360,6 +485,7 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
+
                     try:
                         await _send_payment_not_found_alert_now(
                             {
@@ -375,6 +501,7 @@ async def platega_webhook_handler(
                             request_id,
                             alert_error,
                         )
+
                     return web.Response(
                         status=404,
                         text="Payment not found",
@@ -387,6 +514,7 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
+
                     return web.Response(
                         status=200,
                         text="OK",
@@ -399,6 +527,7 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
+
                     return web.Response(
                         status=200,
                         text="OK",
@@ -411,6 +540,7 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
+
                     return web.Response(
                         status=200,
                         text="OK",
@@ -423,6 +553,7 @@ async def platega_webhook_handler(
                         request_id,
                         transaction_id,
                     )
+
                     return web.Response(
                         status=200,
                         text="OK",
@@ -436,6 +567,7 @@ async def platega_webhook_handler(
                         transaction_id,
                         status,
                     )
+
                     return web.Response(
                         status=500,
                         text="Processing failed",
@@ -449,6 +581,7 @@ async def platega_webhook_handler(
                         result_code,
                         transaction_id,
                     )
+
                     return web.Response(
                         status=500,
                         text="Unknown error",
@@ -461,6 +594,7 @@ async def platega_webhook_handler(
             e,
             exc_info=True,
         )
+
         return web.Response(
             status=500,
             text="Internal server error",
@@ -481,13 +615,16 @@ def setup_webhook_routes(app: web.Application):
         "/webhook/platega",
         platega_webhook_handler,
     )
+
     app.router.add_get(
         "/health",
         healthcheck_handler,
     )
+
     logger.info(
         "Payment webhook route registered: POST /webhook/platega"
     )
+
     logger.info(
         "Healthcheck endpoint registered: GET /health"
     )

@@ -21,6 +21,7 @@ from database.repositories.servers_repo import get_server_by_id
 from database.repositories.users_repo import (
     create_user,
     get_user_by_telegram_id,
+    get_user_by_telegram_id_any,
 )
 from services.amnezia_client import AmneziaClient
 from utils.datetime_helpers import is_expired, now_utc
@@ -108,26 +109,78 @@ class SubscriptionService:
         username: str | None,
         first_name: str | None,
         ref_id: int | None = None,
-    ) -> User:
-        user = await get_user_by_telegram_id(session, telegram_id)
+    ) -> Optional[User]:
+        #
+        # Ищем пользователя включая soft-deleted.
+        #
+        # Это нужно, чтобы:
+        # - не ловить unique constraint при повторном входе;
+        # - безопасно восстанавливать soft-deleted пользователя;
+        # - не создавать дубликат.
+        #
+        user = await get_user_by_telegram_id_any(
+            session,
+            telegram_id,
+        )
 
-        if user:
+        #
+        # Если пользователь был soft-deleted, восстанавливаем его.
+        #
+        # В проекте пока нет полноценного пользовательского удаления,
+        # поэтому восстановление при /start безопасно и защищает
+        # от unique constraint error.
+        #
+        if user is not None and user.is_deleted:
+            user.is_deleted = False
+            user.deleted_at = None
+            await session.flush()
+
+            invalidate_user_cache(telegram_id)
+
+            logger.info(
+                "Restored soft-deleted user %s on onboarding",
+                telegram_id,
+            )
+
+        if user is not None:
+            changed = False
+
+            if username is not None and user.username != username:
+                user.username = username
+                changed = True
+
+            if first_name is not None and user.first_name != first_name:
+                user.first_name = first_name
+                changed = True
+
+            #
+            # Поздняя привязка реферала.
+            #
+            # Если пользователь уже существует, но пришёл по реферальной
+            # ссылке и ещё не был привязан к рефереру, привязываем.
+            #
             if ref_id is not None and user.referred_by is None:
                 is_valid = await SubscriptionService._validate_referral(
                     session,
                     telegram_id,
                     ref_id,
                 )
+
                 if is_valid:
                     user.referred_by = ref_id
-                    await session.flush()
-                    invalidate_user_cache(telegram_id)
+                    changed = True
+
                     logger.info(
                         "Late referral binding: user %s bound to "
                         "referrer %s",
                         telegram_id,
                         ref_id,
                     )
+
+            if changed:
+                await session.flush()
+                invalidate_user_cache(telegram_id)
+
             return user
 
         referred_by = None
@@ -138,8 +191,10 @@ class SubscriptionService:
                 telegram_id,
                 ref_id,
             )
+
             if is_valid:
                 referred_by = ref_id
+
                 logger.info(
                     "New user %s referred by %s",
                     telegram_id,
@@ -154,8 +209,10 @@ class SubscriptionService:
             referred_by,
         )
 
+        #
         # Критично: иначе UserContextMiddleware может ещё 15 секунд
         # отдавать None для только что созданного пользователя.
+        #
         invalidate_user_cache(telegram_id)
 
         return user
@@ -169,6 +226,7 @@ class SubscriptionService:
         new_tariff_id: Optional[int] = None,
     ) -> Optional[User]:
         user = await get_user_by_telegram_id(session, telegram_id)
+
         if not user:
             return None
 
@@ -177,6 +235,7 @@ class SubscriptionService:
                 session,
                 user.id,
             )
+
             if profiles_count > new_device_limit:
                 raise ValueError(
                     f"Cannot downgrade: {profiles_count} devices > "
@@ -225,6 +284,14 @@ class SubscriptionService:
         #
         user.notified_expired = False
         user.notified_grace_12h = False
+
+        #
+        # Сбрасываем notification retry state.
+        #
+        # Иначе старый счётчик ошибок может задержать новые уведомления.
+        #
+        user.notification_retry_count = 0
+        user.last_notification_attempt = None
 
         if new_device_limit is not None:
             old_device_limit = user.device_limit

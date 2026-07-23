@@ -11,10 +11,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.keyboards import get_admin_tariff_card_keyboard, get_back_button
-from bot.keyboards.admin.users import get_admin_confirm_action_keyboard
+from bot.keyboards import (
+    get_admin_tariff_card_keyboard,
+    get_back_button,
+)
+from bot.keyboards.admin.users import (
+    get_admin_confirm_action_keyboard,
+)
+from bot.middlewares.user_context import invalidate_user_cache
 from bot.states import AdminStates
-from database.models import Payment, User
+from database.models import Payment, User, VPNProfile
 from database.repositories.tariffs_repo import (
     delete_tariff,
     get_tariff_by_id,
@@ -90,7 +96,6 @@ async def _show_tariffs_list(
     page: int = 1,
 ):
     total_tariffs = await get_tariff_count(session)
-
     total_pages = max(
         1,
         math.ceil(total_tariffs / TARIFFS_PER_PAGE),
@@ -126,9 +131,24 @@ async def _get_payments_count_for_tariff(
     stmt = select(func.count(Payment.id)).where(
         Payment.tariff_id == tariff_id,
     )
-
     result = await session.execute(stmt)
+    return result.scalar_one() or 0
 
+
+async def _get_pending_payments_count_for_tariff(
+    session: AsyncSession,
+    tariff_id: int,
+) -> int:
+    stmt = select(func.count(Payment.id)).where(
+        Payment.tariff_id == tariff_id,
+        Payment.status.in_(
+            [
+                "pending",
+                "requires_manual_review",
+            ]
+        ),
+    )
+    result = await session.execute(stmt)
     return result.scalar_one() or 0
 
 
@@ -166,7 +186,6 @@ async def tariffs_pagination(
     await state.clear()
 
     page = int(callback.data.split(":")[1])
-
     await _show_tariffs_list(callback, session, page=page)
     await callback.answer()
 
@@ -221,7 +240,6 @@ async def show_tariff_card(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -251,7 +269,6 @@ async def toggle_tariff_confirm(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -314,7 +331,6 @@ async def toggle_tariff_apply(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -325,6 +341,28 @@ async def toggle_tariff_apply(
         return
 
     new_status = not tariff.is_active
+
+    #
+    # Если тариф выключается, проверяем ожидающие платежи.
+    #
+    # Это защищает сценарий:
+    # - пользователь начал оплату;
+    # - админ выключил тариф;
+    # - платёж зависает или уходит в manual review.
+    #
+    if not new_status:
+        pending_count = await _get_pending_payments_count_for_tariff(
+            session,
+            tariff_id,
+        )
+
+        if pending_count > 0:
+            await callback.answer(
+                f"⚠️ По тарифу есть ожидающие платежи: {pending_count}. "
+                "Сначала обработайте их.",
+                show_alert=True,
+            )
+            return
 
     await update_tariff(
         session,
@@ -366,7 +404,6 @@ async def delete_tariff_handler(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -464,7 +501,6 @@ async def delete_tariff_apply(
     await state.clear()
 
     tariff_id = int(callback.data.split(":")[1])
-
     tariff = await get_tariff_by_id(session, tariff_id)
 
     if not tariff:
@@ -623,7 +659,6 @@ async def _apply_tariff_int_edit(
 
     if message.text.startswith("/"):
         await state.clear()
-
         await render_hub(
             message.bot,
             message.chat.id,
@@ -634,10 +669,8 @@ async def _apply_tariff_int_edit(
 
     try:
         new_value = int(message.text.strip())
-
         if not validator(new_value):
             raise ValueError
-
     except ValueError:
         await render_hub(
             message.bot,
@@ -664,6 +697,84 @@ async def _apply_tariff_int_edit(
 
     old_value = getattr(tariff, field_name)
 
+    #
+    # Защита опасных изменений тарифа.
+    #
+    # Для duration_days и device_limit:
+    # - нельзя менять, если есть pending/requires_manual_review платежи;
+    #
+    # Для device_limit дополнительно:
+    # - нельзя уменьшать лимит, если у пользователей уже больше устройств.
+    #
+    if field_name in ("duration_days", "device_limit"):
+        pending_count = await _get_pending_payments_count_for_tariff(
+            session,
+            tariff_id,
+        )
+
+        if pending_count > 0:
+            await render_hub(
+                message.bot,
+                message.chat.id,
+                "⚠️ <b>Изменение тарифа заблокировано</b>\n"
+                f"По этому тарифу есть ожидающие платежи: "
+                f"<b>{pending_count}</b>.\n"
+                "Сначала обработайте или отмените их, "
+                "затем измените тариф.",
+                get_back_button("admin_tariffs"),
+                parse_mode="HTML",
+            )
+            await state.clear()
+            return
+
+    if field_name == "device_limit":
+        stmt = (
+            select(User.telegram_id)
+            .join(
+                VPNProfile,
+                VPNProfile.user_id == User.id,
+            )
+            .where(
+                User.current_tariff_id == tariff_id,
+                User.is_deleted == False,
+            )
+            .group_by(User.telegram_id)
+            .having(func.count(VPNProfile.id) > new_value)
+        )
+
+        result = await session.execute(stmt)
+        first_blocked_user = result.first()
+
+        if first_blocked_user:
+            await render_hub(
+                message.bot,
+                message.chat.id,
+                "⚠️ <b>Изменение лимита невозможно</b>\n"
+                "У пользователей больше устройств, чем новый лимит.\n"
+                "Сначала уменьшите количество устройств у пользователей "
+                "или выберите больший лимит.",
+                get_back_button("admin_tariffs"),
+                parse_mode="HTML",
+            )
+            await state.clear()
+            return
+
+    #
+    # Если меняется device_limit, нужно позже инвалидировать кэш
+    # пользователей, у которых обновится лимит.
+    #
+    affected_telegram_ids: list[int] = []
+
+    if field_name == "device_limit":
+        users_stmt = select(User.telegram_id).where(
+            User.current_tariff_id == tariff_id,
+            User.is_deleted == False,
+        )
+        users_result = await session.execute(users_stmt)
+        affected_telegram_ids = [
+            row[0] for row in users_result.all()
+        ]
+
     await update_tariff(
         session,
         tariff,
@@ -688,6 +799,9 @@ async def _apply_tariff_int_edit(
             .values(device_limit=new_value)
         )
         await session.flush()
+
+        for telegram_id in affected_telegram_ids:
+            invalidate_user_cache(telegram_id)
 
         logger.info(
             "Synced user.device_limit for tariff %s: %s -> %s",

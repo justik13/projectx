@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -8,16 +7,23 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message
 from cachetools import TTLCache
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.constants import USER_CONTEXT_CACHE_MAX_SIZE, USER_CONTEXT_CACHE_TTL
 from database.models import User
+from database.repositories.users_repo import (
+    create_user,
+    get_user_by_telegram_id_any,
+)
 
 logger = logging.getLogger(__name__)
+
 _user_cache: TTLCache[int, User | None] = TTLCache(
-    maxsize=USER_CONTEXT_CACHE_MAX_SIZE, 
-    ttl=USER_CONTEXT_CACHE_TTL
+    maxsize=USER_CONTEXT_CACHE_MAX_SIZE,
+    ttl=USER_CONTEXT_CACHE_TTL,
 )
+
 _SENTINEL = object()
 
 
@@ -33,6 +39,7 @@ class UserContextMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         telegram_id: int | None = None
+
         if isinstance(event, Message) and event.from_user:
             telegram_id = event.from_user.id
         elif isinstance(event, CallbackQuery) and event.from_user:
@@ -41,10 +48,12 @@ class UserContextMiddleware(BaseMiddleware):
         if telegram_id is None:
             data["db_user"] = None
             return await handler(event, data)
+
         cached = _user_cache.get(telegram_id, _SENTINEL)
         if cached is not _SENTINEL:
             data["db_user"] = cached
             return await handler(event, data)
+
         session: AsyncSession | None = data.get("session")
         if session is None:
             data["db_user"] = None
@@ -56,6 +65,64 @@ class UserContextMiddleware(BaseMiddleware):
         )
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
+
+        #
+        # Если пользователя нет в новой БД, но есть Telegram-событие
+        # от реального пользователя в личном чате, создаём пользователя.
+        #
+        # Это чинит ситуацию, когда пользователь жмёт старую кнопку
+        # после пересоздания БД и видит "Профиль не найден".
+        #
+        if user is None:
+            existing_any = await get_user_by_telegram_id_any(
+                session,
+                telegram_id,
+            )
+
+            #
+            # Если пользователь был soft-deleted, автоматически
+            # не создаём нового и не восстанавливаем здесь.
+            #
+            # Восстановление происходит в /start или back_to_main_menu.
+            #
+            if existing_any is not None and existing_any.is_deleted:
+                user = None
+            elif existing_any is not None and not existing_any.is_deleted:
+                user = existing_any
+            else:
+                try:
+                    user = await create_user(
+                        session,
+                        telegram_id=telegram_id,
+                        username=event.from_user.username,
+                        first_name=event.from_user.first_name,
+                        referred_by=None,
+                    )
+                    logger.info(
+                        "Auto-registered user %s on %s",
+                        telegram_id,
+                        type(event).__name__,
+                    )
+                except IntegrityError:
+                    #
+                    # Гонка: пользователь мог быть создан параллельно.
+                    # Откатываемся и перечитываем.
+                    #
+                    await session.rollback()
+
+                    existing_any = await get_user_by_telegram_id_any(
+                        session,
+                        telegram_id,
+                    )
+
+                    if (
+                        existing_any is not None
+                        and not existing_any.is_deleted
+                    ):
+                        user = existing_any
+                    else:
+                        user = None
+
         _user_cache[telegram_id] = user
         data["db_user"] = user
 

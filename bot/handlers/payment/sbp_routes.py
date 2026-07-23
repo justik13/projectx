@@ -36,6 +36,33 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
+def _get_payment_tariff_name(payment) -> str:
+    """
+    Возвращает отображаемое имя тарифа для платежа.
+
+    Приоритет:
+    1. snapshot_device_limit из платежа;
+    2. текущий тариф, если snapshot отсутствует.
+    """
+    device_limit = getattr(
+        payment,
+        "snapshot_device_limit",
+        None,
+    )
+
+    if device_limit is None and payment.tariff:
+        device_limit = getattr(
+            payment.tariff,
+            "device_limit",
+            2,
+        )
+
+    if device_limit is None:
+        device_limit = 2
+
+    return get_tariff_display_name(device_limit)
+
+
 @router.callback_query(F.data.startswith("pay_sbp:"))
 async def pay_sbp(
     callback: CallbackQuery,
@@ -257,13 +284,7 @@ async def check_payment_status(
             else "—"
         )
 
-        device_limit = (
-            getattr(payment.tariff, "device_limit", 2)
-            if payment and payment.tariff
-            else 2
-        )
-
-        tariff_name = get_tariff_display_name(device_limit)
+        tariff_name = _get_payment_tariff_name(payment)
 
         text = (
             texts.PAYMENT_SUCCESS_RENEW.format(
@@ -290,13 +311,7 @@ async def check_payment_status(
 
         payment = await get_payment_by_id(session, payment_id)
 
-        device_limit = (
-            getattr(payment.tariff, "device_limit", 2)
-            if payment and payment.tariff
-            else 2
-        )
-
-        tariff_name = get_tariff_display_name(device_limit)
+        tariff_name = _get_payment_tariff_name(payment)
 
         text = texts.PAYMENT_PAID_AFTER_CANCEL.format(
             amount=payment.amount if payment else "—",

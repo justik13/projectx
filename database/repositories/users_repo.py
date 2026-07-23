@@ -1,8 +1,10 @@
 from datetime import timedelta
 from typing import Optional, List, TypedDict
+
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
 from database.models import User
 from utils.datetime_helpers import now_utc
 

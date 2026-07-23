@@ -1,15 +1,23 @@
 import logging
 
 from aiogram import Router, F
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+)
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.keyboards.admin.users import get_admin_confirm_action_keyboard
+from bot.keyboards.admin.users import (
+    get_admin_confirm_action_keyboard,
+)
+from database.connection import session_scope
 from database.repositories.payments_repo import get_payment_by_id
+from database.repositories.users_repo import mark_user_bot_blocked
 from services.payment_service import PaymentService
+from services.workers.heartbeat import get_bot_ref
 from utils.admin import is_admin
 from utils.formatters import format_datetime
 from utils.tariff_names import get_tariff_display_name
@@ -21,6 +29,33 @@ from .common import (
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+def _get_manual_grant_tariff_name(payment) -> str:
+    """
+    Возвращает отображаемое имя тарифа для ручной выдачи.
+
+    Приоритет:
+    1. snapshot_device_limit из платежа;
+    2. текущий тариф, если snapshot отсутствует.
+    """
+    device_limit = getattr(
+        payment,
+        "snapshot_device_limit",
+        None,
+    )
+
+    if device_limit is None and payment.tariff:
+        device_limit = getattr(
+            payment.tariff,
+            "device_limit",
+            2,
+        )
+
+    if device_limit is None:
+        device_limit = 2
+
+    return get_tariff_display_name(device_limit)
 
 
 @router.callback_query(F.data.startswith("admin_manual_grant:"))
@@ -93,15 +128,7 @@ async def admin_manual_grant(
         )
         return
 
-    tariff = payment.tariff
-
-    tariff_name = (
-        get_tariff_display_name(
-            getattr(tariff, "device_limit", 2)
-        )
-        if tariff
-        else "—"
-    )
+    tariff_name = _get_manual_grant_tariff_name(payment)
 
     status_name = PAYMENT_STATUS_NAMES.get(
         payment.status,
@@ -193,20 +220,13 @@ async def admin_manual_grant_apply(
                 )
 
             try:
-                from services.workers.heartbeat import get_bot_ref
-
                 bot = get_bot_ref()
 
                 if bot and payment and payment.user:
                     user = payment.user
-                    tariff = payment.tariff
 
-                    tariff_name = (
-                        get_tariff_display_name(
-                            getattr(tariff, "device_limit", 2)
-                        )
-                        if tariff
-                        else "—"
+                    tariff_name = _get_manual_grant_tariff_name(
+                        payment
                     )
 
                     valid_until = format_datetime(
@@ -241,6 +261,29 @@ async def admin_manual_grant_apply(
                         client_msg,
                         reply_markup=builder.as_markup(),
                         parse_mode="HTML",
+                    )
+
+            except TelegramForbiddenError:
+                logger.info(
+                    "Manual grant notification: user %s "
+                    "blocked the bot",
+                    user.telegram_id
+                    if payment and payment.user
+                    else "?",
+                )
+
+                try:
+                    if payment and payment.user:
+                        async with session_scope() as notify_session:
+                            await mark_user_bot_blocked(
+                                notify_session,
+                                payment.user.telegram_id,
+                            )
+                except Exception as block_error:
+                    logger.error(
+                        "Failed to mark user as bot_blocked "
+                        "after manual grant notification: %s",
+                        block_error,
                     )
 
             except Exception as notify_error:

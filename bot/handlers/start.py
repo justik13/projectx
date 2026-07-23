@@ -29,7 +29,6 @@ def parse_referral_id(command_args: str) -> int | None:
         return None
 
     match = re.match(r"ref_(\d+)", command_args)
-
     return int(match.group(1)) if match else None
 
 
@@ -40,9 +39,6 @@ async def _update_user_profile_if_changed(
 ) -> User:
     """
     Обновляет username и first_name, если они изменились.
-
-    Раньше данные обновлялись только при первом /start.
-    Теперь они обновляются при каждом /start, если есть изменения.
     """
     updates = {}
 
@@ -83,18 +79,15 @@ async def cmd_start(
     session: AsyncSession,
 ):
     data = await state.get_data()
-
     payment_id = data.get("payment_id")
 
     if payment_id:
         try:
             await mark_payment_as_cancelled(session, payment_id)
-
             logger.info(
                 "Payment %s cancelled due to /start",
                 payment_id,
             )
-
         except Exception as e:
             logger.warning(
                 "Failed to cancel payment %s: %s",
@@ -112,27 +105,37 @@ async def cmd_start(
         else None
     )
 
-    user = await get_user_by_telegram_id(session, telegram_id)
+    #
+    # Всегда вызываем process_onboarding.
+    #
+    # Он:
+    # - создаёт пользователя, если его нет;
+    # - восстанавливает soft-deleted пользователя;
+    # - привязывает реферала, если пользователь уже существует,
+    #   но referred_by ещё пустой.
+    #
+    user = await SubscriptionService.process_onboarding(
+        session,
+        telegram_id,
+        message.from_user.username,
+        message.from_user.first_name,
+        ref_id,
+    )
 
-    if not user:
-        await SubscriptionService.process_onboarding(
-            session,
+    if user is None:
+        logger.error(
+            "cmd_start: user is still None after onboarding "
+            "for telegram_id=%s",
             telegram_id,
-            message.from_user.username,
-            message.from_user.first_name,
-            ref_id,
         )
+        await message.answer(texts.ERROR_TECHNICAL_MESSAGE)
+        return
 
-        user = await get_user_by_telegram_id(
-            session,
-            telegram_id,
-        )
-    else:
-        user = await _update_user_profile_if_changed(
-            session,
-            user,
-            message,
-        )
+    user = await _update_user_profile_if_changed(
+        session,
+        user,
+        message,
+    )
 
     is_active = await SubscriptionService.check_access(
         session,
@@ -142,7 +145,6 @@ async def cmd_start(
     is_admin = user.telegram_id in get_settings().ADMIN_IDS
 
     name = safe(user.first_name or "Пользователь")
-
     text = texts.HUB_HEADER.format(name=name)
 
     kb = get_hub_keyboard(
@@ -168,7 +170,6 @@ async def back_to_main_menu(
     await callback.answer()
 
     data = await state.get_data()
-
     payment_id = data.get("payment_id")
 
     if payment_id:
@@ -178,6 +179,30 @@ async def back_to_main_menu(
             pass
 
     await state.clear()
+
+    #
+    # Если пользователь отсутствует, например после пересоздания БД,
+    # регистрируем его прямо здесь.
+    #
+    # Иначе старая кнопка "🚀 Начать" ничего не делает.
+    #
+    if not db_user:
+        if session is None:
+            await callback.answer(
+                texts.ERROR_USER_NOT_FOUND,
+                show_alert=True,
+            )
+            return
+
+        db_user = await SubscriptionService.process_onboarding(
+            session,
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.first_name,
+            None,
+        )
+
+        invalidate_user_cache(callback.from_user.id)
 
     if not db_user:
         await callback.answer(
@@ -194,7 +219,6 @@ async def back_to_main_menu(
     is_admin = db_user.telegram_id in get_settings().ADMIN_IDS
 
     name = safe(db_user.first_name or "Пользователь")
-
     text = texts.HUB_HEADER.format(name=name)
 
     kb = get_hub_keyboard(

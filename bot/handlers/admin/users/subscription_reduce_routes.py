@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
 from bot.keyboards import get_back_button
-from bot.keyboards.admin.users import get_admin_confirm_action_keyboard
+from bot.keyboards.admin.users import (
+    get_admin_confirm_action_keyboard,
+)
 from bot.middlewares.user_context import invalidate_user_cache
 from bot.states import AdminStates
 from database.repositories.users_repo import get_user_by_telegram_id
@@ -178,16 +180,30 @@ async def admin_sub_apply_reduce(
         user.notified_1d = False
         user.notified_2h = False
 
+        #
         # Сбрасываем флаги grace-уведомлений, чтобы пользователь
         # получил корректные уведомления после изменения подписки.
+        #
         user.notified_expired = False
         user.notified_grace_12h = False
 
+        #
+        # Сбрасываем notification retry state.
+        #
+        # Иначе старый счётчик ошибок может задержать
+        # новые уведомления после уменьшения подписки.
+        #
+        user.notification_retry_count = 0
+        user.last_notification_attempt = None
+
         await session.flush()
 
+        #
         # Сразу синхронизируем статус устройств.
+        #
         # Если подписка стала истёкшей, устройства должны быть
         # отключены без ожидания traffic worker.
+        #
         await SubscriptionService.sync_access_state(session, user)
 
         invalidate_user_cache(telegram_id)

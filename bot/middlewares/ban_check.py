@@ -1,9 +1,12 @@
 from __future__ import annotations
+
 import logging
 from typing import Any, Awaitable, Callable
+
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message
 from cachetools import TTLCache
+
 from bot import texts
 from config.settings import get_settings
 

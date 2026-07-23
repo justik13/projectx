@@ -14,7 +14,10 @@ from database.repositories.profiles_repo import (
     get_user_profiles,
     get_user_profiles_count,
 )
-from database.repositories.tariffs_repo import get_active_tariffs
+from database.repositories.tariffs_repo import (
+    get_active_tariffs,
+    get_tariff_by_id,
+)
 from services.maintenance_service import MaintenanceService
 from utils.datetime_helpers import is_expired
 from utils.formatters import format_datetime, format_days_left
@@ -22,6 +25,7 @@ from utils.tariff_names import get_tariff_display_name
 from utils.telegram import render_hub
 
 logger = logging.getLogger(__name__)
+
 
 PAYMENT_MANUAL_REVIEW_TEXT = (
     "💳 <b>Оплата получена</b>\n"
@@ -37,11 +41,13 @@ PAYMENT_MANUAL_REVIEW_TEXT = (
 def _to_decimal(value) -> Decimal | None:
     """
     Безопасно конвертирует значение в Decimal.
+
     Использовать для финансовых данных.
     Никогда не использовать float-сравнения для денег.
     """
     if value is None:
         return None
+
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
@@ -51,7 +57,36 @@ def _to_decimal(value) -> Decimal | None:
 async def _is_subscription_active(user) -> bool:
     if not user or not user.subscription_end:
         return False
+
     return not is_expired(user.subscription_end)
+
+
+async def _get_effective_device_limit(
+    session: AsyncSession,
+    user,
+) -> int:
+    """
+    Возвращает актуальный лимит устройств пользователя.
+
+    Приоритет:
+    1. тариф из current_tariff_id;
+    2. user.device_limit как fallback.
+    """
+    if user is None:
+        return 0
+
+    current_tariff_id = getattr(user, "current_tariff_id", None)
+
+    if current_tariff_id:
+        tariff = await get_tariff_by_id(
+            session,
+            current_tariff_id,
+        )
+
+        if tariff:
+            return getattr(tariff, "device_limit", 0) or 0
+
+    return getattr(user, "device_limit", 0) or 0
 
 
 async def _render_maintenance(
@@ -61,6 +96,7 @@ async def _render_maintenance(
     back_to: str = "back_to_main_menu",
 ) -> None:
     message = await MaintenanceService.get_message(session)
+
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -86,7 +122,10 @@ async def _check_tariff_change_allowed(
     is_active = await _is_subscription_active(db_user)
 
     if is_active:
-        current_limit = db_user.device_limit or 0
+        current_limit = await _get_effective_device_limit(
+            session,
+            db_user,
+        )
 
         if new_limit < current_limit:
             return texts.PAYMENT_DOWNGRADE_BLOCKED.format(
@@ -128,8 +167,10 @@ async def _show_showcase(
 
     for tariff in tariffs:
         limit = getattr(tariff, "device_limit", 2)
+
         if limit not in grouped:
             grouped[limit] = []
+
         grouped[limit].append(tariff)
 
     keyboard = get_tariff_showcase_keyboard(grouped)
@@ -149,14 +190,19 @@ async def _show_hub(
 ) -> None:
     profiles = await get_user_profiles(session, user.id)
 
-    tariff_name = get_tariff_display_name(user.device_limit)
+    device_limit = await _get_effective_device_limit(
+        session,
+        user,
+    )
+
+    tariff_name = get_tariff_display_name(device_limit)
 
     text = texts.PAYMENT_HUB_HEADER.format(
         valid_until=format_datetime(user.subscription_end),
         days_left=format_days_left(user.subscription_end),
         tariff_name=tariff_name,
         devices_count=len(profiles),
-        device_limit=user.device_limit,
+        device_limit=device_limit,
     )
 
     builder = InlineKeyboardBuilder()
@@ -165,14 +211,17 @@ async def _show_hub(
         text="🔄 Продлить доступ",
         callback_data="payment_quick_renew",
     )
+
     builder.button(
         text="⚙️ Сменить тариф",
         callback_data="payment_change_tariff",
     )
+
     builder.button(
         text="👤 Профиль",
         callback_data="menu_profile",
     )
+
     builder.button(
         text="🏠 В главное меню",
         callback_data="back_to_main_menu",
