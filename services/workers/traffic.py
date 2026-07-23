@@ -2,6 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from cachetools import TTLCache
 from sqlalchemy import select, update
 
 from bot.constants import (
@@ -20,19 +21,23 @@ logger = logging.getLogger("BackgroundWorker")
 BATCH_SIZE = 100
 TRAFFIC_QUOTA_BYTES = 1 * 1024 * 1024 * 1024 * 1024
 TRAFFIC_MAX_BACKOFF = 900
-
-#
-# Короткая стартовая задержка, чтобы после деплоя/рестарта worker
-# не ждал 15 минут до первой синхронизации.
-#
 WORKER_START_DELAY = 30.0
 
-_quota_alerted: set[int] = set()
+#
+# ИСПРАВЛЕНО: TTLCache вместо бесконечного set.
+#
+# Раньше _quota_alerted: set[int] рос бесконечно.
+# Каждый profile_id, превысивший 1TB, оставался навсегда.
+#
+# Теперь TTLCache с TTL=24 часа и maxsize=10000.
+#
+_quota_alerted: TTLCache[int, bool] = TTLCache(
+    maxsize=10000,
+    ttl=86400,
+)
+
 _consecutive_crashes: int = 0
 
-#
-# Храним ссылки на background tasks, чтобы asyncio не собрал их GC.
-#
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -46,9 +51,6 @@ def _start_background_task(coro) -> asyncio.Task:
 async def traffic_sync_loop(shutdown_event: asyncio.Event):
     global _consecutive_crashes
 
-    #
-    # Короткий initial delay вместо длительного ожидания первого цикла.
-    #
     try:
         await asyncio.wait_for(
             shutdown_event.wait(),
@@ -63,26 +65,18 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
 
     while not shutdown_event.is_set():
         try:
-            #
-            # Сначала выполняем синхронизацию,
-            # только потом ждём интервал.
-            #
             await _traffic_sync_once()
             _consecutive_crashes = 0
-
         except asyncio.CancelledError:
             logger.info("Traffic sync worker cancelled")
             break
-
         except Exception as e:
             _consecutive_crashes += 1
-
             backoff = min(
                 WORKER_ERROR_SLEEP_INTERVAL
                 * (2 ** min(_consecutive_crashes - 1, 4)),
                 TRAFFIC_MAX_BACKOFF,
             )
-
             logger.error(
                 "Критическая ошибка в цикле трафика "
                 "(crash #%s, next retry in %ss): %s",
@@ -91,10 +85,8 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
                 e,
                 exc_info=True,
             )
-
             if shutdown_event.is_set():
                 break
-
             await asyncio.sleep(backoff)
             continue
 
@@ -112,7 +104,6 @@ async def traffic_sync_loop(shutdown_event: asyncio.Event):
 
 async def _traffic_sync_once():
     servers = []
-
     async with session_scope() as session:
         stmt = select(
             Server.id,
@@ -121,9 +112,7 @@ async def _traffic_sync_once():
             Server.name,
             Server.is_active,
         )
-
         result = await session.execute(stmt)
-
         servers = [
             {
                 "id": row[0],
@@ -143,17 +132,13 @@ async def _traffic_sync_once():
             server_info["api_url"],
             server_info["api_key"],
         )
-
         try:
             api_clients_list = await client.get_all_clients()
-
             if api_clients_list is None:
                 return server_info["id"], None
-
             return server_info["id"], {
                 c.id: c for c in api_clients_list
             }
-
         except Exception as e:
             logger.error(
                 "Ошибка трафика с %s: %s",
@@ -175,22 +160,18 @@ async def _traffic_sync_once():
 
     for server_info in servers:
         server_id = server_info["id"]
-
         if server_id not in api_data_by_server:
             continue
-
         api_clients = api_data_by_server[server_id]
         await _process_server_traffic(server_info, api_clients)
 
 
 async def _process_server_traffic(server_info, api_clients):
     server_id = server_info["id"]
-
     updates_data = {}
     healing_tasks = []
     reverse_healing_tasks = []
     disable_db_ids = []
-
     current_time = now_utc()
 
     async with session_scope() as session:
@@ -209,7 +190,6 @@ async def _process_server_traffic(server_info, api_clients):
             .join(User, VPNProfile.user_id == User.id)
             .where(VPNProfile.server_id == server_id)
         )
-
         result = await session.execute(stmt)
         rows = result.all()
 
@@ -228,7 +208,6 @@ async def _process_server_traffic(server_info, api_clients):
                 continue
 
             api_data = api_clients[peer_id]
-
             api_t_down = api_data.traffics.totalDownload
             api_t_up = api_data.traffics.totalUpload
 
@@ -237,7 +216,6 @@ async def _process_server_traffic(server_info, api_clients):
                 if api_t_down is not None
                 else t_down
             )
-
             new_t_up = (
                 api_t_up
                 if api_t_up is not None
@@ -249,16 +227,12 @@ async def _process_server_traffic(server_info, api_clients):
                 or api_data.lastSeen
                 or api_data.updatedAt
             )
-
             new_last_connected = last_conn
-
             if last_conn_raw:
                 try:
                     ts = int(float(str(last_conn_raw)))
-
                     if ts > 1e12:
                         ts = ts // 1000
-
                     new_last_connected = datetime.fromtimestamp(
                         ts,
                         tz=timezone.utc,
@@ -267,18 +241,9 @@ async def _process_server_traffic(server_info, api_clients):
                     pass
 
             api_is_active = api_data.status == "active"
-
-            #
-            # Подписка невалидна, если:
-            # - subscription_end отсутствует;
-            # - subscription_end в прошлом.
-            #
-            # Вечная подписка имеет дату ~2100 год и остаётся валидной.
-            #
             is_subscription_expired = (
                 sub_end is None or sub_end < current_time
             )
-
             local_should_be_disabled = (
                 (not is_active)
                 or is_banned
@@ -286,15 +251,8 @@ async def _process_server_traffic(server_info, api_clients):
             )
 
             if local_should_be_disabled:
-                #
-                # DB — источник истины.
-                #
-                # Если по данным бота доступ должен быть выключен,
-                # фиксируем это в БД даже если API временно недоступен.
-                #
                 if is_active:
                     disable_db_ids.append(p_id)
-
                 if api_is_active:
                     reason = (
                         "banned"
@@ -305,7 +263,6 @@ async def _process_server_traffic(server_info, api_clients):
                             else "disabled"
                         )
                     )
-
                     healing_tasks.append(
                         {
                             "profile_id": p_id,
@@ -320,20 +277,10 @@ async def _process_server_traffic(server_info, api_clients):
                             "clear_expires_at": False,
                         }
                     )
-
             elif is_active and not api_is_active:
-                #
-                # DB — источник истины.
-                #
-                # Если в БД профиль активен, подписка активна,
-                # пользователь не забанен, а на сервере профиль выключен,
-                # считаем это рассинхроном и восстанавливаем доступ.
-                #
                 expires_ts = None
-
                 if sub_end and sub_end.year < 2100:
                     expires_ts = int(sub_end.timestamp())
-
                 reverse_healing_tasks.append(
                     {
                         "profile_id": p_id,
@@ -361,13 +308,14 @@ async def _process_server_traffic(server_info, api_clients):
                 }
 
             total_traffic = (new_t_down or 0) + (new_t_up or 0)
-
             if (
                 total_traffic > TRAFFIC_QUOTA_BYTES
                 and p_id not in _quota_alerted
             ):
-                _quota_alerted.add(p_id)
-
+                #
+                # ИСПРАВЛЕНО: TTLCache вместо set.
+                #
+                _quota_alerted[p_id] = True
                 _start_background_task(
                     _send_quota_alert(
                         tg_id,
@@ -380,25 +328,19 @@ async def _process_server_traffic(server_info, api_clients):
         if updates_data:
             for profile_id, data in updates_data.items():
                 values = {}
-
                 if "traffic_down" in data:
                     values["traffic_down"] = data["traffic_down"]
-
                 if "traffic_up" in data:
                     values["traffic_up"] = data["traffic_up"]
-
                 if "last_connected" in data:
                     values["last_connected"] = data["last_connected"]
-
                 if not values:
                     continue
-
                 await session.execute(
                     update(VPNProfile)
                     .where(VPNProfile.id == profile_id)
                     .values(**values)
                 )
-
             logger.info(
                 "Трафик синхронизирован для %s устройств на сервере %s",
                 len(updates_data),
@@ -411,25 +353,17 @@ async def _process_server_traffic(server_info, api_clients):
                 .where(VPNProfile.id.in_(disable_db_ids))
                 .values(is_active=False)
             )
-
             logger.info(
                 "DB is_active=false set for %s profiles on server %s",
                 len(disable_db_ids),
                 server_info["name"],
             )
 
-        #
-        # Self-healing выполняется ПОСЛЕ commit.
-        #
-        # Это важно, чтобы не держать DB-сессию открытой во время
-        # внешних HTTP-запросов к Amnezia API.
-        #
         if healing_tasks:
             queue_post_commit_task(
                 session,
                 lambda tasks=healing_tasks: _self_heal_peers(tasks),
             )
-
         if reverse_healing_tasks:
             queue_post_commit_task(
                 session,
@@ -447,18 +381,15 @@ async def _send_quota_alert(
         from services.workers.heartbeat import get_bot_ref
 
         bot = get_bot_ref()
-
         if not bot:
             return
 
         settings = get_settings()
         admin_ids = settings.ADMIN_IDS
-
         if not admin_ids:
             return
 
         tb = total_bytes / (1024 ** 4)
-
         msg = (
             "⚠️ <b>Fair Usage Policy: Превышение квоты трафика!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
@@ -475,12 +406,10 @@ async def _send_quota_alert(
         from aiogram.utils.keyboard import InlineKeyboardBuilder
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="👤 Профиль пользователя",
             callback_data=f"admin_user_card:{telegram_id}",
         )
-
         builder.adjust(1)
 
         for admin_id in admin_ids:
@@ -497,7 +426,6 @@ async def _send_quota_alert(
                     admin_id,
                     e,
                 )
-
     except Exception as e:
         logger.error("Failed to send quota alert: %s", e)
 
@@ -507,32 +435,27 @@ async def _self_heal_peers(healing_tasks: list):
         return
 
     total_count = len(healing_tasks)
-
     if total_count > SELF_HEALING_MAX_PER_CYCLE:
         healing_tasks = healing_tasks[:SELF_HEALING_MAX_PER_CYCLE]
 
     disabled_count = sum(
         1 for t in healing_tasks if t["target_status"] == "disabled"
     )
-
     activated_count = sum(
         1 for t in healing_tasks if t["target_status"] == "active"
     )
 
     sem = asyncio.Semaphore(10)
-
     success_count = 0
     fail_count = 0
 
     async def _patch_peer(task):
         nonlocal success_count, fail_count
-
         async with sem:
             client = AmneziaClient(
                 task["api_url"],
                 task["api_key"],
             )
-
             try:
                 result = await client.update_client(
                     client_id=task["peer_id"],
@@ -540,10 +463,8 @@ async def _self_heal_peers(healing_tasks: list):
                     expires_at=task.get("expires_at"),
                     clear_expires_at=task.get("clear_expires_at", False),
                 )
-
                 if result:
                     success_count += 1
-
                     logger.info(
                         "Self-healing: %s peer %s... on %s (reason: %s)",
                         task["target_status"],
@@ -553,7 +474,6 @@ async def _self_heal_peers(healing_tasks: list):
                     )
                 else:
                     fail_count += 1
-
             except Exception as e:
                 fail_count += 1
                 logger.error("Self-healing error: %s", e)

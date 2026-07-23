@@ -36,9 +36,6 @@ logger = logging.getLogger(__name__)
 _broadcast_stop_events: dict[int, asyncio.Event] = {}
 _broadcast_in_progress: set[int] = set()
 
-#
-# Храним ссылки на background tasks, чтобы asyncio не собрал их GC.
-#
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -66,11 +63,9 @@ class BroadcastRateLimiter:
                     self.tokens + elapsed * self.rate,
                 )
                 self.last_refill = now
-
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
-
                 wait_time = (1.0 - self.tokens) / self.rate
             await asyncio.sleep(wait_time)
 
@@ -94,7 +89,6 @@ async def start_broadcast(
     state: FSMContext,
 ):
     await callback.answer()
-
     if not is_admin(callback.from_user.id):
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -103,7 +97,6 @@ async def start_broadcast(
         return
 
     await state.clear()
-
     try:
         await callback.message.edit_text(
             texts.BROADCAST_PROMPT,
@@ -187,7 +180,6 @@ async def process_broadcast_message(
             content_type=content_type,
         )
         await state.set_state(AdminStates.confirming_broadcast)
-
     except Exception as e:
         await render_hub(
             message.bot,
@@ -268,7 +260,6 @@ async def _dispatch_message(
     content_type,
 ):
     kb = get_broadcast_close_keyboard()
-
     try:
         await _send_with_html(
             bot,
@@ -305,16 +296,6 @@ async def _get_next_batch(
     last_id: int,
     limit: int = 50,
 ):
-    """
-    Возвращает следующий batch получателей рассылки.
-
-    Важно:
-    - используем внутренний User.id как cursor;
-    - забаненные пользователи исключаются всегда;
-    - удалённые пользователи исключаются всегда;
-    - пользователи, заблокировавшие бота, исключаются всегда;
-    - для audience=active дополнительно проверяется активная подписка.
-    """
     stmt = (
         select(User.id, User.telegram_id)
         .where(
@@ -324,13 +305,11 @@ async def _get_next_batch(
             User.is_banned == False,
         )
     )
-
     if audience == "active":
         current_time = now_utc()
         stmt = stmt.where(
             User.subscription_end > current_time,
         )
-
     stmt = stmt.order_by(User.id).limit(limit)
     result = await session.execute(stmt)
     return [(row[0], row[1]) for row in result.all()]
@@ -356,11 +335,6 @@ async def _send_broadcast_to_users_with_resume(
             if not progress:
                 return
 
-            #
-            # Если рассылка уже находится в статусе stopping,
-            # например админ нажал stop или бот перезапустился
-            # во время остановки, завершаем её как stopped.
-            #
             if progress.status == "stopping":
                 progress.status = "stopped"
                 await session.commit()
@@ -371,7 +345,6 @@ async def _send_broadcast_to_users_with_resume(
                 return
 
             should_finalize = True
-
             stop_event = _get_stop_event(admin_id)
             stop_event.clear()
 
@@ -400,14 +373,12 @@ async def _send_broadcast_to_users_with_resume(
                     target_audience,
                     last_id,
                 )
-
                 if not batch:
                     break
 
                 for internal_id, uid in batch:
                     if stop_event and stop_event.is_set():
                         break
-
                     try:
                         await _broadcast_limiter.acquire()
                         await _dispatch_message(
@@ -442,7 +413,6 @@ async def _send_broadcast_to_users_with_resume(
                         local_fail += 1
 
                 last_id = internal_id
-
                 progress = await session.get(
                     BroadcastProgress,
                     progress_id,
@@ -486,7 +456,6 @@ async def _send_broadcast_to_users_with_resume(
     finally:
         if stop_event:
             stop_event.clear()
-
         _broadcast_in_progress.discard(admin_id)
         _cleanup_stop_event(admin_id)
 
@@ -526,21 +495,8 @@ async def _send_broadcast_to_users_with_resume(
 
 
 async def resume_pending_broadcasts(bot):
-    """
-    Resume рассылки после рестарта.
-
-    Правила:
-    - статус stopping считается остановленным и не продолжается;
-    - возобновляется только последняя in_progress рассылка для админа;
-    - старые дубликаты in_progress помечаются stopped;
-    - если для админа уже есть активная задача, дубликаты помечаются stopped.
-    """
     try:
         async with session_scope() as session:
-            #
-            # Если бот перезапустился во время остановки рассылки,
-            # статус stopping должен стать stopped.
-            #
             await session.execute(
                 update(BroadcastProgress)
                 .where(BroadcastProgress.status == "stopping")
@@ -566,11 +522,9 @@ async def resume_pending_broadcasts(bot):
                 if p.admin_id in _broadcast_in_progress:
                     stop_ids.append(p.id)
                     continue
-
                 if p.admin_id in seen_admins:
                     stop_ids.append(p.id)
                     continue
-
                 seen_admins.add(p.admin_id)
                 resume_items.append((p.id, p.admin_id))
 
@@ -585,20 +539,19 @@ async def resume_pending_broadcasts(bot):
                     len(stop_ids),
                 )
 
-        for progress_id, admin_id in resume_items:
-            logger.info(
-                f"Resuming interrupted broadcast ID {progress_id} "
-                f"for admin {admin_id}"
-            )
-            _broadcast_in_progress.add(admin_id)
-            _start_background_task(
-                _send_broadcast_to_users_with_resume(
-                    bot,
-                    progress_id,
-                    admin_id,
+            for progress_id, admin_id in resume_items:
+                logger.info(
+                    f"Resuming interrupted broadcast ID {progress_id} "
+                    f"for admin {admin_id}"
                 )
-            )
-
+                _broadcast_in_progress.add(admin_id)
+                _start_background_task(
+                    _send_broadcast_to_users_with_resume(
+                        bot,
+                        progress_id,
+                        admin_id,
+                    )
+                )
     except Exception as e:
         logger.error(
             f"Failed to resume broadcasts: {e}",
@@ -621,9 +574,37 @@ async def _start_broadcast_process(
         )
         return
 
+    #
+    # ИСПРАВЛЕНО: дополнительная проверка в DB.
+    #
+    # _broadcast_in_progress — in-memory set. При рестарте бота
+    # он очищается. resume_pending_broadcasts восстанавливает
+    # из DB, но есть окно между стартом и resume.
+    #
+    # Теперь проверяем DB, чтобы не запустить дублирующую рассылку.
+    #
+    try:
+        async with session_scope() as check_session:
+            active_count = await check_session.scalar(
+                select(func.count(BroadcastProgress.id)).where(
+                    BroadcastProgress.admin_id == admin_id,
+                    BroadcastProgress.status == "in_progress",
+                )
+            )
+            if active_count and active_count > 0:
+                await callback.answer(
+                    texts.BROADCAST_ALREADY_RUNNING,
+                    show_alert=True,
+                )
+                return
+    except Exception as e:
+        logger.warning(
+            "Failed to check DB for active broadcasts: %s",
+            e,
+        )
+
     data = await state.get_data()
     broadcast_text = data.get("broadcast_text")
-
     if not broadcast_text:
         await callback.answer(
             texts.ERROR_TEXT_EMPTY,
@@ -643,7 +624,6 @@ async def _start_broadcast_process(
             User.is_banned == False,
         )
     )
-
     if audience == "active":
         current_time = now_utc()
         count_stmt = count_stmt.where(
@@ -662,7 +642,6 @@ async def _start_broadcast_process(
         return
 
     progress_id = None
-
     async with session_scope() as sess:
         progress = BroadcastProgress(
             admin_id=admin_id,
@@ -680,7 +659,6 @@ async def _start_broadcast_process(
         progress_id = progress.id
 
     _broadcast_in_progress.add(admin_id)
-
     _start_background_task(
         _send_broadcast_to_users_with_resume(
             callback.bot,
@@ -718,7 +696,6 @@ async def broadcast_to_all(
             show_alert=True,
         )
         return
-
     await _start_broadcast_process(
         callback,
         state,
@@ -742,7 +719,6 @@ async def broadcast_to_active(
             show_alert=True,
         )
         return
-
     await _start_broadcast_process(
         callback,
         state,
@@ -762,10 +738,6 @@ async def stop_broadcast(callback: CallbackQuery):
 
     admin_id = callback.from_user.id
 
-    #
-    # Переводим активные рассылки админа в промежуточный статус stopping.
-    # Это гарантирует, что после рестарта они не будут возобновлены.
-    #
     try:
         async with session_scope() as session:
             await session.execute(
@@ -798,9 +770,7 @@ async def dismiss_broadcast_result(callback: CallbackQuery):
             show_alert=True,
         )
         return
-
     await callback.answer()
-
     try:
         await callback.message.delete()
     except TelegramBadRequest as e:
@@ -812,7 +782,6 @@ async def dismiss_broadcast_result(callback: CallbackQuery):
 @router.callback_query(F.data == "dismiss_broadcast")
 async def dismiss_broadcast_message(callback: CallbackQuery):
     await callback.answer()
-
     try:
         await callback.message.delete()
     except TelegramBadRequest as e:

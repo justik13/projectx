@@ -3,6 +3,7 @@ import logging
 from datetime import timedelta
 
 from aiogram import Bot
+from cachetools import TTLCache
 from sqlalchemy import select, update
 
 from bot.constants import (
@@ -18,27 +19,25 @@ from utils.datetime_helpers import now_utc
 
 logger = logging.getLogger("BackgroundWorker")
 
-_alerted_stale_payments: set[int] = set()
+#
+# ИСПРАВЛЕНО: TTLCache вместо бесконечного set.
+#
+# Раньше _alerted_stale_payments: set[int] рос бесконечно.
+# intersection_update чистил удалённые, но ID завершённых
+# платежей оставались навсегда.
+#
+# Теперь TTLCache с TTL=2 часа (порог stale = 1 час + запас)
+# и maxsize=50000.
+#
+_alerted_stale_payments: TTLCache[int, bool] = TTLCache(
+    maxsize=50000,
+    ttl=7200,
+)
 
-# Короткая стартовая задержка вместо длительного ожидания.
 PAYMENTS_START_DELAY = 60.0
 
 
 async def _preload_alerted_stale_payments():
-    """
-    ИСПРАВЛЕНО (БАГ 10):
-
-    При старте worker'а загружаем ID всех pending платежей
-    старше 1 часа в _alerted_stale_payments.
-
-    Это предотвращает повторные алерты админам после каждого
-    рестарта бота. Без этого все stale-платежи, которые были
-    до рестарта, вызвали бы новые алерты через 60 секунд
-    после старта.
-
-    Новые stale-платежи (созданные после старта worker'а)
-    по-прежнему вызывают алерты как обычно.
-    """
     try:
         async with session_scope() as session:
             threshold = now_utc() - timedelta(hours=1)
@@ -51,8 +50,7 @@ async def _preload_alerted_stale_payments():
             )
             result = await session.execute(stmt)
             for (payment_id,) in result.all():
-                _alerted_stale_payments.add(payment_id)
-
+                _alerted_stale_payments[payment_id] = True
             if _alerted_stale_payments:
                 logger.info(
                     "Preloaded %s existing stale payment IDs "
@@ -85,12 +83,6 @@ async def stale_payments_checker_loop(
     except asyncio.TimeoutError:
         pass
 
-    #
-    # ИСПРАВЛЕНО (БАГ 10):
-    #
-    # Загружаем существующие stale-платежи в память,
-    # чтобы не отправлять повторные алерты после рестарта.
-    #
     await _preload_alerted_stale_payments()
 
     while not shutdown_event.is_set():
@@ -140,20 +132,9 @@ async def _process_stale_payments(bot: Bot, settings):
         )
         result = await session.execute(stmt)
         for payment, telegram_id in result.all():
-            # ВАЖНО:
-            #
-            # Раньше проверка была:
-            #   payment.payment_method == "SBPQR"
-            #
-            # Но Platega может вернуть paymentMethod как int,
-            # например 2. Тогда зависший платёж не проверялся бы.
-            #
-            # Поэтому внешние RUB-платежи определяем по:
-            #   external_id + currency == "RUB"
             if payment.external_id and payment.currency == "RUB":
                 sbp_payment_ids.append(payment.id)
 
-    # Проверяем SBP/RUB-платежи через платёжную систему.
     for payment_id in sbp_payment_ids:
         try:
             async with session_scope() as session:
@@ -168,7 +149,6 @@ async def _process_stale_payments(bot: Bot, settings):
                 e,
             )
 
-    # Алерт по новым зависшим pending-платежам.
     await _alert_new_stale_payments(bot, settings)
 
 
@@ -193,16 +173,15 @@ async def _alert_new_stale_payments(bot: Bot, settings):
             for payment, telegram_id in fresh_result.all()
         ]
 
-    current_stale_ids = {p.id for p, _ in fresh_stale}
-    _alerted_stale_payments.intersection_update(
-        current_stale_ids,
-    )
-
-    new_stale_for_alert = [
-        (p, tg)
-        for p, tg in fresh_stale
-        if p.id not in _alerted_stale_payments
-    ]
+        #
+        # ИСПРАВЛЕНО: TTLCache сам чистит устаревшие записи.
+        # intersection_update больше не нужен.
+        #
+        new_stale_for_alert = [
+            (p, tg)
+            for p, tg in fresh_stale
+            if p.id not in _alerted_stale_payments
+        ]
 
     if not new_stale_for_alert:
         return
@@ -238,4 +217,4 @@ async def _alert_new_stale_payments(bot: Bot, settings):
             )
 
     for payment, _ in new_stale_for_alert:
-        _alerted_stale_payments.add(payment.id)
+        _alerted_stale_payments[payment.id] = True

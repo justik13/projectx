@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 def parse_referral_id(command_args: str) -> int | None:
     if not command_args:
         return None
-
     match = re.match(r"ref_(\d+)", command_args)
     return int(match.group(1)) if match else None
 
@@ -37,17 +36,12 @@ async def _update_user_profile_if_changed(
     user: User,
     message: Message,
 ) -> User:
-    """
-    Обновляет username и first_name, если они изменились.
-    """
     updates = {}
-
     new_username = message.from_user.username
     new_first_name = message.from_user.first_name
 
     if new_username is not None and user.username != new_username:
         updates["username"] = new_username
-
     if new_first_name is not None and user.first_name != new_first_name:
         updates["first_name"] = new_first_name
 
@@ -59,15 +53,12 @@ async def _update_user_profile_if_changed(
         user,
         **updates,
     )
-
     invalidate_user_cache(user.telegram_id)
-
     logger.info(
         "User %s profile updated on /start: %s",
         user.telegram_id,
         ", ".join(updates.keys()),
     )
-
     return updated_user
 
 
@@ -81,39 +72,32 @@ async def cmd_start(
     data = await state.get_data()
     payment_id = data.get("payment_id")
 
+    #
+    # ИСПРАВЛЕНО: /start больше НЕ отменяет платёж.
+    #
+    # Раньше если пользователь нажал /start случайно во время
+    # оплаты, платёж отменялся без предупреждения.
+    #
+    # Теперь платёж остаётся pending и будет обработан
+    # webhook'ом или кнопкой «Я оплатил».
+    #
     if payment_id:
-        try:
-            await mark_payment_as_cancelled(session, payment_id)
-            logger.info(
-                "Payment %s cancelled due to /start",
-                payment_id,
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to cancel payment %s: %s",
-                payment_id,
-                e,
-            )
+        logger.info(
+            "User %s pressed /start with active payment %s. "
+            "Payment NOT cancelled.",
+            message.from_user.id,
+            payment_id,
+        )
 
     await state.clear()
 
     telegram_id = message.from_user.id
-
     ref_id = (
         parse_referral_id(command.args)
         if command.args
         else None
     )
 
-    #
-    # Всегда вызываем process_onboarding.
-    #
-    # Он:
-    # - создаёт пользователя, если его нет;
-    # - восстанавливает soft-deleted пользователя;
-    # - привязывает реферала, если пользователь уже существует,
-    #   но referred_by ещё пустой.
-    #
     user = await SubscriptionService.process_onboarding(
         session,
         telegram_id,
@@ -141,12 +125,10 @@ async def cmd_start(
         session,
         user.telegram_id,
     )
-
     is_admin = user.telegram_id in get_settings().ADMIN_IDS
 
     name = safe(user.first_name or "Пользователь")
     text = texts.HUB_HEADER.format(name=name)
-
     kb = get_hub_keyboard(
         is_admin=is_admin,
         is_active=is_active,
@@ -171,7 +153,6 @@ async def back_to_main_menu(
 
     data = await state.get_data()
     payment_id = data.get("payment_id")
-
     if payment_id:
         try:
             await mark_payment_as_cancelled(session, payment_id)
@@ -180,12 +161,6 @@ async def back_to_main_menu(
 
     await state.clear()
 
-    #
-    # Если пользователь отсутствует, например после пересоздания БД,
-    # регистрируем его прямо здесь.
-    #
-    # Иначе старая кнопка "🚀 Начать" ничего не делает.
-    #
     if not db_user:
         if session is None:
             await callback.answer(
@@ -201,26 +176,23 @@ async def back_to_main_menu(
             callback.from_user.first_name,
             None,
         )
-
         invalidate_user_cache(callback.from_user.id)
 
-    if not db_user:
-        await callback.answer(
-            texts.ERROR_USER_NOT_FOUND,
-            show_alert=True,
-        )
-        return
+        if not db_user:
+            await callback.answer(
+                texts.ERROR_USER_NOT_FOUND,
+                show_alert=True,
+            )
+            return
 
     is_active = await SubscriptionService.check_access(
         session,
         db_user.telegram_id,
     )
-
     is_admin = db_user.telegram_id in get_settings().ADMIN_IDS
 
     name = safe(db_user.first_name or "Пользователь")
     text = texts.HUB_HEADER.format(name=name)
-
     kb = get_hub_keyboard(
         is_admin=is_admin,
         is_active=is_active,

@@ -23,7 +23,6 @@ _user_cache: TTLCache[int, User | None] = TTLCache(
     maxsize=USER_CONTEXT_CACHE_MAX_SIZE,
     ttl=USER_CONTEXT_CACHE_TTL,
 )
-
 _SENTINEL = object()
 
 
@@ -66,38 +65,37 @@ class UserContextMiddleware(BaseMiddleware):
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
 
-        #
-        # Если пользователя нет в новой БД, но есть Telegram-событие
-        # от реального пользователя в личном чате, создаём пользователя.
-        #
-        # Это чинит ситуацию, когда пользователь жмёт старую кнопку
-        # после пересоздания БД и видит "Профиль не найден".
-        #
         if user is None:
             existing_any = await get_user_by_telegram_id_any(
                 session,
                 telegram_id,
             )
 
-            #
-            # Если пользователь был soft-deleted, автоматически
-            # не создаём нового и не восстанавливаем здесь.
-            #
-            # Восстановление происходит в /start или back_to_main_menu.
-            #
             if existing_any is not None and existing_any.is_deleted:
                 user = None
             elif existing_any is not None and not existing_any.is_deleted:
                 user = existing_any
             else:
+                #
+                # ИСПРАВЛЕНО: используем SAVEPOINT вместо rollback.
+                #
+                # Раньше IntegrityError приводил к session.rollback(),
+                # который откатывал ВСЮ сессию, включая изменения,
+                # сделанные ранее в том же handler'е (аудит, FSM и т.д.).
+                #
+                # Теперь create_user обёрнут в begin_nested() (SAVEPOINT).
+                # При IntegrityError откатывается только SAVEPOINT,
+                # внешняя транзакция остаётся целой.
+                #
                 try:
-                    user = await create_user(
-                        session,
-                        telegram_id=telegram_id,
-                        username=event.from_user.username,
-                        first_name=event.from_user.first_name,
-                        referred_by=None,
-                    )
+                    async with session.begin_nested():
+                        user = await create_user(
+                            session,
+                            telegram_id=telegram_id,
+                            username=event.from_user.username,
+                            first_name=event.from_user.first_name,
+                            referred_by=None,
+                        )
                     logger.info(
                         "Auto-registered user %s on %s",
                         telegram_id,
@@ -106,15 +104,12 @@ class UserContextMiddleware(BaseMiddleware):
                 except IntegrityError:
                     #
                     # Гонка: пользователь мог быть создан параллельно.
-                    # Откатываемся и перечитываем.
+                    # SAVEPOINT откатился, внешняя транзакция цела.
                     #
-                    await session.rollback()
-
                     existing_any = await get_user_by_telegram_id_any(
                         session,
                         telegram_id,
                     )
-
                     if (
                         existing_any is not None
                         and not existing_any.is_deleted
@@ -125,5 +120,4 @@ class UserContextMiddleware(BaseMiddleware):
 
         _user_cache[telegram_id] = user
         data["db_user"] = user
-
         return await handler(event, data)

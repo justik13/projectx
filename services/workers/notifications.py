@@ -22,16 +22,21 @@ logger = logging.getLogger("BackgroundWorker")
 MAX_RETRY_COUNT = 4
 BACKOFF_BASE_INTERVAL = NOTIFICATION_INTERVAL
 NOTIFICATION_BATCH_SIZE = 20
-
-#
-# Короткая стартовая задержка вместо 30 минут.
-#
 NOTIFICATION_START_DELAY = 60.0
+GRACE_PERIOD_HOURS = 48
 
 #
-# Grace-период после истечения подписки.
+# ИСПРАВЛЕНО: отслеживание последнего типа уведомления
+# для каждого пользователя.
 #
-GRACE_PERIOD_HOURS = 48
+# Раньше один notification_retry_count использовался для всех
+# типов уведомлений (3d, 1d, 2h, expired, grace_12h).
+# Если 3d-уведомление не удалось 4 раза, 1d-уведомление тоже
+# ждало backoff 2^3 * 1800 = 4 часа.
+#
+# Теперь при смене типа уведомления retry_count сбрасывается.
+#
+_last_notification_type: dict[int, str] = {}
 
 
 class NotificationRateLimiter:
@@ -51,11 +56,9 @@ class NotificationRateLimiter:
                     self.tokens + elapsed * self.rate,
                 )
                 self.last_refill = now
-
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
-
                 wait_time = (1.0 - self.tokens) / self.rate
             await asyncio.sleep(wait_time)
 
@@ -71,15 +74,26 @@ def _get_backoff_delay(retry_count: int) -> int:
 def _format_countdown(delta: timedelta) -> str:
     if delta.total_seconds() <= 0:
         return "в ближайшее время"
-
     days = delta.days
     hours = delta.seconds // 3600
-
     if days > 0:
         return f"{days} дн. {hours} ч."
-
     minutes = (delta.seconds % 3600) // 60
     return f"{hours} ч. {minutes} мин."
+
+
+def _maybe_reset_retry_on_type_change(
+    user: User,
+    notification_type: str,
+) -> None:
+    """
+    Сбрасывает retry-счётчик, если тип уведомления сменился.
+    """
+    last_type = _last_notification_type.get(user.id)
+    if last_type and last_type != notification_type:
+        user.notification_retry_count = 0
+        user.last_notification_attempt = None
+    _last_notification_type[user.id] = notification_type
 
 
 async def subscription_notifications_loop(
@@ -100,14 +114,9 @@ async def subscription_notifications_loop(
 
     while not shutdown_event.is_set():
         try:
-            #
-            # Сначала выполняем проверки уведомлений,
-            # только потом ждём интервал.
-            #
             current_time = now_utc()
             await _send_pre_expiry_notifications(bot, current_time)
             await _send_post_expiry_notifications(bot, current_time)
-
         except asyncio.CancelledError:
             logger.info("Notifications worker cancelled")
             break
@@ -138,12 +147,6 @@ async def _send_pre_expiry_notifications(
     bot: Bot,
     current_time,
 ):
-    """
-    Уведомления до истечения подписки:
-    - за 3 дня;
-    - за 1 день;
-    - за 2 часа.
-    """
     async with session_scope() as session:
         stmt = (
             select(User.id)
@@ -175,7 +178,6 @@ async def _send_pre_expiry_notifications(
 
     for i in range(0, len(user_ids), NOTIFICATION_BATCH_SIZE):
         batch_ids = user_ids[i : i + NOTIFICATION_BATCH_SIZE]
-
         async with session_scope() as session:
             users_result = await session.execute(
                 select(User).where(User.id.in_(batch_ids))
@@ -185,29 +187,15 @@ async def _send_pre_expiry_notifications(
             for user in batch_users:
                 if user.is_banned or user.is_bot_blocked or user.is_deleted:
                     continue
-
                 if not user.subscription_end:
                     continue
-
-                #
-                # Повторная проверка актуальности подписки.
-                #
                 if user.subscription_end <= current_time:
                     continue
-
-                #
-                # Если подписку продлили больше чем на 3 дня,
-                # уведомление уже не нужно.
-                #
                 if user.subscription_end > current_time + timedelta(days=3):
                     continue
 
                 retry_count = user.notification_retry_count or 0
 
-                #
-                # После исчерпания попыток помечаем уведомление как отправленное,
-                # чтобы не выбирать пользователя бесконечно.
-                #
                 if retry_count >= MAX_RETRY_COUNT:
                     user.notified_3d = True
                     user.notified_1d = True
@@ -224,7 +212,6 @@ async def _send_pre_expiry_notifications(
                         continue
 
                 time_left = user.subscription_end - current_time
-
                 msg = None
                 notification_type = None
 
@@ -250,9 +237,17 @@ async def _send_pre_expiry_notifications(
                 if not msg:
                     continue
 
+                #
+                # ИСПРАВЛЕНО: сброс retry при смене типа.
+                #
+                _maybe_reset_retry_on_type_change(
+                    user,
+                    notification_type,
+                )
+                retry_count = user.notification_retry_count or 0
+
                 try:
                     await _notification_limiter.acquire()
-
                     builder = InlineKeyboardBuilder()
                     builder.button(
                         text="💳 Продлить доступ",
@@ -263,17 +258,14 @@ async def _send_pre_expiry_notifications(
                         callback_data="dismiss_notification",
                     )
                     builder.adjust(1)
-
                     await bot.send_message(
                         user.telegram_id,
                         msg,
                         reply_markup=builder.as_markup(),
                         parse_mode="HTML",
                     )
-
                     user.notification_retry_count = 0
                     user.last_notification_attempt = current_time
-
                     if notification_type == "2h":
                         user.notified_2h = True
                         user.notified_1d = True
@@ -283,14 +275,12 @@ async def _send_pre_expiry_notifications(
                         user.notified_3d = True
                     elif notification_type == "3d":
                         user.notified_3d = True
-
                 except TelegramForbiddenError:
                     logger.info(
                         "User %s blocked the bot",
                         user.telegram_id,
                     )
                     user.is_bot_blocked = True
-
                 except Exception as e:
                     user.notification_retry_count = retry_count + 1
                     user.last_notification_attempt = current_time
@@ -306,15 +296,6 @@ async def _send_post_expiry_notifications(
     bot: Bot,
     current_time,
 ):
-    """
-    Уведомления после истечения подписки:
-    1. Сразу после истечения:
-       - подписка истекла;
-       - устройства будут удалены через 48 часов.
-    2. За 12 часов до удаления устройств:
-       - осталось 12 часов;
-       - нужно продлить доступ.
-    """
     grace_start = current_time - timedelta(hours=GRACE_PERIOD_HOURS)
 
     async with session_scope() as session:
@@ -348,7 +329,6 @@ async def _send_post_expiry_notifications(
 
     for i in range(0, len(user_ids), NOTIFICATION_BATCH_SIZE):
         batch_ids = user_ids[i : i + NOTIFICATION_BATCH_SIZE]
-
         async with session_scope() as session:
             users_result = await session.execute(
                 select(User).where(User.id.in_(batch_ids))
@@ -358,34 +338,19 @@ async def _send_post_expiry_notifications(
             for user in batch_users:
                 if not user.subscription_end:
                     continue
-
-                #
-                # Если пользователь продлил подписку,
-                # уведомление об истечении больше не нужно.
-                #
                 if user.subscription_end >= current_time:
                     continue
-
                 if user.is_banned or user.is_bot_blocked or user.is_deleted:
                     continue
 
                 deletion_time = user.subscription_end + timedelta(
                     hours=GRACE_PERIOD_HOURS,
                 )
-
-                #
-                # Если 48 часов уже прошло, уведомления больше не отправляем.
-                # Удалением занимается cleanup worker.
-                #
                 if current_time >= deletion_time:
                     continue
 
                 retry_count = user.notification_retry_count or 0
 
-                #
-                # После исчерпания попыток помечаем уведомление как отправленное,
-                # чтобы не выбирать пользователя бесконечно.
-                #
                 if retry_count >= MAX_RETRY_COUNT:
                     user.notified_expired = True
                     user.notified_grace_12h = True
@@ -401,7 +366,6 @@ async def _send_post_expiry_notifications(
                         continue
 
                 time_until_delete = deletion_time - current_time
-
                 msg = None
                 notification_type = None
 
@@ -422,9 +386,17 @@ async def _send_post_expiry_notifications(
                 if not msg:
                     continue
 
+                #
+                # ИСПРАВЛЕНО: сброс retry при смене типа.
+                #
+                _maybe_reset_retry_on_type_change(
+                    user,
+                    notification_type,
+                )
+                retry_count = user.notification_retry_count or 0
+
                 try:
                     await _notification_limiter.acquire()
-
                     builder = InlineKeyboardBuilder()
                     builder.button(
                         text="🚀 Купить доступ",
@@ -439,30 +411,25 @@ async def _send_post_expiry_notifications(
                         callback_data="dismiss_notification",
                     )
                     builder.adjust(1)
-
                     await bot.send_message(
                         user.telegram_id,
                         msg,
                         reply_markup=builder.as_markup(),
                         parse_mode="HTML",
                     )
-
                     user.notification_retry_count = 0
                     user.last_notification_attempt = current_time
-
                     if notification_type == "grace_12h":
                         user.notified_grace_12h = True
                         user.notified_expired = True
                     elif notification_type == "expired":
                         user.notified_expired = True
-
                 except TelegramForbiddenError:
                     logger.info(
                         "User %s blocked the bot",
                         user.telegram_id,
                     )
                     user.is_bot_blocked = True
-
                 except Exception as e:
                     user.notification_retry_count = retry_count + 1
                     user.last_notification_attempt = current_time

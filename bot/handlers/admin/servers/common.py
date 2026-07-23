@@ -7,6 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import delete as sql_delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
@@ -18,6 +19,7 @@ from database.repositories.servers_repo import (
     get_servers_paginated,
 )
 from services.amnezia_client import AmneziaClient
+from utils.datetime_helpers import now_utc
 from utils.telegram import safe
 
 logger = logging.getLogger(__name__)
@@ -36,22 +38,11 @@ URL_REGEX = re.compile(
 
 
 def normalize_api_url(url: str) -> str:
-    """
-    Нормализует API URL:
-    - убирает trailing slash;
-    - приводит scheme и host к нижнему регистру;
-    - сохраняет порт и путь.
-
-    Пример:
-    HTTP://Example.com:4001/  ->  http://example.com:4001
-    """
     url = url.strip()
     parts = urlsplit(url)
-
     scheme = parts.scheme.lower()
     netloc = parts.netloc.lower()
     path = parts.path.rstrip("/")
-
     return urlunsplit(
         (
             scheme,
@@ -73,33 +64,27 @@ async def _build_servers_list_text_and_kb(
         f"🛠 Админка › 🌍 <b>Серверы</b>\n"
         f"(стр. {page}/{total_pages}) · Всего: {total}\n"
     )
-
     builder = InlineKeyboardBuilder()
-
     if not servers:
         rendered += "<i>Серверов пока нет</i>\n"
     else:
         for server in servers:
             flag = server.country_flag or "🌍"
             status = "🟢" if server.is_active else "🔴"
-
             builder.button(
                 text=f"{status} {flag} {safe(server.name)} · {server.protocol}",
                 callback_data=f"admin_server_card:{server.id}",
             )
-
     if page > 1:
         builder.button(
             text="⬅️",
             callback_data=f"admin_servers_page:{page - 1}",
         )
-
     if page < total_pages:
         builder.button(
             text="➡️",
             callback_data=f"admin_servers_page:{page + 1}",
         )
-
     builder.button(
         text="➕ Добавить сервер",
         callback_data="admin_server_add",
@@ -108,9 +93,7 @@ async def _build_servers_list_text_and_kb(
         text="← В админку",
         callback_data="admin_menu",
     )
-
     builder.adjust(1)
-
     return rendered, builder
 
 
@@ -124,20 +107,17 @@ async def _show_servers_list(
         1,
         math.ceil(total_servers / SERVERS_PER_PAGE),
     )
-
     servers = await get_servers_paginated(
         session,
         page=page,
         per_page=SERVERS_PER_PAGE,
     )
-
     rendered, kb = await _build_servers_list_text_and_kb(
         servers,
         page,
         total_pages,
         total_servers,
     )
-
     try:
         await callback.message.edit_text(
             rendered,
@@ -159,7 +139,6 @@ async def _show_server_card(
         if server.is_active
         else "🔴 Отключен"
     )
-
     rendered = texts.ADMIN_SERVER_CARD.format(
         flag=flag,
         name=safe(server.name),
@@ -169,7 +148,6 @@ async def _show_server_card(
         api_url=safe(server.api_url),
         max_clients=server.max_clients,
     )
-
     try:
         await callback.message.edit_text(
             rendered,
@@ -193,21 +171,18 @@ async def _bulk_delete_peers_from_api(
 
     client = AmneziaClient(api_url, api_key)
     sem = asyncio.Semaphore(20)
-
     fail = 0
     failed_peers: list[tuple[int, str]] = []
     lock = asyncio.Lock()
 
     async def _delete_limited(profile_id: int, peer_id: str):
         nonlocal fail
-
         async with sem:
             ok = await client.delete_user(client_id=peer_id)
-
-        async with lock:
-            if not ok:
-                fail += 1
-                failed_peers.append((profile_id, peer_id))
+            async with lock:
+                if not ok:
+                    fail += 1
+                    failed_peers.append((profile_id, peer_id))
 
     try:
         await asyncio.wait_for(
@@ -245,34 +220,72 @@ async def _delete_server_background(
             api_key,
         )
 
+        #
+        # ИСПРАВЛЕНО: при успешном удалении пира удаляем
+        # соответствующую запись PendingAPIDeletion.
+        #
+        # Раньше PendingAPIDeletion создавался только при ошибке.
+        # Теперь (см. delete_routes.py) записи создаются ДО commit
+        # для ВСЕХ пиров. При успешном удалении их нужно убрать.
+        #
+        failed_peer_ids = {peer_id for _, peer_id in failed_peers}
+        success_peer_ids = [
+            peer_id
+            for _, peer_id in profiles_data
+            if peer_id not in failed_peer_ids
+        ]
+
+        if success_peer_ids:
+            try:
+                async with session_scope() as session:
+                    await session.execute(
+                        sql_delete(PendingAPIDeletion).where(
+                            PendingAPIDeletion.peer_id.in_(
+                                success_peer_ids
+                            ),
+                            PendingAPIDeletion.reason == "server_delete",
+                        )
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Failed to cleanup pending deletions: {e}"
+                )
+
         if failed_peers:
             try:
                 async with session_scope() as session:
+                    current_time = now_utc()
                     for profile_id, peer_id in failed_peers:
-                        pending = PendingAPIDeletion(
-                            server_name=server_name,
-                            api_url=api_url,
-                            api_key=api_key,
-                            peer_id=peer_id,
-                            client_name=f"tg_*_{profile_id}",
-                            attempts=1,
-                            reason="server_delete_api_failed",
+                        await session.execute(
+                            update(PendingAPIDeletion)
+                            .where(
+                                PendingAPIDeletion.peer_id == peer_id,
+                                PendingAPIDeletion.reason
+                                == "server_delete",
+                            )
+                            .values(
+                                attempts=1,
+                                last_attempt_at=current_time,
+                                last_error=(
+                                    "server_delete_background_failed"
+                                ),
+                            )
                         )
-                        session.add(pending)
-
-                    await session.commit()
-
-                logger.info(
-                    f"Saved {len(failed_peers)} zombie peers to pending_api_deletions"
-                )
             except Exception as e:
-                logger.error(f"Failed to save zombie peers: {e}")
+                logger.error(
+                    f"Failed to update pending deletions: {e}"
+                )
 
-        msg = (
-            f"⚠️ Сервер {server_name} удалён из БД ({deleted_profiles} устр.),\n"
-            f"но {api_fail}/{len(profiles_data)} пиров не удалось удалить из API.\n"
-            f"Worker Cleanup подчистит позже."
-        )
+        if failed_peers:
+            msg = (
+                f"⚠️ Сервер {server_name} удалён из БД "
+                f"({deleted_profiles} устр.),\n"
+                f"но {api_fail}/{len(profiles_data)} пиров "
+                f"не удалось удалить из API.\n"
+                f"Worker Cleanup подчистит позже."
+            )
+        else:
+            msg = f"✅ Сервер {server_name} удалён"
     else:
         msg = f"✅ Сервер {server_name} удалён"
 

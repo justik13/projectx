@@ -46,7 +46,6 @@ async def manage_device(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-
     profile = await get_profile_by_id(session, profile_id)
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
@@ -88,7 +87,6 @@ async def manage_device(
             "Ключ и файлы конфигурации недоступны.\n"
             "Устройство можно удалить.\n"
         )
-
         builder = InlineKeyboardBuilder()
         builder.button(
             text="🗑 Удалить устройство",
@@ -124,7 +122,6 @@ async def show_config(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-
     profile = await get_profile_by_id(session, profile_id)
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
@@ -137,7 +134,6 @@ async def show_config(
         session,
         db_user.telegram_id,
     )
-
     if not has_access:
         await callback.answer(
             texts.DEVICE_ACCESS_INACTIVE,
@@ -153,8 +149,6 @@ async def show_config(
         )
         return
 
-    # Если ключ слишком длинный, Telegram не отправит его как текст.
-    # Отправляем его файлом.
     if len(raw_config) > TELEGRAM_MESSAGE_LIMIT - 300:
         safe_device_name = "".join(
             c
@@ -166,11 +160,9 @@ async def show_config(
             raw_config.encode("utf-8"),
             filename=f"{safe_device_name}_key.txt",
         )
-
         caption = texts.DEVICE_KEY_TOO_LONG_CAPTION.format(
             device_name=safe(profile.device_name),
         )
-
         await send_hub_document(
             callback.bot,
             callback.message.chat.id,
@@ -202,7 +194,6 @@ async def download_conf(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-
     profile = await get_profile_by_id(session, profile_id)
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
@@ -215,7 +206,6 @@ async def download_conf(
         session,
         db_user.telegram_id,
     )
-
     if not has_access:
         await callback.answer(
             texts.DEVICE_ACCESS_INACTIVE,
@@ -273,7 +263,6 @@ async def download_conf(
         vpn_content.encode("utf-8"),
         filename=f"{safe_device_name}.vpn",
     )
-
     conf_file = BufferedInputFile(
         conf_content.encode("utf-8"),
         filename=f"{safe_device_name}.conf",
@@ -281,26 +270,54 @@ async def download_conf(
 
     old_hub_ids = await get_hub_ids(callback.message.chat.id)
 
-    await append_hub_document(
-        callback.bot,
-        callback.message.chat.id,
-        document=vpn_file,
-        caption=texts.DEVICE_CONFIG_VPN_CAPTION.format(
-            device_name=safe(profile.device_name),
-        ),
-        parse_mode="HTML",
-    )
+    #
+    # ИСПРАВЛЕНО: обработка ошибок отправки файлов.
+    #
+    # Раньше если send_hub_document для .vpn проходил,
+    # а для .conf падал — пользователь получал только один файл
+    # без объяснения. Теперь каждый файл отправляется
+    # в отдельном try/except.
+    #
+    vpn_sent = False
+    conf_sent = False
 
-    await append_hub_document(
-        callback.bot,
-        callback.message.chat.id,
-        document=conf_file,
-        caption=texts.DEVICE_CONFIG_CONF_CAPTION.format(
-            device_name=safe(profile.device_name),
-        ),
-        parse_mode="HTML",
-    )
+    try:
+        await append_hub_document(
+            callback.bot,
+            callback.message.chat.id,
+            document=vpn_file,
+            caption=texts.DEVICE_CONFIG_VPN_CAPTION.format(
+                device_name=safe(profile.device_name),
+            ),
+            parse_mode="HTML",
+        )
+        vpn_sent = True
+    except Exception as e:
+        logger.error(
+            "Failed to send .vpn file for profile %s: %s",
+            profile.id,
+            e,
+        )
 
+    try:
+        await append_hub_document(
+            callback.bot,
+            callback.message.chat.id,
+            document=conf_file,
+            caption=texts.DEVICE_CONFIG_CONF_CAPTION.format(
+                device_name=safe(profile.device_name),
+            ),
+            parse_mode="HTML",
+        )
+        conf_sent = True
+    except Exception as e:
+        logger.error(
+            "Failed to send .conf file for profile %s: %s",
+            profile.id,
+            e,
+        )
+
+    # Инструкция отправляется всегда
     await append_hub_message(
         callback.bot,
         callback.message.chat.id,
