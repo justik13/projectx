@@ -140,7 +140,7 @@ Admin <code>{admin_id}</code>
         "PAID_AFTER_CANCEL": "⚠️ Оплата после отмены",
         "MANUAL_GRANT": "🎫 Ручная выдача",
         "TOGGLE_MAINTENANCE": "🛠 Переключил техработы",
-        "PLATEGA_CALLBACK": "📥 Платёжный callback",
+        "YOOKASSA_CALLBACK": "📥 Платёжный callback (YooKassa)",
         "TARIFF_EDIT_BLOCKED": "🚫 Блокировка изменения тарифа",
     },
 

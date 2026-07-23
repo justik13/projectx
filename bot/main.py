@@ -33,6 +33,7 @@ from bot.middlewares.ban_check import BanCheckMiddleware
 from config.settings import get_settings
 from database.connection import close_db, init_db
 from services.amnezia_client import close_http_session
+from services.yookassa_client import close_yookassa_session
 from services.workers import (
     start_background_workers,
     stop_background_workers,
@@ -44,7 +45,10 @@ from bot.handlers.admin.broadcast import resume_pending_broadcasts
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(request_id)s] %(name)s: %(message)s",
+    format=(
+        "%(asctime)s - %(levelname)s - "
+        "[%(request_id)s] %(name)s: %(message)s"
+    ),
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
@@ -55,22 +59,16 @@ for handler in root_logger.handlers:
 
 logger = logging.getLogger(__name__)
 
-#
-# Анти-спам кэш для глобальных error-алертов.
-#
-# Если одна и та же ошибка повторяется, админам не отправляется
-# новый алерт чаще одного раза в 5 минут.
-#
 _error_alert_cache: TTLCache[str, bool] = TTLCache(
-    maxsize=10000,
-    ttl=300.0,
+    maxsize=10000, ttl=300.0,
 )
 
 _SECRET_PATTERNS = [
     (
         re.compile(
-            r"(?i)(api[_-]?key|x-api-key|access[_-]?token|bot[_-]?token|"
-            r"secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
+            r"(?i)(api[_-]?key|x-api-key|access[_-]?token|"
+            r"bot[_-]?token|secret|password|passwd|"
+            r"authorization|bearer)\s*[:=]\s*\S+"
         ),
         r"\1=[REDACTED]",
     ),
@@ -80,7 +78,9 @@ _SECRET_PATTERNS = [
     ),
     (
         re.compile(
-            r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
+            r"eyJ[A-Za-z0-9_\-]{10,}\."
+            r"[A-Za-z0-9_\-]{10,}\."
+            r"[A-Za-z0-9_\-]{10,}"
         ),
         "[JWT_REDACTED]",
     ),
@@ -96,9 +96,6 @@ _SECRET_PATTERNS = [
 
 
 def _sanitize_text(text: str) -> str:
-    """
-    Удаляет потенциальные секреты из текста исключения/трейсбека.
-    """
     if not text:
         return ""
     sanitized = text
@@ -114,8 +111,12 @@ def _sanitize_short(text: str, limit: int = 200) -> str:
     return sanitized[:limit] + "..."
 
 
-async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
-    from bot.middlewares.correlation import get_current_request_id
+async def global_error_handler(
+    event: ErrorEvent, **kwargs
+) -> bool:
+    from bot.middlewares.correlation import (
+        get_current_request_id,
+    )
 
     request_id = get_current_request_id()
     exception = event.exception
@@ -129,21 +130,16 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         )
         tb_text = "".join(tb_lines)
         tb_sanitized = _sanitize_text(tb_text)
-
         if len(tb_sanitized) > 4000:
             tb_sanitized = tb_sanitized[:4000] + "\n...[truncated]"
-
         logger.critical(
             "[%s] Unhandled exception: %s\n%s",
-            request_id,
-            error_type,
-            tb_sanitized,
+            request_id, error_type, tb_sanitized,
         )
     except Exception:
         logger.critical(
             "[%s] Unhandled exception: %s",
-            request_id,
-            error_type,
+            request_id, error_type,
         )
 
     state = kwargs.get("state")
@@ -159,35 +155,27 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
         error_short = html.escape(
             _sanitize_short(str(exception), 200)
         )
-
         error_msg = texts.ALERT_CRITICAL_BOT_ERROR.format(
             request_id=request_id,
             error_type=error_type_safe,
             error_short=error_short,
         )
-
         alert_key = f"{error_type_safe}:{error_short}"
-
         if alert_key not in _error_alert_cache:
             _error_alert_cache[alert_key] = True
-
             for admin_id in settings.ADMIN_IDS:
                 try:
                     await event.bot.send_message(
-                        admin_id,
-                        error_msg,
+                        admin_id, error_msg,
                         parse_mode="HTML",
                     )
                 except Exception:
                     pass
-        else:
-            logger.debug(
-                "[%s] Error alert throttled: %s",
-                request_id,
-                alert_key,
-            )
     except Exception as e:
-        logger.error("[%s] Failed to send error alert: %s", request_id, e)
+        logger.error(
+            "[%s] Failed to send error alert: %s",
+            request_id, e,
+        )
 
     try:
         if event.update.callback_query:
@@ -208,55 +196,59 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
 
 async def setup_bot_commands(bot: Bot):
     commands = [
-        BotCommand(command="start", description="🚀 Запустить бота"),
+        BotCommand(
+            command="start",
+            description="🚀 Запустить бота",
+        ),
     ]
-    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-    logger.info("Bot commands configured")
+    await bot.set_my_commands(
+        commands, scope=BotCommandScopeDefault(),
+    )
+    await bot.set_chat_menu_button(
+        menu_button=MenuButtonCommands(),
+    )
 
 
 async def setup_bot() -> tuple[Bot, Dispatcher]:
     settings = get_settings()
-
     bot = Bot(token=settings.BOT_TOKEN)
     storage = RedisStorage.from_url(settings.REDIS_URL)
     dp = Dispatcher(storage=storage)
 
-    # Correlation/request_id.
     dp.message.middleware(CorrelationMiddleware())
     dp.callback_query.middleware(CorrelationMiddleware())
-
-    # Private chat only.
     dp.message.middleware(PrivateChatMiddleware())
     dp.callback_query.middleware(PrivateChatMiddleware())
-
-    # DB session.
     dp.message.middleware(DBSessionMiddleware())
     dp.callback_query.middleware(DBSessionMiddleware())
-
-    # Clean chat only for private messages.
     dp.message.middleware(CleanChatMiddleware())
-
-    # User context and ban checks.
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
     dp.message.middleware(BanCheckMiddleware())
     dp.callback_query.middleware(BanCheckMiddleware())
-
-    # Throttling and action locks.
     dp.message.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ActionLockMiddleware())
-
-    # UX helper.
     dp.message.middleware(ChatActionMiddleware())
 
-    from bot.handlers.admin.broadcast import router as admin_broadcast_router
-    from bot.handlers.admin.dashboard import router as admin_dashboard_router
-    from bot.handlers.admin.servers import router as admin_servers_router
-    from bot.handlers.admin.tariffs import router as admin_tariffs_router
-    from bot.handlers.admin.users import router as admin_users_router
-    from bot.handlers.connection import router as connection_router
+    from bot.handlers.admin.broadcast import (
+        router as admin_broadcast_router,
+    )
+    from bot.handlers.admin.dashboard import (
+        router as admin_dashboard_router,
+    )
+    from bot.handlers.admin.servers import (
+        router as admin_servers_router,
+    )
+    from bot.handlers.admin.tariffs import (
+        router as admin_tariffs_router,
+    )
+    from bot.handlers.admin.users import (
+        router as admin_users_router,
+    )
+    from bot.handlers.connection import (
+        router as connection_router,
+    )
     from bot.handlers.fallback import router as fallback_router
     from bot.handlers.payment import router as payment_router
     from bot.handlers.profile import router as profile_router
@@ -280,39 +272,40 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
     dp.errors.register(global_error_handler)
     await setup_bot_commands(bot)
-
     return bot, dp
 
 
 async def start_webhook_server(port: int):
     app = web.Application()
     setup_webhook_routes(app)
-
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
-    logger.info("Webhook server started on 127.0.0.1:%d", port)
+    logger.info(
+        "Webhook server started on 127.0.0.1:%d", port,
+    )
     return runner
 
 
-def _validate_platega_config() -> bool:
+def _validate_yookassa_config() -> bool:
     settings = get_settings()
+    has_shop = bool(settings.YOOKASSA_SHOP_ID.strip())
+    has_secret = bool(settings.YOOKASSA_SECRET_KEY.strip())
 
-    has_merchant = bool(settings.PLATEGA_MERCHANT_ID.strip())
-    has_secret = bool(settings.PLATEGA_SECRET.strip())
-
-    if has_merchant and not has_secret:
+    if has_shop and not has_secret:
         logger.critical(
-            "❌ PLATEGA_MERCHANT_ID задан, но PLATEGA_SECRET пуст! "
+            "❌ YOOKASSA_SHOP_ID задан, но "
+            "YOOKASSA_SECRET_KEY пуст! "
             "Webhook будет принимать поддельные запросы. "
-            "Укажите PLATEGA_SECRET в .env или удалите PLATEGA_MERCHANT_ID."
+            "Укажите YOOKASSA_SECRET_KEY в .env."
         )
         return False
 
-    if has_secret and not has_merchant:
+    if has_secret and not has_shop:
         logger.critical(
-            "❌ PLATEGA_SECRET задан, но PLATEGA_MERCHANT_ID пуст! "
+            "❌ YOOKASSA_SECRET_KEY задан, но "
+            "YOOKASSA_SHOP_ID пуст! "
             "Укажите оба параметра или удалите оба."
         )
         return False
@@ -337,31 +330,27 @@ async def main():
             )
             return
 
-        if not _validate_platega_config():
+        if not _validate_yookassa_config():
             return
 
         logger.info("Инициализация БД...")
         await init_db()
 
         logger.info(
-            "🔄 Bot started — all in-memory operation locks cleared (restart). "
-            "DB constraints + ActionLockMiddleware protect against duplicates."
+            "🔄 Bot started — all in-memory operation locks "
+            "cleared (restart)."
         )
 
         bot, dp = await setup_bot()
-
-        #
-        # ВАЖНО:
-        #
-        # bot_ref должен быть доступен ДО старта webhook-сервера
-        # и ДО resume_pending_broadcasts.
-        #
         set_bot_ref(bot)
 
         webhook_runner = None
-        if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
+        if (
+            settings.YOOKASSA_SHOP_ID
+            and settings.YOOKASSA_SECRET_KEY
+        ):
             webhook_runner = await start_webhook_server(
-                settings.PLATEGA_WEBHOOK_PORT
+                settings.YOOKASSA_WEBHOOK_PORT
             )
 
         await resume_pending_broadcasts(bot)
@@ -370,7 +359,9 @@ async def main():
         loop = asyncio.get_running_loop()
 
         def _signal_handler():
-            logger.info("Received shutdown signal (SIGTERM/SIGINT)")
+            logger.info(
+                "Received shutdown signal (SIGTERM/SIGINT)"
+            )
             shutdown_event.set()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -382,8 +373,12 @@ async def main():
         await start_background_workers(bot)
 
         logger.info("Запуск polling...")
-        polling_task = asyncio.create_task(dp.start_polling(bot))
-        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        polling_task = asyncio.create_task(
+            dp.start_polling(bot)
+        )
+        shutdown_task = asyncio.create_task(
+            shutdown_event.wait()
+        )
 
         done, pending = await asyncio.wait(
             [polling_task, shutdown_task],
@@ -391,7 +386,9 @@ async def main():
         )
 
         if shutdown_event.is_set():
-            logger.info("Shutdown requested, stopping polling...")
+            logger.info(
+                "Shutdown requested, stopping polling..."
+            )
             await dp.stop_polling()
             polling_task.cancel()
             try:
@@ -400,7 +397,11 @@ async def main():
                 pass
         else:
             for task in done:
-                exc = task.exception() if not task.cancelled() else None
+                exc = (
+                    task.exception()
+                    if not task.cancelled()
+                    else None
+                )
                 if exc:
                     logger.critical(
                         "Fatal error in main task: %s",
@@ -408,33 +409,45 @@ async def main():
                     )
 
     except Exception as e:
-        logger.critical("Fatal error in main: %s", e, exc_info=True)
+        logger.critical(
+            "Fatal error in main: %s", e, exc_info=True,
+        )
 
     finally:
         logger.info("Stopping background workers...")
         try:
             await stop_background_workers()
         except Exception as e:
-            logger.error("Error while stopping background workers: %s", e)
+            logger.error(
+                "Error stopping workers: %s", e,
+            )
 
         logger.info("Cleaning up resources...")
-
         if "webhook_runner" in locals() and webhook_runner:
             await webhook_runner.cleanup()
 
         await close_http_session()
+        await close_yookassa_session()
 
         try:
-            from services.device_service import close_redis as close_device_redis
+            from services.device_service import (
+                close_redis as close_device_redis,
+            )
             await close_device_redis()
         except Exception as e:
-            logger.error("Failed to close device Redis: %s", e)
+            logger.error(
+                "Failed to close device Redis: %s", e,
+            )
 
         try:
-            from services.payment_service import close_redis as close_payment_redis
+            from services.payment_service import (
+                close_redis as close_payment_redis,
+            )
             await close_payment_redis()
         except Exception as e:
-            logger.error("Failed to close payment Redis: %s", e)
+            logger.error(
+                "Failed to close payment Redis: %s", e,
+            )
 
         await close_db()
         logger.info("Работа бота завершена")

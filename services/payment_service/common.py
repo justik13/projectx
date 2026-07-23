@@ -9,20 +9,16 @@ from config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 _alerted_paid_after_cancel: TTLCache = TTLCache(
-    maxsize=100000,
-    ttl=86400,
+    maxsize=100000, ttl=86400,
 )
 _notified_paid_after_cancel: TTLCache = TTLCache(
-    maxsize=100000,
-    ttl=86400,
+    maxsize=100000, ttl=86400,
 )
 _alerted_manual_review: TTLCache = TTLCache(
-    maxsize=100000,
-    ttl=86400,
+    maxsize=100000, ttl=86400,
 )
 _alerted_payment_not_found: TTLCache = TTLCache(
-    maxsize=100000,
-    ttl=3600,
+    maxsize=100000, ttl=3600,
 )
 
 _redis_client: aioredis.Redis | None = None
@@ -74,11 +70,6 @@ async def close_redis() -> None:
 
 
 def _to_decimal(value) -> Decimal | None:
-    """
-    Безопасно конвертирует значение в Decimal.
-    Использовать для финансовых данных.
-    Никогда не использовать float-сравнения для денег.
-    """
     if value is None:
         return None
     try:
@@ -88,16 +79,8 @@ def _to_decimal(value) -> Decimal | None:
 
 
 def _get_payment_snapshot_duration(payment) -> int | None:
-    """
-    Возвращает длительность покупки.
-    Приоритет:
-    1. snapshot_duration_days из платежа;
-    2. текущий тариф, если snapshot отсутствует.
-    """
     snapshot_value = getattr(
-        payment,
-        "snapshot_duration_days",
-        None,
+        payment, "snapshot_duration_days", None,
     )
     if snapshot_value is not None:
         try:
@@ -111,16 +94,8 @@ def _get_payment_snapshot_duration(payment) -> int | None:
 
 
 def _get_payment_snapshot_device_limit(payment) -> int | None:
-    """
-    Возвращает лимит устройств покупки.
-    Приоритет:
-    1. snapshot_device_limit из платежа;
-    2. текущий тариф, если snapshot отсутствует.
-    """
     snapshot_value = getattr(
-        payment,
-        "snapshot_device_limit",
-        None,
+        payment, "snapshot_device_limit", None,
     )
     if snapshot_value is not None:
         try:
@@ -134,29 +109,18 @@ def _get_payment_snapshot_device_limit(payment) -> int | None:
 
 
 def _build_payment_snapshot(payment) -> dict:
-    """
-    Создаёт безопасный snapshot платежа для отправки алертов
-    после commit.
-
-    Важно:
-    - snapshot не содержит SQLAlchemy-объекты;
-    - его можно использовать в post-commit задачах;
-    - личные данные минимизированы.
-    """
     user = getattr(payment, "user", None)
     duration_days = _get_payment_snapshot_duration(payment)
     device_limit = _get_payment_snapshot_device_limit(payment)
-
     tariff_name = "—"
     if duration_days is not None and device_limit is not None:
-        tariff_name = f"{duration_days} дн. / {device_limit} устр."
-
+        tariff_name = (
+            f"{duration_days} дн. / {device_limit} устр."
+        )
     return {
         "payment_id": payment.id,
         "user_telegram_id": (
-            user.telegram_id
-            if user
-            else None
+            user.telegram_id if user else None
         ),
         "username": (
             f"@{user.username}"

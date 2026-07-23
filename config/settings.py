@@ -1,51 +1,44 @@
-from pydantic_settings import BaseSettings
+from functools import lru_cache
 from typing import List
-from pydantic import field_validator
+
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    BOT_TOKEN: str
-    ADMIN_IDS: List[int]
+    # ── Telegram ──
+    BOT_TOKEN: str = ""
+    ADMIN_IDS: List[int] = []
+    SUPPORT_USERNAME: str = "support"
 
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/projectx_bot"
+    # ── Database ──
+    DATABASE_URL: str = (
+        "postgresql+asyncpg://projectx:projectx"
+        "@localhost:5432/projectx_bot"
+    )
     DB_ENCRYPTION_KEY: str = ""
 
-    SUPPORT_USERNAME: str = "@support_username"
-
-    PLATEGA_MERCHANT_ID: str = ""
-    PLATEGA_SECRET: str = ""
-    PLATEGA_BASE_URL: str = "https://app.platega.io"
-    PLATEGA_WEBHOOK_PORT: int = 8080
-    PLATEGA_PAYMENT_METHOD: int = 2
-    PLATEGA_RETURN_URL: str = "https://t.me/{bot_username}"
-    PLATEGA_FAILED_URL: str = "https://t.me/{bot_username}"
-
+    # ── Redis ──
     REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_PASSWORD: str = ""
+    REDIS_KEY_PREFIX: str = "projectx_bot:"
 
-    model_config = {
-        "env_file": ".env",
-        "env_file_encoding": "utf-8",
-        "case_sensitive": False,
-        "extra": "ignore"
-    }
+    # ── YooKassa ──
+    YOOKASSA_SHOP_ID: str = ""
+    YOOKASSA_SECRET_KEY: str = ""
+    YOOKASSA_RETURN_URL: str = (
+        "https://t.me/{bot_username}"
+    )
+    YOOKASSA_WEBHOOK_PORT: int = 8080
 
-    @field_validator("ADMIN_IDS", mode="before")
-    @classmethod
-    def parse_admins(cls, v: str | list | int) -> list[int]:
-        if isinstance(v, str):
-            return [int(x.strip()) for x in v.split(",") if x.strip()]
-        elif isinstance(v, int):
-            return [v]
-        elif isinstance(v, list):
-            return [int(x) for x in v]
-        return v
+    # ── SSRF protection ──
+    ALLOW_LOCAL_HTTP: bool = False
+    ALLOW_LOCAL_HTTPS: bool = False
 
-
-_settings = None
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
 
 
+@lru_cache()
 def get_settings() -> Settings:
-    global _settings
-    if _settings is None:
-        _settings = Settings()
-    return _settings
+    return Settings()
