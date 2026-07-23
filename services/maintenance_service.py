@@ -3,6 +3,7 @@ from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot import texts
 from database.repositories.maintenance_repo import (
     get_maintenance_mode,
     is_maintenance_enabled,
@@ -11,12 +12,6 @@ from database.repositories.maintenance_repo import (
 from utils.admin import is_admin
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_MAINTENANCE_MESSAGE = (
-    "⚠️ Ведутся технические работы. "
-    "Некоторые действия временно недоступны. "
-    "Попробуйте позже."
-)
 
 
 class MaintenanceService:
@@ -40,14 +35,13 @@ class MaintenanceService:
     @staticmethod
     async def get_message(session: AsyncSession) -> str:
         maintenance = await get_maintenance_mode(session)
-
         if maintenance is None:
-            return DEFAULT_MAINTENANCE_MESSAGE
+            return texts.MAINTENANCE_DEFAULT_MESSAGE
 
         if maintenance.message:
             return maintenance.message
 
-        return DEFAULT_MAINTENANCE_MESSAGE
+        return texts.MAINTENANCE_DEFAULT_MESSAGE
 
     @staticmethod
     async def can_user_perform_action(
@@ -75,10 +69,9 @@ class MaintenanceService:
         await set_maintenance_mode(
             session,
             is_enabled=True,
-            message=message or DEFAULT_MAINTENANCE_MESSAGE,
+            message=message or texts.MAINTENANCE_DEFAULT_MESSAGE,
             updated_by=admin_id,
         )
-
         logger.info(
             "Maintenance mode enabled by admin %s",
             admin_id,
@@ -94,7 +87,6 @@ class MaintenanceService:
             is_enabled=False,
             updated_by=admin_id,
         )
-
         logger.info(
             "Maintenance mode disabled by admin %s",
             admin_id,
@@ -108,7 +100,6 @@ class MaintenanceService:
     ) -> bool:
         """
         Переключает режим технических работ.
-
         Возвращает новое состояние:
         - True — режим включён;
         - False — режим выключен.
@@ -124,5 +115,4 @@ class MaintenanceService:
             admin_id,
             message=message,
         )
-
         return True

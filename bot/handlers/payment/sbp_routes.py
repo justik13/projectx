@@ -27,7 +27,6 @@ from utils.tariff_names import get_tariff_display_name
 from utils.telegram import render_hub, safe
 
 from .common import (
-    PAYMENT_MANUAL_REVIEW_TEXT,
     _check_tariff_change_allowed,
     _render_maintenance,
 )
@@ -39,7 +38,6 @@ logger = logging.getLogger(__name__)
 def _get_payment_tariff_name(payment) -> str:
     """
     Возвращает отображаемое имя тарифа для платежа.
-
     Приоритет:
     1. snapshot_device_limit из платежа;
     2. текущий тариф, если snapshot отсутствует.
@@ -49,14 +47,12 @@ def _get_payment_tariff_name(payment) -> str:
         "snapshot_device_limit",
         None,
     )
-
     if device_limit is None and payment.tariff:
         device_limit = getattr(
             payment.tariff,
             "device_limit",
             2,
         )
-
     if device_limit is None:
         device_limit = 2
 
@@ -74,7 +70,6 @@ async def pay_sbp(
         return
 
     parts = callback.data.split(":")
-
     try:
         tariff_id = int(parts[1])
         source = parts[2] if len(parts) > 2 else "showcase"
@@ -100,14 +95,13 @@ async def pay_sbp(
         return
 
     try:
-        await callback.answer("⏳ Создаю платеж...")
+        await callback.answer(texts.PAYMENT_CREATING)
 
         #
         # Серверная защита:
         # если Platega не настроена, SBP-платёж создавать нельзя.
         #
         settings = get_settings()
-
         if (
             not settings.PLATEGA_MERCHANT_ID
             or not settings.PLATEGA_SECRET
@@ -115,14 +109,12 @@ async def pay_sbp(
             await render_hub(
                 callback.bot,
                 callback.message.chat.id,
-                "⚠️ Оплата через СБП временно недоступна.\n"
-                "Попробуйте другой способ оплаты или напишите в поддержку.",
+                texts.PAYMENT_SBP_UNAVAILABLE,
                 get_back_button(back_callback),
             )
             return
 
         tariff = await get_tariff_by_id(session, tariff_id)
-
         if not tariff:
             await callback.answer(
                 texts.ERROR_TARIFF_NOT_FOUND,
@@ -143,7 +135,6 @@ async def pay_sbp(
             session,
             callback.from_user.id,
         )
-
         if not db_user:
             await callback.answer(
                 texts.ERROR_USER_NOT_FOUND,
@@ -156,7 +147,6 @@ async def pay_sbp(
             db_user,
             tariff,
         )
-
         if error_text:
             await render_hub(
                 callback.bot,
@@ -208,9 +198,8 @@ async def pay_sbp(
 
     except Exception as e:
         logger.error(f"pay_sbp error: {e}", exc_info=True)
-
         await callback.answer(
-            "❌ Ошибка при создании платежа",
+            texts.PAYMENT_CREATE_ERROR,
             show_alert=True,
         )
 
@@ -222,13 +211,13 @@ async def check_payment_status(
     session: AsyncSession = None,
     db_user=None,
 ) -> None:
-    await callback.answer("⏳ Проверяю статус...")
+    await callback.answer(texts.PAYMENT_CHECKING_STATUS)
 
     try:
         payment_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
         await callback.answer(
-            "Некорректный платёж",
+            texts.PAYMENT_INVALID,
             show_alert=True,
         )
         return
@@ -244,10 +233,9 @@ async def check_payment_status(
         session,
         payment_id,
     )
-
     if not payment_simple:
         await callback.answer(
-            "Платёж не найден",
+            texts.PAYMENT_NOT_FOUND_SHORT,
             show_alert=True,
         )
         return
@@ -266,24 +254,20 @@ async def check_payment_status(
 
     if success and result_code in ("success", "already_processed"):
         payment = await get_payment_by_id(session, payment_id)
-
         user = await get_user_by_telegram_id(
             session,
             callback.from_user.id,
         )
-
         profiles = (
             await get_user_profiles(session, user.id)
             if user
             else []
         )
-
         valid_until = (
             format_datetime(user.subscription_end)
             if user and user.subscription_end
             else "—"
         )
-
         tariff_name = _get_payment_tariff_name(payment)
 
         text = (
@@ -308,9 +292,7 @@ async def check_payment_status(
     elif result_code == "paid_after_cancel":
         settings = get_settings()
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
-
         payment = await get_payment_by_id(session, payment_id)
-
         tariff_name = _get_payment_tariff_name(payment)
 
         text = texts.PAYMENT_PAID_AFTER_CANCEL.format(
@@ -321,17 +303,14 @@ async def check_payment_status(
         )
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1)
 
         await render_hub(
@@ -346,47 +325,43 @@ async def check_payment_status(
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1)
 
         await render_hub(
             callback.bot,
             callback.message.chat.id,
-            PAYMENT_MANUAL_REVIEW_TEXT,
+            texts.PAYMENT_MANUAL_REVIEW_TEXT,
             builder.as_markup(),
         )
 
     elif result_code == "api_error":
         await callback.answer(
-            "⚠️ Не удалось связаться с платёжной системой. "
-            "Попробуйте через минуту.",
+            texts.PAYMENT_API_ERROR,
             show_alert=True,
         )
 
     elif result_code == "refunded":
         await callback.answer(
-            "❌ Платёж был возвращён.",
+            texts.PAYMENT_REFUNDED_SHORT,
             show_alert=True,
         )
 
     elif result_code == "cancelled":
         await callback.answer(
-            "❌ Платёж отменён.",
+            texts.PAYMENT_CANCELLED_SHORT,
             show_alert=True,
         )
 
     else:
         await callback.answer(
-            "❌ Платёж ещё не поступил. Попробуйте позже.",
+            texts.PAYMENT_NOT_RECEIVED,
             show_alert=True,
         )

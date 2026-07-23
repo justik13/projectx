@@ -29,8 +29,8 @@ async def rename_device_start(
     await callback.answer()
 
     profile_id = int(callback.data.split(":")[1])
-    profile = await get_profile_by_id(session, profile_id)
 
+    profile = await get_profile_by_id(session, profile_id)
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -45,7 +45,7 @@ async def rename_device_start(
 
     if not has_access:
         await callback.answer(
-            "⚠️ Доступ неактивен. Продлите подписку.",
+            texts.DEVICE_ACCESS_INACTIVE,
             show_alert=True,
         )
         return
@@ -76,10 +76,8 @@ async def rename_device_process(
     profile_id = data.get("profile_id")
 
     profile = await get_profile_by_id(session, profile_id)
-
     if not profile or not db_user or profile.user_id != db_user.id:
         await state.clear()
-
         await render_hub(
             message.bot,
             message.chat.id,
@@ -95,11 +93,10 @@ async def rename_device_process(
 
     if not has_access:
         await state.clear()
-
         await render_hub(
             message.bot,
             message.chat.id,
-            "⚠️ Доступ неактивен. Продлите подписку.",
+            texts.DEVICE_ACCESS_INACTIVE,
             get_back_button("back_to_connections"),
         )
         return
@@ -128,7 +125,9 @@ async def rename_device_process(
     await render_hub(
         message.bot,
         message.chat.id,
-        f"✅ Устройство переименовано в <b>{safe(new_name)}</b>",
+        texts.DEVICE_RENAMED_SUCCESS.format(
+            device_name=safe(new_name),
+        ),
         get_device_keyboard(profile.id),
     )
 

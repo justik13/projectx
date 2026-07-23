@@ -46,8 +46,8 @@ async def manage_device(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-    profile = await get_profile_by_id(session, profile_id)
 
+    profile = await get_profile_by_id(session, profile_id)
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -56,7 +56,6 @@ async def manage_device(
         return
 
     server = await get_server_by_id(session, profile.server_id)
-
     flag = server.country_flag if server else "🌍"
     server_name = server.name if server else "Неизвестно"
     protocol = _format_protocol(server.protocol if server else None)
@@ -91,24 +90,19 @@ async def manage_device(
         )
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="🗑 Удалить устройство",
             callback_data=f"request_delete_device:{profile.id}",
         )
-
         builder.button(
             text="← К списку устройств",
             callback_data="back_to_connections",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1)
-
         keyboard = builder.as_markup()
 
     await render_hub(
@@ -130,8 +124,8 @@ async def show_config(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-    profile = await get_profile_by_id(session, profile_id)
 
+    profile = await get_profile_by_id(session, profile_id)
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -146,16 +140,15 @@ async def show_config(
 
     if not has_access:
         await callback.answer(
-            "⚠️ Доступ неактивен. Продлите подписку.",
+            texts.DEVICE_ACCESS_INACTIVE,
             show_alert=True,
         )
         return
 
     raw_config = profile.raw_config or ""
-
     if not raw_config:
         await callback.answer(
-            "⚠️ Конфигурация недоступна. Обратитесь в поддержку.",
+            texts.DEVICE_CONFIG_UNAVAILABLE,
             show_alert=True,
         )
         return
@@ -174,10 +167,8 @@ async def show_config(
             filename=f"{safe_device_name}_key.txt",
         )
 
-        caption = (
-            f"🔑 <b>Ключ подключения для {safe(profile.device_name)}:</b>\n"
-            f"<i>Ключ слишком длинный для текстового сообщения, "
-            f"поэтому отправлен файлом.</i>"
+        caption = texts.DEVICE_KEY_TOO_LONG_CAPTION.format(
+            device_name=safe(profile.device_name),
         )
 
         await send_hub_document(
@@ -211,8 +202,8 @@ async def download_conf(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-    profile = await get_profile_by_id(session, profile_id)
 
+    profile = await get_profile_by_id(session, profile_id)
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -227,12 +218,12 @@ async def download_conf(
 
     if not has_access:
         await callback.answer(
-            "⚠️ Доступ неактивен. Продлите подписку.",
+            texts.DEVICE_ACCESS_INACTIVE,
             show_alert=True,
         )
         return
 
-    await callback.answer("⏳ Генерирую файлы...")
+    await callback.answer(texts.DEVICE_CONFIG_GENERATING)
 
     safe_device_name = "".join(
         c
@@ -241,7 +232,6 @@ async def download_conf(
     ).strip() or "client"
 
     raw_config = profile.raw_config or ""
-
     if not raw_config:
         await render_hub(
             callback.bot,
@@ -254,7 +244,6 @@ async def download_conf(
         return
 
     decoded = decode_vpn_uri_to_json(raw_config)
-
     if decoded is None:
         await render_hub(
             callback.bot,
@@ -296,10 +285,8 @@ async def download_conf(
         callback.bot,
         callback.message.chat.id,
         document=vpn_file,
-        caption=(
-            f"📁 <b>Основной клиент Amnezia</b>\n"
-            f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
-            f"<i>Для универсального приложения</i>"
+        caption=texts.DEVICE_CONFIG_VPN_CAPTION.format(
+            device_name=safe(profile.device_name),
         ),
         parse_mode="HTML",
     )
@@ -308,27 +295,16 @@ async def download_conf(
         callback.bot,
         callback.message.chat.id,
         document=conf_file,
-        caption=(
-            f"📁 <b>AmneziaWG</b>\n"
-            f"📱 Устройство: <b>{safe(profile.device_name)}</b>\n"
-            f"<i>Для отдельного легковесного приложения</i>"
+        caption=texts.DEVICE_CONFIG_CONF_CAPTION.format(
+            device_name=safe(profile.device_name),
         ),
         parse_mode="HTML",
-    )
-
-    instruction_text = (
-        "✅ <b>Файлы конфигурации отправлены!</b>\n"
-        "📥 <b>Как подключить:</b>\n"
-        "1️⃣ Первый файл импортируйте в <b>основной клиент Amnezia</b>.\n"
-        "2️⃣ Второй файл импортируйте в <b>AmneziaWG</b>.\n"
-        "<i>💡 Нажмите на файл выше, чтобы открыть его "
-        "в нужном приложении.</i>"
     )
 
     await append_hub_message(
         callback.bot,
         callback.message.chat.id,
-        text=instruction_text,
+        text=texts.DEVICE_CONFIG_INSTRUCTION,
         reply_markup=get_back_button(f"manage_device:{profile.id}"),
         parse_mode="HTML",
     )

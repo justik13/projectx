@@ -1,12 +1,3 @@
-# Блок 5 — Операционный runbook
-
-Один файл. Полный, replaceable. Создай `docs/runbook.md`.
-
----
-
-## Файл 1/1: `docs/runbook.md`
-
-```markdown
 # ProjectX — Операционный Runbook
 
 > Личный коммерческий Telegram VPN-бот.
@@ -85,11 +76,13 @@ curl -s -o /dev/null -w "%{http_code}" https://ТВОЙ_ДОМЕН/webhook/plate
 ### Симптом: бот не реагирует на сообщения
 
 **Шаг 1.** Проверь статус:
+
 ```bash
 systemctl status projectx-bot
 ```
 
 **Шаг 2.** Если `inactive (dead)` или `failed`:
+
 ```bash
 # Посмотри причину
 journalctl -u projectx-bot -n 100 --no-pager
@@ -102,6 +95,7 @@ sleep 10 && systemctl status projectx-bot
 ```
 
 **Шаг 3.** Если бот в цикле рестартов (restart loop):
+
 ```bash
 # Останови
 systemctl stop projectx-bot
@@ -118,11 +112,12 @@ journalctl -u projectx-bot -n 500 --no-pager
 ```
 
 **Шаг 4.** Если бот работает, но не отвечает:
+
 ```bash
 # Проверь heartbeat
 cat /opt/projectx-bot/.heartbeat
-# Если timestamp старше 300 секунд — бот завис.
 
+# Если timestamp старше 300 секунд — бот завис.
 # Принудительный рестарт
 systemctl restart projectx-bot
 ```
@@ -165,11 +160,12 @@ sudo -u postgres psql -d projectx_bot
 SELECT id, user_id, amount, currency, status, created_at, external_id
 FROM payments
 WHERE status = 'pending'
-  AND created_at < NOW() - INTERVAL '1 hour'
+AND created_at < NOW() - INTERVAL '1 hour'
 ORDER BY created_at DESC;
 ```
 
 **Действия:**
+
 1. Для RUB-платежей (SBP): бот автоматически проверяет статус через Platega API каждые 15 минут.
 2. Для Stars-платежей: через 24 часа бот переводит в `requires_manual_review`.
 3. Ручная выдача: через админку бота → кнопка «✅ Выдать подписку» в алерте.
@@ -185,6 +181,7 @@ ORDER BY created_at DESC;
 ```
 
 **Действия:**
+
 1. Проверь причину (`manual_review_reason`):
    - `amount_mismatch` — сумма не совпадает. Проверь в Platega.
    - `banned_or_deleted` — пользователь забанен. Реши: разбанить или отклонить.
@@ -202,6 +199,7 @@ ORDER BY created_at DESC;
 - Отправляет алерт админу.
 
 **Если нужно проверить:**
+
 ```sql
 SELECT id, user_id, amount, currency, status, created_at, paid_at
 FROM payments
@@ -256,13 +254,15 @@ curl -s -H "X-MerchantId: ТВОЙ_MERCHANT_ID" \
 Бот отправляет алерт: «⚠️ Сервер Amnezia недоступен!»
 
 **Шаг 1.** Проверь сервер:
+
 ```bash
 # С VPS бота:
-curl -s -H "x-api-key: ТВОЙ_КЛЮЧ" https://СЕРВЕР/healthz
-curl -s -H "x-api-key: ТВОЙ_КЛЮЧ" https://СЕРВЕР/server
+curl -s -H "x-api-key: ТВОЙ_КЛЮЧ" https://СЕРВЕР:8443/healthz
+curl -s -H "x-api-key: ТВОЙ_КЛЮЧ" https://СЕРВЕР:8443/server
 ```
 
 **Шаг 2.** Если сервер не отвечает:
+
 ```bash
 # Зайди на VPS сервера по SSH
 ssh root@IP_СЕРВЕРА
@@ -283,6 +283,7 @@ curl -s http://127.0.0.1:4001/healthz
 ### 4.2. Добавление нового сервера
 
 Через админку бота:
+
 1. 🛠 Админка → 🌍 Серверы → ➕ Добавить сервер
 2. Введи имя, флаг, API URL, API ключ.
 3. Бот проверит healthcheck, get_server_info, наличие протокола `amneziawg2`.
@@ -291,20 +292,43 @@ curl -s http://127.0.0.1:4001/healthz
 - API URL должен быть HTTPS для внешних серверов.
 - Для локального API (на том же VPS) нужен `ALLOW_LOCAL_HTTP=true` в `.env`.
 - По умолчанию `ALLOW_LOCAL_HTTP=false` и `ALLOW_LOCAL_HTTPS=false`.
+- **Порт Amnezia API: 8443** (не 443). URL всегда с портом: `https://domain:8443`.
 
-### 4.3. Удаление сервера
+### 4.3. Редактирование сервера
 
 Через админку бота:
+
+1. 🛠 Админка → 🌍 Серверы → выбери сервер.
+2. Доступные действия:
+   - **✏️ Изменить имя** — новое имя сервера.
+   - **🏳 Изменить флаг** — новый эмодзи-флаг.
+   - **🔗 Изменить URL** — новый API URL (проверяется healthcheck + get_server_info).
+   - **🔑 Изменить ключ** — новый API ключ (проверяется healthcheck + get_server_info).
+   - **👥 Изменить лимит** — новый max_clients (предупреждение если профилей > лимита).
+   - **🔴/🟢 Включить/Выключить** — переключение is_active.
+   - **🗑 Удалить сервер** — полное удаление с очисткой пиров.
+
+**После смены URL:**
+- Circuit breaker для старого URL очищается автоматически.
+- Pending API deletions со старым URL могут не сработать — проверь `pending_api_deletions`.
+
+**После смены ключа:**
+- Pending API deletions со старым ключом могут не сработать.
+
+### 4.4. Удаление сервера
+
+Через админку бота:
+
 1. 🛠 Админка → 🌍 Серверы → выбери сервер → 🗑 Удалить сервер.
 2. Бот удалит все профили из БД и попытается удалить пиров на API.
 3. Если API недоступен — пиры попадут в `pending_api_deletions`.
 
-### 4.4. Проверка реального количества пиров на сервере
+### 4.5. Проверка реального количества пиров на сервере
 
 ```bash
 # С VPS бота:
 curl -s -H "x-api-key: ТВОЙ_КЛЮЧ" \
-     "https://СЕРВЕР/clients?skip=0&limit=100" | python3 -c "
+     "https://СЕРВЕР:8443/clients?skip=0&limit=100" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('items', data.get('clients', []))
@@ -312,7 +336,7 @@ print(f'Пиров на сервере: {len(items)}')
 "
 ```
 
-### 4.5. Amnezia API на отдельном VPS — базовая проверка
+### 4.6. Amnezia API на отдельном VPS — базовая проверка
 
 ```bash
 # Зайди на VPS сервера
@@ -342,11 +366,13 @@ curl -s -H "x-api-key: $(grep FASTIFY_API_KEY ~/amnezia-api/.env | cut -d'=' -f2
 ### 5.1. Устройство не создаётся
 
 **Проверь логи:**
+
 ```bash
 journalctl -u projectx-bot --since "10 min ago" | grep -i "create_device"
 ```
 
 **Типичные причины:**
+
 | Ошибка в логе | Причина | Решение |
 |---|---|---|
 | `NoActiveSubscription` | У пользователя нет подписки | Проверь `subscription_end` в БД |
@@ -362,6 +388,7 @@ journalctl -u projectx-bot --since "10 min ago" | grep -i "create_device"
 ### 5.2. Устройство не удаляется
 
 **Проверь:**
+
 ```bash
 journalctl -u projectx-bot --since "10 min ago" | grep -i "delete_device"
 ```
@@ -373,13 +400,14 @@ journalctl -u projectx-bot --since "10 min ago" | grep -i "delete_device"
 Cleanup worker автоматически чистит зомби каждые 15 минут.
 
 **Ручная проверка:**
+
 ```sql
 -- Профили в БД
 SELECT peer_id, server_id, device_name FROM vpn_profiles;
 ```
 
 ```bash
-# Пиры на сервере (см. п. 4.4)
+# Пиры на сервере (см. п. 4.5)
 # Сравни списки. Зомби = пиры на сервере, которых нет в БД.
 ```
 
@@ -402,6 +430,7 @@ DELETE FROM pending_api_deletions WHERE attempts >= 10;
 ### 6.1. Подписка не продлевается после оплаты
 
 **Проверь:**
+
 ```sql
 -- Статус платежа
 SELECT id, user_id, status, amount, currency, paid_at, manual_review_reason
@@ -429,6 +458,7 @@ WHERE telegram_id = TELEGRAM_ID;
 3. Через 48 часов cleanup worker удаляет устройства.
 
 **Если нужно продлить grace:**
+
 ```sql
 -- Временно сдвинь subscription_end
 UPDATE users
@@ -576,7 +606,7 @@ systemctl restart projectx-bot
 
 ```bash
 # Ищи потенциальные утечки
-journalctl -u projectx-bot --since "24 hours ago" | grep -iE "(api.key|x-api-key|token|secret|password|Fernet)" | head -20
+journalctl -u projectx-bot --since "24 hours ago" | grep -iE "(api.key|x-api-key|token|secret|password|Fernet|vpn://)" | head -20
 
 # Не должно быть:
 # - BOT_TOKEN
@@ -619,6 +649,7 @@ ufw status verbose
 # 22/tcp ALLOW (SSH)
 # 80/tcp ALLOW (HTTP)
 # 443/tcp ALLOW (HTTPS)
+# 8443/tcp ALLOW (Amnezia API HTTPS)
 # 8080/tcp DENY (webhook internal)
 # 6379/tcp DENY (Redis)
 ```
@@ -626,6 +657,7 @@ ufw status verbose
 ### 9.4. SSRF protection
 
 В `.env`:
+
 ```
 ALLOW_LOCAL_HTTP=false
 ALLOW_LOCAL_HTTPS=false
@@ -657,7 +689,7 @@ ALLOW_LOCAL_HTTPS=false
 
 **Amnezia API keys:**
 1. Сгенерируй новый ключ на VPS сервера.
-2. Обнови через админку бота (удали и добавь сервер заново).
+2. Обнови через админку бота (🔑 Изменить ключ).
 
 ---
 
@@ -753,10 +785,10 @@ WHERE is_banned = true AND is_deleted = false;
 | PostgreSQL | VPS-бот, localhost:5432 | `sudo -u postgres psql` |
 | Redis | VPS-бот, localhost:6379 | `redis-cli -a PASSWORD` |
 | Nginx | VPS-бот | `systemctl status nginx` |
-| Amnezia API #1 | VPS-1 | SSH root, `pm2 status` |
-| Amnezia API #2 | VPS-2 | SSH root, `pm2 status` |
-| Amnezia API #3 | VPS-3 | SSH root, `pm2 status` |
-| Amnezia API #4 | VPS-4 | SSH root, `pm2 status` |
+| Amnezia API #1 | VPS-1, порт 8443 | SSH root, `pm2 status` |
+| Amnezia API #2 | VPS-2, порт 8443 | SSH root, `pm2 status` |
+| Amnezia API #3 | VPS-3, порт 8443 | SSH root, `pm2 status` |
+| Amnezia API #4 | VPS-4, порт 8443 | SSH root, `pm2 status` |
 | Platega | app.platega.io | Личный кабинет |
 | Telegram Bot | @BotFather | Токен в .env |
 
@@ -770,5 +802,29 @@ WHERE is_banned = true AND is_deleted = false;
 
 ---
 
-*Последнее обновление: 2026-07-23*
+## Инцидент: API недоступен → дашборд
+
+### Симптомы
+- Дашборд в админке не загружается или зависает.
+- В логах: `Failed to get real peer count for server`.
+- Circuit Breaker в состоянии OPEN.
+
+### Причина
+`get_total_free_ips` ранее ходил в Amnezia API для каждого сервера. При мёртвом API запрос зависал на таймаут (15 сек × 3 попытки × N серверов).
+
+### Решение (Спринт 1.3)
+`get_total_free_ips` теперь использует **только кэш** (`slots_cache`, TTL 300 сек). Если кэш пуст — fallback на количество профилей из БД. API-запросы не выполняются.
+
+### Результат
+Дашборд рендерится за <1 секунды при любом состоянии API.
+
+### Проверка
+```bash
+# Убедись, что в логах нет запросов к API при открытии дашборда
+journalctl -u projectx-bot --since "5 min ago" | grep "get_real_peer_count"
+# Должно быть пусто (если кэш заполнен)
 ```
+
+---
+
+*Последнее обновление: 2026-07-23*

@@ -57,7 +57,6 @@ async def admin_sub_grant(
     telegram_id = int(callback.data.split(":")[1])
 
     user = await get_user_by_telegram_id(session, telegram_id)
-
     if not user:
         await callback.answer(
             texts.ERROR_USER_NOT_FOUND,
@@ -67,15 +66,14 @@ async def admin_sub_grant(
 
     if user.is_deleted:
         await callback.answer(
-            "❌ Пользователь удалён",
+            texts.ADMIN_MANUAL_GRANT_USER_DELETED,
             show_alert=True,
         )
         return
 
     if user.is_banned:
         await callback.answer(
-            "❌ Пользователь заблокирован. "
-            "Сначала разблокируйте пользователя.",
+            texts.ADMIN_MANUAL_GRANT_USER_BANNED,
             show_alert=True,
         )
         return
@@ -121,7 +119,7 @@ async def admin_sub_grant_group(
 
     if device_limit not in groups:
         await callback.answer(
-            "❌ Группа тарифов не найдена",
+            texts.ADMIN_SUB_GROUP_NOT_FOUND,
             show_alert=True,
         )
         return
@@ -171,16 +169,14 @@ async def admin_sub_grant_confirm(
     days = int(parts[3])
 
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff:
         await callback.answer(
-            "❌ Тариф не найден",
+            texts.ERROR_TARIFF_NOT_FOUND,
             show_alert=True,
         )
         return
 
     current_time = now_utc()
-
     new_end = (
         PERMANENT_END_DATE
         if days >= PERMANENT_SUBSCRIPTION_DAYS
@@ -188,7 +184,7 @@ async def admin_sub_grant_confirm(
     )
 
     days_text = (
-        "∞ навсегда"
+        texts.ADMIN_SUB_PERMANENT_LABEL
         if days >= PERMANENT_SUBSCRIPTION_DAYS
         else f"{days} дн."
     )
@@ -243,17 +239,15 @@ async def admin_sub_grant_custom_start(
     tariff_id = int(parts[2])
 
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff:
         await callback.answer(
-            "❌ Тариф не найден",
+            texts.ERROR_TARIFF_NOT_FOUND,
             show_alert=True,
         )
         return
 
     await state.clear()
     await state.set_state(AdminStates.admin_grant_custom_days)
-
     await state.update_data(
         admin_telegram_id=telegram_id,
         admin_tariff_id=tariff_id,
@@ -292,7 +286,6 @@ async def admin_sub_grant_custom_process(
         return
 
     data = await state.get_data()
-
     telegram_id = data.get("admin_telegram_id")
     tariff_id = data.get("admin_tariff_id")
 
@@ -301,7 +294,6 @@ async def admin_sub_grant_custom_process(
         return
 
     days = _validate_positive_int(message.text)
-
     if days is None:
         await render_hub(
             message.bot,
@@ -317,18 +309,16 @@ async def admin_sub_grant_custom_process(
     await state.clear()
 
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff:
         await render_hub(
             message.bot,
             message.chat.id,
-            "❌ Тариф не найден.",
+            texts.ERROR_TARIFF_NOT_FOUND,
             get_back_button(f"admin_subscription:{telegram_id}"),
         )
         return
 
     current_time = now_utc()
-
     new_end = (
         PERMANENT_END_DATE
         if days >= PERMANENT_SUBSCRIPTION_DAYS
@@ -336,7 +326,7 @@ async def admin_sub_grant_custom_process(
     )
 
     days_text = (
-        "∞ навсегда"
+        texts.ADMIN_SUB_PERMANENT_LABEL
         if days >= PERMANENT_SUBSCRIPTION_DAYS
         else f"{days} дн."
     )
@@ -391,7 +381,6 @@ async def admin_sub_grant_apply(
             session,
             telegram_id,
         )
-
         if not user:
             await callback.answer(
                 texts.ERROR_USER_NOT_FOUND,
@@ -401,24 +390,22 @@ async def admin_sub_grant_apply(
 
         if user.is_deleted:
             await callback.answer(
-                "❌ Пользователь удалён",
+                texts.ADMIN_MANUAL_GRANT_USER_DELETED,
                 show_alert=True,
             )
             return
 
         if user.is_banned:
             await callback.answer(
-                "❌ Пользователь заблокирован. "
-                "Сначала разблокируйте пользователя.",
+                texts.ADMIN_MANUAL_GRANT_USER_BANNED,
                 show_alert=True,
             )
             return
 
         tariff = await get_tariff_by_id(session, tariff_id)
-
         if not tariff:
             await callback.answer(
-                "❌ Тариф не найден",
+                texts.ERROR_TARIFF_NOT_FOUND,
                 show_alert=True,
             )
             return
@@ -434,7 +421,7 @@ async def admin_sub_grant_apply(
         invalidate_user_cache(telegram_id)
 
         days_text = (
-            "∞ навсегда"
+            texts.ADMIN_SUB_PERMANENT_LABEL
             if days >= PERMANENT_SUBSCRIPTION_DAYS
             else f"{days} дн."
         )
@@ -461,12 +448,11 @@ async def admin_sub_grant_apply(
             else "—"
         )
 
-        text = (
-            f"✅ <b>Доступ выдан</b>\n"
-            f"Пользователь: <code>{telegram_id}</code>\n"
-            f"Тариф: <b>{tariff_name}</b>\n"
-            f"Срок: <b>{days_text}</b>\n"
-            f"Действует до: <b>{new_end_str}</b>"
+        text = texts.ADMIN_SUB_GRANT_SUCCESS.format(
+            telegram_id=telegram_id,
+            tariff_name=tariff_name,
+            days_text=days_text,
+            new_end=new_end_str,
         )
 
         try:
@@ -488,8 +474,7 @@ async def admin_sub_grant_apply(
             exc_info=True,
         )
         await session.rollback()
-
         await callback.answer(
-            "❌ Ошибка при выдаче доступа",
+            texts.ADMIN_SUB_GRANT_FAILED,
             show_alert=True,
-        ) 
+        )

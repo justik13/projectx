@@ -40,10 +40,9 @@ async def admin_subscription_menu(
     telegram_id = int(callback.data.split(":")[1])
 
     user = await get_user_by_telegram_id(session, telegram_id)
-
     if not user:
         await callback.message.edit_text(
-            "❌ Пользователь не найден."
+            texts.ERROR_USER_NOT_FOUND
         )
         return
 
@@ -62,10 +61,8 @@ async def admin_subscription_menu(
             session,
             user.current_tariff_id,
         )
-
         if tariff:
             device_limit = tariff.device_limit
-
             tariff_name = (
                 f"{get_tariff_display_name(device_limit)} "
                 f"({device_limit} устр.)"

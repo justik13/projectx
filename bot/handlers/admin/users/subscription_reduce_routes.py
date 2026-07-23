@@ -45,10 +45,9 @@ async def admin_sub_reduce_start(
     telegram_id = int(callback.data.split(":")[1])
 
     user = await get_user_by_telegram_id(session, telegram_id)
-
     if not user or not user.subscription_end:
         await callback.answer(
-            "❌ У пользователя нет подписки",
+            texts.ADMIN_SUB_NO_SUBSCRIPTION,
             show_alert=True,
         )
         return
@@ -93,7 +92,6 @@ async def admin_sub_reduce_process(
         return
 
     days = _validate_positive_int(message.text)
-
     if days is None:
         await render_hub(
             message.bot,
@@ -107,12 +105,11 @@ async def admin_sub_reduce_process(
     await state.clear()
 
     user = await get_user_by_telegram_id(session, telegram_id)
-
     if not user or not user.subscription_end:
         await render_hub(
             message.bot,
             message.chat.id,
-            "❌ У пользователя нет активной подписки.",
+            texts.ADMIN_SUB_NO_SUBSCRIPTION,
             get_back_button(f"admin_subscription:{telegram_id}"),
         )
         return
@@ -165,45 +162,25 @@ async def admin_sub_apply_reduce(
             session,
             telegram_id,
         )
-
         if not user or not user.subscription_end:
             await callback.message.edit_text(
-                "❌ У пользователя нет подписки."
+                texts.ADMIN_SUB_NO_SUBSCRIPTION
             )
             return
 
         new_end = user.subscription_end - timedelta(days=days)
 
         user.subscription_end = new_end
-
         user.notified_3d = False
         user.notified_1d = False
         user.notified_2h = False
-
-        #
-        # Сбрасываем флаги grace-уведомлений, чтобы пользователь
-        # получил корректные уведомления после изменения подписки.
-        #
         user.notified_expired = False
         user.notified_grace_12h = False
-
-        #
-        # Сбрасываем notification retry state.
-        #
-        # Иначе старый счётчик ошибок может задержать
-        # новые уведомления после уменьшения подписки.
-        #
         user.notification_retry_count = 0
         user.last_notification_attempt = None
 
         await session.flush()
 
-        #
-        # Сразу синхронизируем статус устройств.
-        #
-        # Если подписка стала истёкшей, устройства должны быть
-        # отключены без ожидания traffic worker.
-        #
         await SubscriptionService.sync_access_state(session, user)
 
         invalidate_user_cache(telegram_id)
@@ -241,8 +218,7 @@ async def admin_sub_apply_reduce(
             exc_info=True,
         )
         await session.rollback()
-
         await callback.answer(
-            "❌ Ошибка при уменьшении",
+            texts.ADMIN_SUB_REDUCE_FAILED,
             show_alert=True,
         )

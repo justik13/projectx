@@ -71,6 +71,7 @@ def _get_device_limit_keyboard():
 
 def _classify_server_error(error_msg: str) -> str:
     msg_lower = error_msg.lower()
+
     if "full" in msg_lower:
         return "full"
     if "disabled" in msg_lower:
@@ -83,6 +84,7 @@ def _classify_server_error(error_msg: str) -> str:
         return "api_failed"
     if "db error" in msg_lower:
         return "db_error"
+
     return "unknown"
 
 
@@ -122,7 +124,7 @@ async def start_add_device(
 
     if user_id in _creating_devices:
         await callback.answer(
-            "⏳ Уже обрабатываем запрос...",
+            texts.DEVICE_CREATE_IN_PROGRESS,
             show_alert=True,
         )
         return
@@ -131,6 +133,7 @@ async def start_add_device(
         session,
         user_id,
     )
+
     if not user or not await SubscriptionService.check_access(
         session,
         user.telegram_id,
@@ -145,6 +148,7 @@ async def start_add_device(
         return
 
     _creating_devices.add(user_id)
+
     try:
         await callback.answer()
         await state.clear()
@@ -166,6 +170,7 @@ async def start_add_device(
                 text=f"{flag} {server.name}",
                 callback_data=f"select_server:{server.id}",
             )
+
         builder.button(
             text="← Назад",
             callback_data="back_to_connections",
@@ -178,7 +183,9 @@ async def start_add_device(
             texts.CONNECTION_SELECT_SERVER,
             builder.as_markup(),
         )
+
         await state.set_state(DeviceCreationStates.choose_server)
+
     finally:
         _creating_devices.discard(user_id)
 
@@ -211,6 +218,7 @@ async def select_server(
         session,
         callback.from_user.id,
     )
+
     if not user or not await SubscriptionService.check_access(
         session,
         user.telegram_id,
@@ -225,6 +233,7 @@ async def select_server(
         return
 
     server_id = int(callback.data.split(":")[1])
+
     server = await get_server_by_id(session, server_id)
     if not server:
         await callback.answer(
@@ -248,6 +257,7 @@ async def select_server(
     await state.set_state(DeviceCreationStates.enter_device_name)
 
     flag = server.country_flag or "🌍"
+
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -284,6 +294,7 @@ async def enter_device_name(
         session,
         user_id,
     )
+
     if not user or not await SubscriptionService.check_access(
         session,
         user.telegram_id,
@@ -301,13 +312,13 @@ async def enter_device_name(
         await render_hub(
             message.bot,
             message.chat.id,
-            "⏳ Пожалуйста, подождите, "
-            "предыдущий запрос обрабатывается...",
+            texts.DEVICE_CREATE_IN_PROGRESS,
             get_back_button("add_device"),
         )
         return
 
     _creating_devices.add(user_id)
+
     try:
         if not message.text or message.text.startswith("/"):
             await render_hub(
@@ -319,6 +330,7 @@ async def enter_device_name(
             return
 
         device_name = message.text.strip()
+
         if (
             not device_name
             or len(device_name) > 16
@@ -334,6 +346,7 @@ async def enter_device_name(
 
         data = await state.get_data()
         server_id = data.get("server_id")
+
         if not server_id:
             await render_hub(
                 message.bot,
@@ -344,12 +357,11 @@ async def enter_device_name(
             await state.clear()
             return
 
-        # НОВОЕ: проверка дублирования имён устройств
-        # на том же сервере. Регистронезависимая.
         existing_profiles = await get_user_profiles(
             session,
             user.id,
         )
+
         for p in existing_profiles:
             if (
                 p.server_id == server_id
@@ -368,8 +380,7 @@ async def enter_device_name(
         await render_hub(
             message.bot,
             message.chat.id,
-            "⏳ <b>Создаю устройство...</b>\n"
-            "<i>Обычно это занимает несколько секунд.</i>",
+            texts.DEVICE_CREATING,
             get_back_button("add_device"),
             parse_mode="HTML",
         )
@@ -428,12 +439,14 @@ async def enter_device_name(
             error_msg = str(e)
             error_type = _classify_server_error(error_msg)
             error_text = _get_server_error_text(error_type)
+
             logger.warning(
                 "ServerUnavailable in enter_device_name: "
                 "type=%s, msg=%s",
                 error_type,
                 error_msg,
             )
+
             await render_hub(
                 message.bot,
                 message.chat.id,
@@ -461,17 +474,21 @@ async def enter_device_name(
             session,
             profile.server_id,
         )
+
         success_text = texts.DEVICE_ADDED_SUCCESS.format(
             device_name=safe(device_name),
             flag=server.country_flag if server else "🌍",
             server_name=safe(server.name) if server else "—",
         )
+
         await render_hub(
             message.bot,
             message.chat.id,
             success_text,
             get_device_keyboard(profile.id),
         )
+
         await state.clear()
+
     finally:
         _creating_devices.discard(user_id)

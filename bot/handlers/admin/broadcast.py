@@ -3,6 +3,7 @@ import logging
 import time
 
 from utils.telegram import render_hub, send_hub_photo, safe
+
 from aiogram.filters import StateFilter
 from aiogram import Router, F
 from aiogram.exceptions import (
@@ -65,9 +66,11 @@ class BroadcastRateLimiter:
                     self.tokens + elapsed * self.rate,
                 )
                 self.last_refill = now
+
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
+
             await asyncio.sleep(1.0 / self.rate)
 
 
@@ -90,6 +93,7 @@ async def start_broadcast(
     state: FSMContext,
 ):
     await callback.answer()
+
     if not is_admin(callback.from_user.id):
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -98,6 +102,7 @@ async def start_broadcast(
         return
 
     await state.clear()
+
     try:
         await callback.message.edit_text(
             texts.BROADCAST_PROMPT,
@@ -181,6 +186,7 @@ async def process_broadcast_message(
             content_type=content_type,
         )
         await state.set_state(AdminStates.confirming_broadcast)
+
     except Exception as e:
         await render_hub(
             message.bot,
@@ -261,6 +267,7 @@ async def _dispatch_message(
     content_type,
 ):
     kb = get_broadcast_close_keyboard()
+
     try:
         await _send_with_html(
             bot,
@@ -316,6 +323,7 @@ async def _get_next_batch(
             User.is_banned == False,
         )
     )
+
     if audience == "active":
         current_time = now_utc()
         stmt = stmt.where(
@@ -362,6 +370,7 @@ async def _send_broadcast_to_users_with_resume(
                 return
 
             should_finalize = True
+
             stop_event = _get_stop_event(admin_id)
             stop_event.clear()
 
@@ -390,6 +399,7 @@ async def _send_broadcast_to_users_with_resume(
                     target_audience,
                     last_id,
                 )
+
                 if not batch:
                     break
 
@@ -431,6 +441,7 @@ async def _send_broadcast_to_users_with_resume(
                         local_fail += 1
 
                 last_id = internal_id
+
                 progress = await session.get(
                     BroadcastProgress,
                     progress_id,
@@ -484,39 +495,39 @@ async def _send_broadcast_to_users_with_resume(
         _broadcast_in_progress.discard(admin_id)
         _cleanup_stop_event(admin_id)
 
-        if final_progress and admin_id:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    texts.BROADCAST_RESULT.format(
-                        success_count=final_progress.success_count,
-                        fail_count=final_progress.fail_count,
-                        label=final_progress.label,
-                        total_count=final_progress.total_count,
-                    ),
-                    reply_markup=get_broadcast_result_keyboard(),
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to send broadcast result to admin {admin_id}: {e}"
-                )
+    if final_progress and admin_id:
+        try:
+            await bot.send_message(
+                admin_id,
+                texts.BROADCAST_RESULT.format(
+                    success_count=final_progress.success_count,
+                    fail_count=final_progress.fail_count,
+                    label=final_progress.label,
+                    total_count=final_progress.total_count,
+                ),
+                reply_markup=get_broadcast_result_keyboard(),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to send broadcast result to admin {admin_id}: {e}"
+            )
 
-            try:
-                async with session_scope() as session:
-                    await AuditService.log_action(
-                        session,
-                        admin_id,
-                        "BROADCAST",
-                        details=(
-                            f"to {final_progress.label}: "
-                            f"{final_progress.success_count} success, "
-                            f"{final_progress.fail_count} fail, "
-                            f"status={final_progress.status}"
-                        ),
-                    )
-            except Exception as e:
-                logger.error(f"Failed to log broadcast audit: {e}")
+        try:
+            async with session_scope() as session:
+                await AuditService.log_action(
+                    session,
+                    admin_id,
+                    "BROADCAST",
+                    details=(
+                        f"to {final_progress.label}: "
+                        f"{final_progress.success_count} success, "
+                        f"{final_progress.fail_count} fail, "
+                        f"status={final_progress.status}"
+                    ),
+                )
+        except Exception as e:
+            logger.error(f"Failed to log broadcast audit: {e}")
 
 
 async def resume_pending_broadcasts(bot):
@@ -560,9 +571,11 @@ async def resume_pending_broadcasts(bot):
                 if p.admin_id in _broadcast_in_progress:
                     stop_ids.append(p.id)
                     continue
+
                 if p.admin_id in seen_admins:
                     stop_ids.append(p.id)
                     continue
+
                 seen_admins.add(p.admin_id)
                 resume_items.append((p.id, p.admin_id))
 
@@ -608,13 +621,14 @@ async def _start_broadcast_process(
 
     if admin_id in _broadcast_in_progress:
         await callback.answer(
-            "⏳ Рассылка уже идёт, дождитесь завершения",
+            texts.BROADCAST_ALREADY_RUNNING,
             show_alert=True,
         )
         return
 
     data = await state.get_data()
     broadcast_text = data.get("broadcast_text")
+
     if not broadcast_text:
         await callback.answer(
             texts.ERROR_TEXT_EMPTY,
@@ -634,6 +648,7 @@ async def _start_broadcast_process(
             User.is_banned == False,
         )
     )
+
     if audience == "active":
         current_time = now_utc()
         count_stmt = count_stmt.where(
@@ -645,13 +660,14 @@ async def _start_broadcast_process(
 
     if not total_count:
         await callback.answer(
-            "⚠️ Нет получателей для рассылки",
+            texts.BROADCAST_NO_RECIPIENTS,
             show_alert=True,
         )
         await state.clear()
         return
 
     progress_id = None
+
     async with session_scope() as sess:
         progress = BroadcastProgress(
             admin_id=admin_id,
@@ -669,6 +685,7 @@ async def _start_broadcast_process(
         progress_id = progress.id
 
     _broadcast_in_progress.add(admin_id)
+
     _start_background_task(
         _send_broadcast_to_users_with_resume(
             callback.bot,
@@ -679,9 +696,7 @@ async def _start_broadcast_process(
 
     try:
         await callback.message.edit_text(
-            f"🚀 <b>Рассылка запущена!</b>\n"
-            f"Отправляю {total_count} пользователям...\n"
-            f"Результат придёт отдельным сообщением.",
+            texts.BROADCAST_STARTED.format(total_count=total_count),
             reply_markup=get_back_button("admin_menu"),
             parse_mode="HTML",
         )
@@ -775,7 +790,7 @@ async def stop_broadcast(callback: CallbackQuery):
     stop_event.set()
 
     await callback.answer(
-        "⏹ Рассылка останавливается...",
+        texts.BROADCAST_STOPPING,
         show_alert=True,
     )
 
@@ -790,6 +805,7 @@ async def dismiss_broadcast_result(callback: CallbackQuery):
         return
 
     await callback.answer()
+
     try:
         await callback.message.delete()
     except TelegramBadRequest as e:
@@ -801,6 +817,7 @@ async def dismiss_broadcast_result(callback: CallbackQuery):
 @router.callback_query(F.data == "dismiss_broadcast")
 async def dismiss_broadcast_message(callback: CallbackQuery):
     await callback.answer()
+
     try:
         await callback.message.delete()
     except TelegramBadRequest as e:

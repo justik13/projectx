@@ -45,10 +45,9 @@ async def admin_sub_change_tariff(
     telegram_id = int(callback.data.split(":")[1])
 
     user = await _get_user_with_profiles(session, telegram_id)
-
     if not user:
         await callback.message.edit_text(
-            "❌ Пользователь не найден."
+            texts.ERROR_USER_NOT_FOUND
         )
         return
 
@@ -61,13 +60,11 @@ async def admin_sub_change_tariff(
     )
 
     current_tariff_name = "—"
-
     if user.current_tariff_id:
         tariff = await get_tariff_by_id(
             session,
             user.current_tariff_id,
         )
-
         if tariff:
             current_tariff_name = get_tariff_group_name(
                 tariff.device_limit
@@ -114,10 +111,9 @@ async def admin_sub_select_group(
     device_limit = int(parts[2])
 
     user = await _get_user_with_profiles(session, telegram_id)
-
     if not user:
         await callback.message.edit_text(
-            "❌ Пользователь не найден."
+            texts.ERROR_USER_NOT_FOUND
         )
         return
 
@@ -125,7 +121,7 @@ async def admin_sub_select_group(
 
     if device_limit not in groups:
         await callback.answer(
-            "❌ Группа тарифов не найдена",
+            texts.ADMIN_SUB_GROUP_NOT_FOUND,
             show_alert=True,
         )
         return
@@ -161,24 +157,21 @@ async def admin_sub_select_group(
                 "admin_sub_select_group downgrade "
                 f"edit_text failed: {e}"
             )
-
         return
 
     if user.current_tariff_id == new_tariff.id:
         await callback.answer(
-            "⚠️ Этот тариф уже выбран",
+            texts.ADMIN_SUB_TARIFF_ALREADY_SELECTED,
             show_alert=True,
         )
         return
 
     old_tariff_name = "—"
-
     if user.current_tariff_id:
         old_tariff = await get_tariff_by_id(
             session,
             user.current_tariff_id,
         )
-
         if old_tariff:
             old_tariff_name = get_tariff_group_name(
                 old_tariff.device_limit
@@ -237,18 +230,16 @@ async def admin_sub_apply_tariff(
             session,
             telegram_id,
         )
-
         if not user:
             await callback.message.edit_text(
-                "❌ Пользователь не найден."
+                texts.ERROR_USER_NOT_FOUND
             )
             return
 
         new_tariff = await get_tariff_by_id(session, tariff_id)
-
         if not new_tariff:
             await callback.answer(
-                "❌ Тариф не найден",
+                texts.ERROR_TARIFF_NOT_FOUND,
                 show_alert=True,
             )
             return
@@ -323,8 +314,7 @@ async def admin_sub_apply_tariff(
             exc_info=True,
         )
         await session.rollback()
-
         await callback.answer(
-            "❌ Ошибка при смене тарифа",
+            texts.ADMIN_SUB_CHANGE_FAILED,
             show_alert=True,
         )

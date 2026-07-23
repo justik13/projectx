@@ -10,18 +10,17 @@
 #   - Ubuntu/Debian
 #   - Amnezia API уже установлен и слушает localhost:4001
 #   - Домен с A-записью, указывающей на этот сервер
-#   - Порты 80 и 443 доступны извне (не заблокированы провайдером)
+#   - Порты 80 и 8443 доступны извне (не заблокированы провайдером)
 #
 # Результат:
-#   - API доступен по https://ваш-домен.com
+#   - API доступен по https://ваш-домен.com:8443
 #   - API-ключ передаётся по HTTPS (зашифрованно)
 #   - Amnezia API остаётся на 127.0.0.1:4001 (безопасно)
 #   - /docs и /metrics не светятся публично
 # ═══════════════════════════════════════════════════════════════
 
 set -euo pipefail
-IFS=$'
-\t'
+IFS=$'\n\t'
 
 # ─────────────────────────────────────────────────────────────
 # Цвета и логирование
@@ -37,7 +36,6 @@ NC='\033[0m'
 LOG_FILE="/var/log/amnezia-api-public-setup.log"
 NGINX_CONF="/etc/nginx/sites-available/amnezia-api"
 NGINX_LINK="/etc/nginx/sites-enabled/amnezia-api"
-
 AMNEZIA_PORT=4001
 AMNEZIA_HOST="127.0.0.1"
 
@@ -50,13 +48,10 @@ success() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; }
 error()   { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
 info()    { echo -e "${CYAN}[i]${NC} $1" | tee -a "$LOG_FILE"; }
-
 header()  {
-    echo -e "
-${BOLD}${BLUE}══════════════════════════════════════════════════════════${NC}"
+    echo -e "\n${BOLD}${BLUE}══════════════════════════════════════════════════════════${NC}"
     echo -e "${BOLD}${BLUE}  $1${NC}"
-    echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════════════${NC}
-"
+    echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════════════${NC}\n"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -105,9 +100,7 @@ preflight_checks() {
     if [[ ! -f /etc/os-release ]]; then
         error "Не удалось определить операционную систему"
     fi
-
     source /etc/os-release
-
     if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
         error "Поддерживаются только Ubuntu и Debian. Обнаружено: $ID"
     fi
@@ -172,36 +165,27 @@ collect_domain_and_email() {
         echo -e "${CYAN}Домен должен иметь A-запись на IP сервера (настраивается у регистратора).${NC}"
         echo ""
         echo -e "Примеры: ${BOLD}api.example.com${NC}, ${BOLD}vpn.mydomain.ru${NC}"
-
         if [[ -n "$PUBLIC_IP" ]]; then
-            echo -e "
-Создайте A-запись: ${BOLD}ваш-домен → ${PUBLIC_IP}${NC}"
+            echo -e "\nСоздайте A-запись: ${BOLD}ваш-домен → ${PUBLIC_IP}${NC}"
         fi
-
         echo ""
-
         while true; do
             read -p "Домен (например api.example.com): " -r DOMAIN
-
             if [[ -z "$DOMAIN" ]]; then
                 warn "Домен не может быть пустым"
                 continue
             fi
-
             if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
                 warn "Некорректный формат домена"
                 continue
             fi
-
             break
         done
     fi
 
     # Проверка DNS
     info "Проверяю DNS для ${BOLD}${DOMAIN}${NC}..."
-
     local RESOLVED_IP=""
-
     if command -v dig &>/dev/null; then
         RESOLVED_IP=$(dig +short "$DOMAIN" A 2>/dev/null | head -n1)
     elif command -v host &>/dev/null; then
@@ -236,20 +220,16 @@ collect_domain_and_email() {
     if [[ -z "$EMAIL" ]]; then
         echo ""
         echo -e "${CYAN}Email для уведомлений Let's Encrypt о продлении сертификата.${NC}"
-
         while true; do
             read -p "Email: " -r EMAIL
-
             if [[ -z "$EMAIL" ]]; then
                 warn "Email не может быть пустым"
                 continue
             fi
-
             if [[ ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
                 warn "Некорректный формат email"
                 continue
             fi
-
             break
         done
     fi
@@ -282,14 +262,10 @@ install_dependencies() {
     fi
 
     log "Устанавливаю: ${to_install[*]}"
-
     local install_log=$(mktemp)
-
     if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${to_install[@]}" > "$install_log" 2>&1; then
-        error "Ошибка установки. Лог: $install_log
-$(tail -20 "$install_log")"
+        error "Ошибка установки. Лог: $install_log\n$(tail -20 "$install_log")"
     fi
-
     rm -f "$install_log"
 
     success "Зависимости установлены"
@@ -312,9 +288,10 @@ setup_firewall() {
     header "🔥 Настройка UFW"
 
     ufw allow 80/tcp comment 'HTTP (Let'\''s Encrypt challenge)' >/dev/null 2>&1 || true
-    ufw allow 443/tcp comment 'HTTPS (Amnezia API)' >/dev/null 2>&1 || true
+    # ═══ ИЗМЕНЕНО: порт 8443 вместо 443 ═══
+    ufw allow 8443/tcp comment 'HTTPS (Amnezia API)' >/dev/null 2>&1 || true
 
-    success "UFW: порты 80 и 443 открыты"
+    success "UFW: порты 80 и 8443 открыты"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -411,12 +388,12 @@ obtain_ssl_certificate() {
     fi
 
     rm -f "$certbot_log"
-
     success "SSL сертификат получен!"
 }
 
 # ─────────────────────────────────────────────────────────────
 # Финальный HTTPS конфиг с reverse proxy
+# ═══ ИЗМЕНЕНО: порт 8443 вместо 443 ═══
 # ─────────────────────────────────────────────────────────────
 create_final_nginx_config() {
     header "⚙️ Настройка Nginx (шаг 2/2: HTTPS + reverse proxy)"
@@ -447,16 +424,16 @@ server {
         allow all;
     }
 
-    # Всё остальное → HTTPS
+    # Всё остальное → HTTPS на порт 8443
     location / {
-        return 301 https://\$host\$request_uri;
+        return 301 https://\$host:8443\$request_uri;
     }
 }
 
 # HTTPS server
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name ${DOMAIN};
 
     # SSL сертификаты (Let's Encrypt)
@@ -468,7 +445,6 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
-
     ssl_session_timeout 1d;
     ssl_session_cache shared:SSL:10m;
     ssl_session_tickets off;
@@ -563,13 +539,11 @@ setup_auto_renewal() {
 
     # Создаём cron вручную
     log "Создаю cron задачу для автопродления..."
-
     cat > /etc/cron.d/certbot-amnezia <<EOF
 # Certbot auto-renewal for Amnezia API
 # Запускается 2 раза в день, продлевает если до истечения < 30 дней
 0 */12 * * * root certbot renew --quiet --deploy-hook "systemctl reload nginx"
 EOF
-
     chmod 644 /etc/cron.d/certbot-amnezia
 
     success "Cron для автопродления настроен (проверка каждые 12 часов)"
@@ -581,11 +555,11 @@ EOF
 final_verification() {
     header "✅ Финальная проверка"
 
-    # Проверка что Nginx слушает 443
-    if ss -tlnp 2>/dev/null | grep -qE ":443\s"; then
-        success "Nginx слушает порт 443 (HTTPS)"
+    # Проверка что Nginx слушает 8443
+    if ss -tlnp 2>/dev/null | grep -qE ":8443\s"; then
+        success "Nginx слушает порт 8443 (HTTPS)"
     else
-        warn "Nginx не слушает порт 443"
+        warn "Nginx не слушает порт 8443"
     fi
 
     # Проверка что Amnezia API всё ещё на localhost
@@ -595,10 +569,9 @@ final_verification() {
 
     # Healthcheck через HTTPS
     info "Проверяю healthcheck через HTTPS..."
-
     if command -v curl &>/dev/null; then
         local health_status
-        health_status=$(curl -s -o /dev/null -w "%{http_code}" "https://${DOMAIN}/healthz" --max-time 10 2>/dev/null || echo "000")
+        health_status=$(curl -s -o /dev/null -w "%{http_code}" "https://${DOMAIN}:8443/healthz" --max-time 10 2>/dev/null || echo "000")
 
         if [[ "$health_status" == "200" ]]; then
             success "HTTPS healthcheck: ${BOLD}200 OK${NC}"
@@ -645,7 +618,7 @@ print_result() {
     done
 
     echo -e "${BOLD}🌐 URL для бота:${NC}"
-    echo -e "   ${CYAN}https://${DOMAIN}${NC}"
+    echo -e "   ${CYAN}https://${DOMAIN}:8443${NC}"
     echo ""
 
     echo -e "${BOLD}🔑 API-ключ (из .env):${NC}"
@@ -663,12 +636,12 @@ print_result() {
     echo -e "   1. Откройте админку бота → 🌍 Серверы → ➕ Добавить сервер"
     echo -e "   2. Введите имя (например: ${BOLD}Нидерланды${NC})"
     echo -e "   3. Введите флаг (например: ${BOLD}🇳🇱${NC})"
-    echo -e "   4. В API URL вставьте: ${CYAN}https://${DOMAIN}${NC}"
+    echo -e "   4. В API URL вставьте: ${CYAN}https://${DOMAIN}:8443${NC}"
     echo -e "   5. В API ключ вставьте ключ выше"
     echo ""
 
     echo -e "${BOLD}🧪 Ручная проверка (с любой машины):${NC}"
-    echo -e "   ${CYAN}curl -H \"x-api-key: ВАШ_КЛЮЧ\" https://${DOMAIN}/server${NC}"
+    echo -e "   ${CYAN}curl -H \"x-api-key: ВАШ_КЛЮЧ\" https://${DOMAIN}:8443/server${NC}"
     echo ""
 
     echo -e "${BOLD}📋 Логи:${NC}"

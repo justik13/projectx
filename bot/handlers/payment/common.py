@@ -27,27 +27,14 @@ from utils.telegram import render_hub
 logger = logging.getLogger(__name__)
 
 
-PAYMENT_MANUAL_REVIEW_TEXT = (
-    "💳 <b>Оплата получена</b>\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "Мы проверяем платёж.\n"
-    "Если доступ не активировался в течение нескольких минут, "
-    "напишите в поддержку.\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "<i>Обычно проверка занимает не более 5 минут.</i>"
-)
-
-
 def _to_decimal(value) -> Decimal | None:
     """
     Безопасно конвертирует значение в Decimal.
-
     Использовать для финансовых данных.
     Никогда не использовать float-сравнения для денег.
     """
     if value is None:
         return None
-
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
@@ -57,7 +44,6 @@ def _to_decimal(value) -> Decimal | None:
 async def _is_subscription_active(user) -> bool:
     if not user or not user.subscription_end:
         return False
-
     return not is_expired(user.subscription_end)
 
 
@@ -67,7 +53,6 @@ async def _get_effective_device_limit(
 ) -> int:
     """
     Возвращает актуальный лимит устройств пользователя.
-
     Приоритет:
     1. тариф из current_tariff_id;
     2. user.device_limit как fallback.
@@ -76,13 +61,11 @@ async def _get_effective_device_limit(
         return 0
 
     current_tariff_id = getattr(user, "current_tariff_id", None)
-
     if current_tariff_id:
         tariff = await get_tariff_by_id(
             session,
             current_tariff_id,
         )
-
         if tariff:
             return getattr(tariff, "device_limit", 0) or 0
 
@@ -96,7 +79,6 @@ async def _render_maintenance(
     back_to: str = "back_to_main_menu",
 ) -> None:
     message = await MaintenanceService.get_message(session)
-
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -112,13 +94,11 @@ async def _check_tariff_change_allowed(
 ) -> str | None:
     """
     Проверяет, можно ли пользователю купить/сменить тариф.
-
     Запрещает:
     - даунгрейд во время активной подписки;
     - покупку тарифа, если устройств больше нового лимита.
     """
     new_limit = getattr(tariff, "device_limit", 2)
-
     is_active = await _is_subscription_active(db_user)
 
     if is_active:
@@ -126,7 +106,6 @@ async def _check_tariff_change_allowed(
             session,
             db_user,
         )
-
         if new_limit < current_limit:
             return texts.PAYMENT_DOWNGRADE_BLOCKED.format(
                 current_limit=current_limit,
@@ -164,13 +143,10 @@ async def _show_showcase(
         return
 
     grouped: dict[int, list] = {}
-
     for tariff in tariffs:
         limit = getattr(tariff, "device_limit", 2)
-
         if limit not in grouped:
             grouped[limit] = []
-
         grouped[limit].append(tariff)
 
     keyboard = get_tariff_showcase_keyboard(grouped)
@@ -189,12 +165,10 @@ async def _show_hub(
     session: AsyncSession,
 ) -> None:
     profiles = await get_user_profiles(session, user.id)
-
     device_limit = await _get_effective_device_limit(
         session,
         user,
     )
-
     tariff_name = get_tariff_display_name(device_limit)
 
     text = texts.PAYMENT_HUB_HEADER.format(
@@ -206,27 +180,22 @@ async def _show_hub(
     )
 
     builder = InlineKeyboardBuilder()
-
     builder.button(
         text="🔄 Продлить доступ",
         callback_data="payment_quick_renew",
     )
-
     builder.button(
         text="⚙️ Сменить тариф",
         callback_data="payment_change_tariff",
     )
-
     builder.button(
         text="👤 Профиль",
         callback_data="menu_profile",
     )
-
     builder.button(
         text="🏠 В главное меню",
         callback_data="back_to_main_menu",
     )
-
     builder.adjust(1, 1, 1, 1)
 
     await render_hub(

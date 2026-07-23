@@ -58,7 +58,6 @@ async def _build_tariffs_list_text_and_kb(
         for tariff in tariffs:
             status = "🟢" if tariff.is_active else "🔴"
             device_limit = getattr(tariff, "device_limit", 2)
-
             builder.button(
                 text=(
                     f"{status} {tariff.duration_days} дн. · "
@@ -73,7 +72,6 @@ async def _build_tariffs_list_text_and_kb(
             text="⬅️",
             callback_data=f"admin_tariffs_page:{page - 1}",
         )
-
     if page < total_pages:
         builder.button(
             text="➡️",
@@ -86,7 +84,6 @@ async def _build_tariffs_list_text_and_kb(
     )
 
     builder.adjust(1)
-
     return rendered, builder
 
 
@@ -184,7 +181,6 @@ async def tariffs_pagination(
         return
 
     await state.clear()
-
     page = int(callback.data.split(":")[1])
     await _show_tariffs_list(callback, session, page=page)
     await callback.answer()
@@ -199,7 +195,6 @@ async def _show_tariff_card(
         if tariff.is_active
         else "🔴 Отключен"
     )
-
     device_limit = getattr(tariff, "device_limit", 2)
 
     rendered = texts.ADMIN_TARIFF_CARD.format(
@@ -238,10 +233,9 @@ async def show_tariff_card(
         return
 
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
-    tariff = await get_tariff_by_id(session, tariff_id)
 
+    tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
             texts.ERROR_TARIFF_NOT_FOUND,
@@ -267,10 +261,9 @@ async def toggle_tariff_confirm(
         return
 
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
-    tariff = await get_tariff_by_id(session, tariff_id)
 
+    tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
             texts.ERROR_TARIFF_NOT_FOUND,
@@ -282,22 +275,14 @@ async def toggle_tariff_confirm(
     device_limit = getattr(tariff, "device_limit", 2)
 
     if new_status:
-        text = (
-            "⚠️ <b>Подтверждение включения тарифа</b>\n"
-            f"Тариф: <b>{tariff.duration_days} дн. / "
-            f"{device_limit} устр.</b>\n"
-            "Тариф снова будет доступен пользователям\n"
-            "при покупке доступа.\n"
-            "<i>Уже купленные подписки продолжат работать.</i>"
+        text = texts.ADMIN_TARIFF_TOGGLE_ENABLE_CONFIRM.format(
+            duration_days=tariff.duration_days,
+            device_limit=device_limit,
         )
     else:
-        text = (
-            "⚠️ <b>Подтверждение отключения тарифа</b>\n"
-            f"Тариф: <b>{tariff.duration_days} дн. / "
-            f"{device_limit} устр.</b>\n"
-            "Тариф будет скрыт из списка доступных\n"
-            "при покупке доступа.\n"
-            "<i>Уже купленные подписки продолжат работать.</i>"
+        text = texts.ADMIN_TARIFF_TOGGLE_DISABLE_CONFIRM.format(
+            duration_days=tariff.duration_days,
+            device_limit=device_limit,
         )
 
     try:
@@ -329,10 +314,9 @@ async def toggle_tariff_apply(
         return
 
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
-    tariff = await get_tariff_by_id(session, tariff_id)
 
+    tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
             texts.ERROR_TARIFF_NOT_FOUND,
@@ -355,11 +339,9 @@ async def toggle_tariff_apply(
             session,
             tariff_id,
         )
-
         if pending_count > 0:
             await callback.answer(
-                f"⚠️ По тарифу есть ожидающие платежи: {pending_count}. "
-                "Сначала обработайте их.",
+                texts.ADMIN_TARIFF_TOGGLE_BLOCKED_PENDING,
                 show_alert=True,
             )
             return
@@ -379,10 +361,16 @@ async def toggle_tariff_apply(
         f"toggled to {'active' if new_status else 'inactive'}",
     )
 
-    await callback.answer(
-        f"✅ Тариф {'включен' if new_status else 'выключен'}",
-        show_alert=True,
-    )
+    if new_status:
+        await callback.answer(
+            texts.ADMIN_TARIFF_TOGGLE_SUCCESS_ENABLED,
+            show_alert=True,
+        )
+    else:
+        await callback.answer(
+            texts.ADMIN_TARIFF_TOGGLE_SUCCESS_DISABLED,
+            show_alert=True,
+        )
 
     refreshed = await get_tariff_by_id(session, tariff_id)
     await _show_tariff_card(callback, refreshed)
@@ -402,10 +390,9 @@ async def delete_tariff_handler(
         return
 
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
-    tariff = await get_tariff_by_id(session, tariff_id)
 
+    tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
             texts.ERROR_TARIFF_NOT_FOUND,
@@ -414,7 +401,6 @@ async def delete_tariff_handler(
         return
 
     user_count = await count_users_with_tariff(session, tariff_id)
-
     if user_count > 0:
         try:
             await callback.message.edit_text(
@@ -426,7 +412,6 @@ async def delete_tariff_handler(
             )
         except TelegramBadRequest as e:
             logger.debug(f"delete_tariff_handler edit_text failed: {e}")
-
         await callback.answer()
         return
 
@@ -434,15 +419,10 @@ async def delete_tariff_handler(
         session,
         tariff_id,
     )
-
     if payments_count > 0:
-        text = (
-            "⚠️ <b>Удаление тарифа заблокировано</b>\n"
-            f"По этому тарифу есть история платежей: "
-            f"<b>{payments_count}</b>.\n"
-            "Удаление невозможно, чтобы сохранить платёжную историю."
+        text = texts.ADMIN_TARIFF_DELETE_BLOCKED_PAYMENTS.format(
+            payments_count=payments_count,
         )
-
         try:
             await callback.message.edit_text(
                 text,
@@ -455,19 +435,16 @@ async def delete_tariff_handler(
             logger.debug(
                 f"delete_tariff_handler payments edit_text failed: {e}"
             )
-
         await callback.answer()
         return
 
     device_limit = getattr(tariff, "device_limit", 2)
 
-    text = (
-        "⚠️ <b>Подтверждение удаления тарифа</b>\n"
-        f"Тариф: <b>{tariff.duration_days} дн. / "
-        f"{device_limit} устр.</b>\n"
-        f"Цена: <b>{tariff.price_rub}₽ / "
-        f"{tariff.price_stars}⭐</b>\n"
-        "Тариф будет удалён безвозвратно."
+    text = texts.ADMIN_TARIFF_DELETE_CONFIRM.format(
+        duration_days=tariff.duration_days,
+        device_limit=device_limit,
+        price_rub=tariff.price_rub,
+        price_stars=tariff.price_stars,
     )
 
     try:
@@ -499,10 +476,9 @@ async def delete_tariff_apply(
         return
 
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
-    tariff = await get_tariff_by_id(session, tariff_id)
 
+    tariff = await get_tariff_by_id(session, tariff_id)
     if not tariff:
         await callback.answer(
             texts.ERROR_TARIFF_NOT_FOUND,
@@ -511,7 +487,6 @@ async def delete_tariff_apply(
         return
 
     user_count = await count_users_with_tariff(session, tariff_id)
-
     if user_count > 0:
         try:
             await callback.message.edit_text(
@@ -523,7 +498,6 @@ async def delete_tariff_apply(
             )
         except TelegramBadRequest as e:
             logger.debug(f"delete_tariff_apply in_use edit_text failed: {e}")
-
         await callback.answer()
         return
 
@@ -531,15 +505,10 @@ async def delete_tariff_apply(
         session,
         tariff_id,
     )
-
     if payments_count > 0:
-        text = (
-            "⚠️ <b>Удаление тарифа заблокировано</b>\n"
-            f"По этому тарифу есть история платежей: "
-            f"<b>{payments_count}</b>.\n"
-            "Удаление невозможно, чтобы сохранить платёжную историю."
+        text = texts.ADMIN_TARIFF_DELETE_BLOCKED_PAYMENTS.format(
+            payments_count=payments_count,
         )
-
         try:
             await callback.message.edit_text(
                 text,
@@ -552,7 +521,6 @@ async def delete_tariff_apply(
             logger.debug(
                 f"delete_tariff_apply payments edit_text failed: {e}"
             )
-
         await callback.answer()
         return
 
@@ -563,11 +531,7 @@ async def delete_tariff_apply(
     except IntegrityError:
         await session.rollback()
 
-        text = (
-            "⚠️ <b>Удаление тарифа заблокировано</b>\n"
-            "Не удалось удалить тариф из-за связанных данных.\n"
-            "Возможно, по нему есть история платежей или активные подписки."
-        )
+        text = texts.ADMIN_TARIFF_DELETE_BLOCKED_RELATIONS
 
         try:
             await callback.message.edit_text(
@@ -581,7 +545,6 @@ async def delete_tariff_apply(
             logger.debug(
                 f"delete_tariff_apply integrity edit_text failed: {e}"
             )
-
         await callback.answer()
         return
 
@@ -595,7 +558,10 @@ async def delete_tariff_apply(
     )
 
     await callback.answer(
-        f"✅ Тариф ({tariff.duration_days} дн., {device_limit} устр.) удалён",
+        texts.ADMIN_TARIFF_DELETE_SUCCESS.format(
+            duration_days=tariff.duration_days,
+            device_limit=device_limit,
+        ),
         show_alert=True,
     )
 
@@ -616,7 +582,6 @@ async def _start_edit_tariff(
         return
 
     await state.clear()
-
     tariff_id = int(callback.data.split(":")[1])
 
     await state.update_data(tariff_id=tariff_id)
@@ -684,7 +649,6 @@ async def _apply_tariff_int_edit(
     tariff_id = data["tariff_id"]
 
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff:
         await render_hub(
             message.bot,
@@ -711,16 +675,11 @@ async def _apply_tariff_int_edit(
             session,
             tariff_id,
         )
-
         if pending_count > 0:
             await render_hub(
                 message.bot,
                 message.chat.id,
-                "⚠️ <b>Изменение тарифа заблокировано</b>\n"
-                f"По этому тарифу есть ожидающие платежи: "
-                f"<b>{pending_count}</b>.\n"
-                "Сначала обработайте или отмените их, "
-                "затем измените тариф.",
+                texts.ADMIN_TARIFF_EDIT_BLOCKED_PENDING,
                 get_back_button("admin_tariffs"),
                 parse_mode="HTML",
             )
@@ -741,7 +700,6 @@ async def _apply_tariff_int_edit(
             .group_by(User.telegram_id)
             .having(func.count(VPNProfile.id) > new_value)
         )
-
         result = await session.execute(stmt)
         first_blocked_user = result.first()
 
@@ -749,10 +707,7 @@ async def _apply_tariff_int_edit(
             await render_hub(
                 message.bot,
                 message.chat.id,
-                "⚠️ <b>Изменение лимита невозможно</b>\n"
-                "У пользователей больше устройств, чем новый лимит.\n"
-                "Сначала уменьшите количество устройств у пользователей "
-                "или выберите больший лимит.",
+                texts.ADMIN_TARIFF_EDIT_BLOCKED_DEVICE_LIMIT,
                 get_back_button("admin_tariffs"),
                 parse_mode="HTML",
             )
@@ -764,7 +719,6 @@ async def _apply_tariff_int_edit(
     # пользователей, у которых обновится лимит.
     #
     affected_telegram_ids: list[int] = []
-
     if field_name == "device_limit":
         users_stmt = select(User.telegram_id).where(
             User.current_tariff_id == tariff_id,
@@ -860,7 +814,7 @@ async def process_edit_tariff_days(
         field_name="duration_days",
         validator=lambda x: x >= 1,
         validator_error=texts.ERROR_NUMBER_GT_ZERO,
-        success_message=lambda v: f"✅ Дни тарифа изменены на {v} дней",
+        success_message=lambda v: texts.ADMIN_TARIFF_EDIT_DAYS_SUCCESS.format(value=v),
         audit_detail_fn=lambda old, new: f"days: {old} -> {new}",
     )
 
@@ -891,7 +845,7 @@ async def process_edit_tariff_devices(
         field_name="device_limit",
         validator=lambda x: x >= 1,
         validator_error=texts.ERROR_NUMBER_GT_ZERO,
-        success_message=lambda v: f"✅ Лимит устройств изменён на {v}",
+        success_message=lambda v: texts.ADMIN_TARIFF_EDIT_DEVICES_SUCCESS.format(value=v),
         audit_detail_fn=lambda old, new: f"device_limit: {old} -> {new}",
     )
 
@@ -922,7 +876,7 @@ async def process_edit_tariff_rub(
         field_name="price_rub",
         validator=lambda x: x > 0,
         validator_error=texts.ERROR_POSITIVE_NUMBER,
-        success_message=lambda v: f"✅ Цена в рублях изменена на {v} ₽",
+        success_message=lambda v: texts.ADMIN_TARIFF_EDIT_RUB_SUCCESS.format(value=v),
         audit_detail_fn=lambda old, new: f"RUB: {old} -> {new}",
     )
 
@@ -953,6 +907,6 @@ async def process_edit_tariff_stars(
         field_name="price_stars",
         validator=lambda x: x > 0,
         validator_error=texts.ERROR_STARS_POSITIVE,
-        success_message=lambda v: f"✅ Цена в Stars изменена на {v} ⭐",
+        success_message=lambda v: texts.ADMIN_TARIFF_EDIT_STARS_SUCCESS.format(value=v),
         audit_detail_fn=lambda old, new: f"Stars: {old} -> {new}",
     )

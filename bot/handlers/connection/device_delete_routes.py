@@ -34,7 +34,6 @@ async def request_delete_device(
     profile_id = int(callback.data.split(":")[1])
 
     profile = await get_profile_by_id(session, profile_id)
-
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -64,7 +63,6 @@ async def cancel_delete_device(
     profile_id = int(callback.data.split(":")[1])
 
     profile = await get_profile_by_id(session, profile_id)
-
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -72,12 +70,12 @@ async def cancel_delete_device(
         )
         return
 
-    await callback.answer("❌ Удаление отменено")
+    await callback.answer(texts.DEVICE_DELETE_CANCELLED)
 
     await render_hub(
         callback.bot,
         callback.message.chat.id,
-        "📱 <b>Управление устройством</b>",
+        texts.DEVICE_MANAGE_TITLE,
         get_device_keyboard(profile_id),
     )
 
@@ -93,7 +91,7 @@ async def confirm_delete_device(
 
     if profile_id in _deleting_devices:
         await callback.answer(
-            "⏳ Уже удаляем устройство...",
+            texts.DEVICE_DELETE_IN_PROGRESS,
             show_alert=True,
         )
         return
@@ -101,11 +99,10 @@ async def confirm_delete_device(
     _deleting_devices.add(profile_id)
 
     try:
-        await callback.answer("⏳ Удаляю устройство...")
+        await callback.answer(texts.DEVICE_DELETING_PROGRESS)
         await state.clear()
 
         profile = await get_profile_by_id(session, profile_id)
-
         if (
             not profile
             or not db_user
@@ -117,12 +114,6 @@ async def confirm_delete_device(
             )
             return
 
-        #
-        # actor_id нужен для корректного аудита.
-        #
-        # Здесь удаление выполняет сам пользователь,
-        # поэтому actor_id = callback.from_user.id.
-        #
         if not await DeviceService.delete_device(
             session,
             profile,

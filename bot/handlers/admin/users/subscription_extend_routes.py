@@ -50,10 +50,9 @@ async def admin_sub_extend(
     telegram_id = int(callback.data.split(":")[1])
 
     user = await get_user_by_telegram_id(session, telegram_id)
-
     if not user or not user.subscription_end:
         await callback.answer(
-            "❌ У пользователя нет подписки",
+            texts.ADMIN_SUB_NO_SUBSCRIPTION,
             show_alert=True,
         )
         return
@@ -96,15 +95,13 @@ async def admin_sub_confirm_extend(
     days = int(parts[2])
 
     user = await get_user_by_telegram_id(session, telegram_id)
-
     if not user:
         await callback.message.edit_text(
-            "❌ Пользователь не найден."
+            texts.ERROR_USER_NOT_FOUND
         )
         return
 
     current_time = now_utc()
-
     current_end = (
         user.subscription_end
         if (
@@ -121,7 +118,7 @@ async def admin_sub_confirm_extend(
     )
 
     days_text = (
-        "∞ навсегда"
+        texts.ADMIN_SUB_PERMANENT_LABEL
         if days >= PERMANENT_SUBSCRIPTION_DAYS
         else f"{days} дн."
     )
@@ -176,10 +173,9 @@ async def admin_sub_apply_extend(
             session,
             telegram_id,
         )
-
         if not user:
             await callback.message.edit_text(
-                "❌ Пользователь не найден."
+                texts.ERROR_USER_NOT_FOUND
             )
             return
 
@@ -199,7 +195,7 @@ async def admin_sub_apply_extend(
         )
 
         days_text = (
-            "∞ навсегда"
+            texts.ADMIN_SUB_PERMANENT_LABEL
             if days >= PERMANENT_SUBSCRIPTION_DAYS
             else f"{days} дн."
         )
@@ -219,11 +215,10 @@ async def admin_sub_apply_extend(
             else "—"
         )
 
-        text = (
-            f"✅ <b>Подписка продлена</b>\n"
-            f"Пользователь: <code>{telegram_id}</code>\n"
-            f"На: <b>{days_text}</b>\n"
-            f"Действует до: <b>{new_end_str}</b>"
+        text = texts.ADMIN_SUB_EXTEND_SUCCESS.format(
+            telegram_id=telegram_id,
+            days_text=days_text,
+            new_end=new_end_str,
         )
 
         try:
@@ -245,9 +240,8 @@ async def admin_sub_apply_extend(
             exc_info=True,
         )
         await session.rollback()
-
         await callback.answer(
-            "❌ Ошибка при продлении",
+            texts.ADMIN_SUB_EXTEND_FAILED,
             show_alert=True,
         )
 
@@ -308,7 +302,6 @@ async def admin_sub_extend_custom_process(
         return
 
     days = _validate_positive_int(message.text)
-
     if days is None:
         await render_hub(
             message.bot,
@@ -322,18 +315,16 @@ async def admin_sub_extend_custom_process(
     await state.clear()
 
     user = await get_user_by_telegram_id(session, telegram_id)
-
     if not user:
         await render_hub(
             message.bot,
             message.chat.id,
-            "❌ Пользователь не найден.",
+            texts.ERROR_USER_NOT_FOUND,
             get_back_button(f"admin_sub_extend:{telegram_id}"),
         )
         return
 
     current_time = now_utc()
-
     current_end = (
         user.subscription_end
         if (
@@ -350,7 +341,7 @@ async def admin_sub_extend_custom_process(
     )
 
     days_text = (
-        "∞ навсегда"
+        texts.ADMIN_SUB_PERMANENT_LABEL
         if days >= PERMANENT_SUBSCRIPTION_DAYS
         else f"{days} дн."
     )

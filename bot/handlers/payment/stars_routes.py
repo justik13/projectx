@@ -40,7 +40,6 @@ from utils.tariff_names import get_tariff_display_name
 from utils.telegram import render_hub, send_hub_invoice
 
 from .common import (
-    PAYMENT_MANUAL_REVIEW_TEXT,
     _check_tariff_change_allowed,
     _is_subscription_active,
     _render_maintenance,
@@ -59,9 +58,7 @@ def _stars_amount_matches(
 ) -> bool:
     """
     Сравнивает сумму Telegram Stars с ожидаемой суммой платежа.
-
     Источник истины — payment.amount.
-
     Дополнительно допускается нормализация minor units:
     если Telegram присылает сумму в 100 раз больше,
     например 9000 вместо 90, это тоже считается совпадением.
@@ -117,7 +114,6 @@ async def _apply_payment_snapshot(
     }
 
     changed = False
-
     for field_name, field_value in snapshot_fields.items():
         if hasattr(payment, field_name):
             setattr(payment, field_name, field_value)
@@ -133,7 +129,6 @@ def _get_payment_device_limit(payment) -> int:
         "snapshot_device_limit",
         None,
     )
-
     if snapshot_value is not None:
         try:
             return int(snapshot_value)
@@ -158,7 +153,6 @@ async def pay_stars(
         return
 
     parts = callback.data.split(":")
-
     try:
         tariff_id = int(parts[1])
         source = parts[2] if len(parts) > 2 else "showcase"
@@ -184,7 +178,6 @@ async def pay_stars(
         return
 
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if not tariff:
         await callback.answer(
             texts.ERROR_TARIFF_NOT_FOUND,
@@ -214,7 +207,6 @@ async def pay_stars(
         db_user,
         tariff,
     )
-
     if error_text:
         await render_hub(
             callback.bot,
@@ -228,7 +220,7 @@ async def pay_stars(
     payment = None
 
     try:
-        await callback.answer("💳 Отправляю инвойс...")
+        await callback.answer(texts.PAYMENT_SENDING_INVOICE)
 
         payment = await create_payment(
             session=session,
@@ -246,7 +238,6 @@ async def pay_stars(
 
         try:
             invoice_builder = InlineKeyboardBuilder()
-
             invoice_builder.row(
                 InlineKeyboardButton(
                     text="💳 Оплатить",
@@ -342,7 +333,7 @@ async def pay_stars(
 
         try:
             await callback.answer(
-                "❌ Ошибка при создании платежа",
+                texts.PAYMENT_CREATE_ERROR,
                 show_alert=True,
             )
         except Exception:
@@ -363,7 +354,7 @@ async def process_pre_checkout(
         if not payload or not payload.startswith("stars_payment:"):
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Некорректный платёж",
+                error_message=texts.PAYMENT_STARS_ERROR_INVALID_PAYMENT,
             )
             return
 
@@ -372,16 +363,15 @@ async def process_pre_checkout(
         except (ValueError, IndexError):
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Некорректный идентификатор платежа",
+                error_message=texts.PAYMENT_STARS_ERROR_INVALID_ID,
             )
             return
 
         payment = await get_payment_by_id(db_session, payment_id)
-
         if not payment:
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Платёж не найден",
+                error_message=texts.PAYMENT_STARS_ERROR_NOT_FOUND,
             )
             return
 
@@ -389,17 +379,17 @@ async def process_pre_checkout(
             if payment.status == "completed":
                 await pre_checkout_query.answer(
                     ok=False,
-                    error_message="Платёж уже обработан",
+                    error_message=texts.PAYMENT_STARS_ERROR_ALREADY_PROCESSED,
                 )
             elif payment.status == "cancelled":
                 await pre_checkout_query.answer(
                     ok=False,
-                    error_message="Платёж отменён",
+                    error_message=texts.PAYMENT_STARS_ERROR_CANCELLED,
                 )
             else:
                 await pre_checkout_query.answer(
                     ok=False,
-                    error_message="Платёж недоступен",
+                    error_message=texts.PAYMENT_STARS_ERROR_UNAVAILABLE,
                 )
             return
 
@@ -410,21 +400,21 @@ async def process_pre_checkout(
         ):
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Нет доступа к этому платежу",
+                error_message=texts.PAYMENT_STARS_ERROR_ACCESS,
             )
             return
 
         if payment.user.is_banned or payment.user.is_deleted:
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Доступ недоступен",
+                error_message=texts.PAYMENT_STARS_ERROR_BLOCKED,
             )
             return
 
         if not payment.tariff or not payment.tariff.is_active:
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Тариф недоступен",
+                error_message=texts.PAYMENT_STARS_ERROR_TARIFF,
             )
             return
 
@@ -434,17 +424,14 @@ async def process_pre_checkout(
         ):
             await pre_checkout_query.answer(
                 ok=False,
-                error_message=(
-                    "Ведутся технические работы. "
-                    "Попробуйте позже."
-                ),
+                error_message=texts.PAYMENT_STARS_ERROR_MAINTENANCE,
             )
             return
 
         if payment.currency != "stars":
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Некорректный способ оплаты",
+                error_message=texts.PAYMENT_STARS_ERROR_METHOD,
             )
             return
 
@@ -452,7 +439,6 @@ async def process_pre_checkout(
         # Источник истины — сумма, сохранённая в платеже.
         #
         expected_amount = _to_decimal(payment.amount)
-
         if expected_amount is None:
             logger.error(
                 "Pre-checkout invalid stored amount: "
@@ -460,10 +446,9 @@ async def process_pre_checkout(
                 payment_id,
                 payment.amount,
             )
-
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Некорректная сумма платежа",
+                error_message=texts.PAYMENT_STARS_ERROR_AMOUNT,
             )
             return
 
@@ -482,10 +467,9 @@ async def process_pre_checkout(
                 expected_amount,
                 payment_id,
             )
-
             await pre_checkout_query.answer(
                 ok=False,
-                error_message="Некорректная сумма платежа",
+                error_message=texts.PAYMENT_STARS_ERROR_AMOUNT,
             )
             return
 
@@ -515,7 +499,6 @@ async def process_successful_payment(
     await state.clear()
 
     payload = message.successful_payment.invoice_payload
-
     if not payload.startswith("stars_payment:"):
         return
 
@@ -525,7 +508,6 @@ async def process_successful_payment(
         return
 
     payment = await get_payment_by_id(session, payment_id)
-
     if not payment:
         try:
             await _send_payment_not_found_alert_now(
@@ -585,7 +567,6 @@ async def process_successful_payment(
         "total_amount",
         None,
     )
-
     if successful_total_amount is not None:
         telegram_amount = _to_decimal(successful_total_amount)
         expected_amount = _to_decimal(payment.amount)
@@ -637,19 +618,16 @@ async def process_successful_payment(
             session,
             message.from_user.id,
         )
-
         profiles = (
             await get_user_profiles(session, user.id)
             if user
             else []
         )
-
         valid_until = (
             format_datetime(user.subscription_end)
             if user and user.subscription_end
             else "—"
         )
-
         device_limit = _get_payment_device_limit(payment)
         tariff_name = get_tariff_display_name(device_limit)
 
@@ -675,7 +653,6 @@ async def process_successful_payment(
     elif success and result_code == "paid_after_cancel":
         settings = get_settings()
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
-
         device_limit = _get_payment_device_limit(payment)
         tariff_name = get_tariff_display_name(device_limit)
 
@@ -687,17 +664,14 @@ async def process_successful_payment(
         )
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1)
 
         await render_hub(
@@ -712,23 +686,20 @@ async def process_successful_payment(
         support_username = settings.SUPPORT_USERNAME.lstrip("@")
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="💬 Написать в поддержку",
             url=f"https://t.me/{support_username}",
         )
-
         builder.button(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1)
 
         await render_hub(
             message.bot,
             message.chat.id,
-            PAYMENT_MANUAL_REVIEW_TEXT,
+            texts.PAYMENT_MANUAL_REVIEW_TEXT,
             builder.as_markup(),
         )
 
@@ -749,14 +720,13 @@ async def cancel_invoice(
     db_user=None,
 ) -> None:
     parts = callback.data.split(":")
-
     try:
         payment_id = int(parts[1])
         tariff_id = int(parts[2])
         source = parts[3] if len(parts) > 3 else "showcase"
     except (ValueError, IndexError):
         await callback.answer(
-            "Некорректный платёж",
+            texts.PAYMENT_INVALID,
             show_alert=True,
         )
         return
@@ -769,10 +739,9 @@ async def cancel_invoice(
         return
 
     payment = await get_payment_by_id_simple(session, payment_id)
-
     if not payment:
         await callback.answer(
-            "Платёж не найден",
+            texts.PAYMENT_NOT_FOUND_SHORT,
             show_alert=True,
         )
         return
@@ -786,7 +755,7 @@ async def cancel_invoice(
 
     if payment.status == "completed":
         await callback.answer(
-            "Платёж уже обработан",
+            texts.PAYMENT_STARS_ERROR_ALREADY_PROCESSED,
             show_alert=True,
         )
         return
@@ -797,13 +766,11 @@ async def cancel_invoice(
         logger.warning(f"Failed to cancel payment {payment_id}: {e}")
 
     await state.clear()
-    await callback.answer("❌ Инвойс отменен")
+    await callback.answer(texts.PAYMENT_INVOICE_CANCELLED)
 
     tariff = await get_tariff_by_id(session, tariff_id)
-
     if tariff and tariff.is_active:
         device_limit = getattr(tariff, "device_limit", 2)
-
         tariff_name = get_tariff_display_name(device_limit)
 
         text = texts.PAYMENT_CHECKOUT_TEXT.format(
@@ -814,7 +781,6 @@ async def cancel_invoice(
         )
 
         settings = get_settings()
-
         sbp_enabled = bool(
             settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET
         )
@@ -836,7 +802,6 @@ async def cancel_invoice(
         session,
         callback.from_user.id,
     )
-
     if user and await _is_subscription_active(user):
         await _show_hub(callback, user, session)
     else:

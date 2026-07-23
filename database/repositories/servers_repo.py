@@ -5,19 +5,20 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Server, VPNProfile
-from services.slots_cache import get_real_peer_count
+from services.slots_cache import get_cached_peer_count
 
 
 class ServerUpdateFields(TypedDict, total=False):
     name: str
     country_flag: str | None
     api_url: str
+    api_key: str
     protocol: str
     max_clients: int
     is_active: bool
 
 
-PROTECTED_SERVER_FIELDS = {"id", "api_key", "created_at"}
+PROTECTED_SERVER_FIELDS = {"id", "created_at"}
 
 
 async def get_active_servers(
@@ -61,7 +62,6 @@ async def get_available_servers(
         )
         .order_by(Server.name)
     )
-
     result = await session.execute(stmt)
     return result.scalars().all()
 
@@ -126,9 +126,13 @@ async def get_total_free_ips(
     session: AsyncSession,
 ) -> int:
     """
-    Считает свободные слоты параллельно.
-    Если API сервера недоступно и get_real_peer_count возвращает -1,
-    используется количество профилей из БД.
+    Считает свободные слоты БЕЗ API-запросов.
+
+    Использует только кэш slots_cache (TTL 300 сек).
+    Если кэш пуст — fallback на количество профилей из БД.
+
+    Результат: дашборд рендерится за <1 секунды
+    при любом состоянии API.
     """
     active_servers = await get_active_servers(session)
     if not active_servers:
@@ -147,30 +151,13 @@ async def get_total_free_ips(
         for row in counts_result.all()
     }
 
-    async def _free_slots_for_server(server: Server) -> int:
-        real_count = await get_real_peer_count(
-            server,
-            force_refresh=False,
-        )
-
-        if real_count == -1:
-            real_count = db_counts.get(server.id, 0)
-
-        free_slots = server.max_clients - real_count
-        return max(0, free_slots)
-
-    results = await asyncio.gather(
-        *[
-            _free_slots_for_server(server)
-            for server in active_servers
-        ],
-        return_exceptions=True,
-    )
-
     total_free = 0
-    for result in results:
-        if isinstance(result, int):
-            total_free += result
+    for server in active_servers:
+        real_count = get_cached_peer_count(server.id)
+        if real_count is None:
+            real_count = db_counts.get(server.id, 0)
+        free_slots = server.max_clients - real_count
+        total_free += max(0, free_slots)
 
     return total_free
 

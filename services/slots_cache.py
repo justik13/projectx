@@ -16,6 +16,11 @@ _CLEANUP_INTERVAL = 3600.0
 _LOCK_TTL = 3600.0
 
 
+def get_cached_peer_count(server_id: int) -> int | None:
+    """Только кэш, без API-запроса. None = кэш пуст."""
+    return _slots_cache.get(server_id)
+
+
 async def get_real_peer_count(
     server: Server,
     force_refresh: bool = False,
@@ -38,7 +43,6 @@ async def get_real_peer_count(
     global _last_cleanup_time
 
     now = time.monotonic()
-
     if now - _last_cleanup_time > _CLEANUP_INTERVAL:
         _cleanup_old_locks(now)
         _last_cleanup_time = now
@@ -81,7 +85,6 @@ async def get_real_peer_count(
             return -1
 
         count = len(clients)
-
         _slots_cache[server.id] = count
 
         logger.info(
@@ -91,7 +94,6 @@ async def get_real_peer_count(
             count,
             server.max_clients,
         )
-
         return count
 
 
@@ -101,7 +103,6 @@ def _cleanup_old_locks(now: float) -> None:
         for sid, (lock, last_used) in _locks.items()
         if now - last_used > _LOCK_TTL and not lock.locked()
     ]
-
     for sid in old_servers:
         del _locks[sid]
 

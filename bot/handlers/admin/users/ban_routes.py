@@ -49,8 +49,8 @@ async def admin_ban_confirm(
     await callback.answer()
 
     telegram_id = int(callback.data.split(":")[1])
-    settings = get_settings()
 
+    settings = get_settings()
     if telegram_id in settings.ADMIN_IDS:
         await callback.answer(
             texts.ERROR_ADMIN_BAN_FORBIDDEN,
@@ -58,17 +58,7 @@ async def admin_ban_confirm(
         )
         return
 
-    text = (
-        f"⚠️ <b>Подтверждение блокировки</b>\n"
-        f"Пользователь: <code>{telegram_id}</code>\n"
-        f"Пользователь будет заблокирован.\n"
-        f"Все его устройства будут удалены без возможности "
-        f"восстановления.\n"
-        f"Ожидающие платежи будут отменены.\n"
-        f"<i>После разблокировки устройства не восстанавливаются. "
-        f"Пользователь сможет создать их заново, если подписка "
-        f"активна.</i>"
-    )
+    text = texts.ADMIN_BAN_CONFIRM.format(telegram_id=telegram_id)
 
     try:
         await callback.message.edit_text(
@@ -98,8 +88,8 @@ async def admin_ban_apply(
     await callback.answer()
 
     telegram_id = int(callback.data.split(":")[1])
-    settings = get_settings()
 
+    settings = get_settings()
     if telegram_id in settings.ADMIN_IDS:
         await callback.answer(
             texts.ERROR_ADMIN_BAN_FORBIDDEN,
@@ -115,13 +105,13 @@ async def admin_ban_apply(
 
     if not success:
         await callback.answer(
-            f"❌ Ошибка: {message}",
+            texts.ADMIN_BAN_FAILED.format(message=message),
             show_alert=True,
         )
         return
 
     await callback.answer(
-        f"✅ Пользователь {message}",
+        texts.ADMIN_BAN_SUCCESS.format(message=message),
         show_alert=True,
     )
 
@@ -146,15 +136,7 @@ async def admin_unban_confirm(
 
     telegram_id = int(callback.data.split(":")[1])
 
-    text = (
-        f"⚠️ <b>Подтверждение разблокировки</b>\n"
-        f"Пользователь: <code>{telegram_id}</code>\n"
-        f"Пользователь будет разблокирован.\n"
-        f"Устройства не будут восстановлены.\n"
-        f"Пользователь сможет создать их заново, если подписка "
-        f"активна.\n"
-        f"<i>Это действие можно отменить повторной блокировкой.</i>"
-    )
+    text = texts.ADMIN_UNBAN_CONFIRM.format(telegram_id=telegram_id)
 
     try:
         await callback.message.edit_text(
@@ -193,13 +175,13 @@ async def admin_unban_apply(
 
     if not success:
         await callback.answer(
-            f"❌ Ошибка: {message}",
+            texts.ADMIN_BAN_FAILED.format(message=message),
             show_alert=True,
         )
         return
 
     await callback.answer(
-        f"✅ Пользователь {message}",
+        texts.ADMIN_BAN_SUCCESS.format(message=message),
         show_alert=True,
     )
 

@@ -38,10 +38,9 @@ async def show_server_card(
         return
 
     await state.clear()
-
     server_id = int(callback.data.split(":")[1])
-    server = await get_server_by_id(session, server_id)
 
+    server = await get_server_by_id(session, server_id)
     if not server:
         await callback.answer(
             texts.ERROR_SERVER_NOT_FOUND,
@@ -66,10 +65,9 @@ async def toggle_server_confirm(
         return
 
     await state.clear()
-
     server_id = int(callback.data.split(":")[1])
-    server = await get_server_by_id(session, server_id)
 
+    server = await get_server_by_id(session, server_id)
     if not server:
         await callback.answer(
             texts.ERROR_SERVER_NOT_FOUND,
@@ -81,20 +79,14 @@ async def toggle_server_confirm(
     flag = server.country_flag or "🌍"
 
     if new_status:
-        text = (
-            "⚠️ <b>Подтверждение включения сервера</b>\n"
-            f"{flag} <b>{safe(server.name)}</b>\n"
-            "Сервер снова будет доступен пользователям\n"
-            "при создании новых устройств.\n"
-            "<i>Существующие устройства продолжат работать.</i>"
+        text = texts.ADMIN_SERVER_TOGGLE_ENABLE_CONFIRM.format(
+            flag=flag,
+            name=safe(server.name),
         )
     else:
-        text = (
-            "⚠️ <b>Подтверждение отключения сервера</b>\n"
-            f"{flag} <b>{safe(server.name)}</b>\n"
-            "Сервер будет скрыт из списка доступных локаций\n"
-            "при создании новых устройств.\n"
-            "<i>Существующие устройства продолжат работать.</i>"
+        text = texts.ADMIN_SERVER_TOGGLE_DISABLE_CONFIRM.format(
+            flag=flag,
+            name=safe(server.name),
         )
 
     try:
@@ -126,10 +118,9 @@ async def toggle_server_apply(
         return
 
     await state.clear()
-
     server_id = int(callback.data.split(":")[1])
-    server = await get_server_by_id(session, server_id)
 
+    server = await get_server_by_id(session, server_id)
     if not server:
         await callback.answer(
             texts.ERROR_SERVER_NOT_FOUND,
@@ -155,13 +146,13 @@ async def toggle_server_apply(
     )
 
     status_text = (
-        "включен"
+        texts.ADMIN_SERVER_STATE_ENABLED
         if new_status
-        else "выключен"
+        else texts.ADMIN_SERVER_STATE_DISABLED
     )
 
     await callback.answer(
-        f"✅ Сервер {status_text}",
+        texts.ADMIN_SERVER_TOGGLE_SUCCESS.format(status=status_text),
         show_alert=True,
     )
 

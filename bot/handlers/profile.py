@@ -33,15 +33,6 @@ from utils.telegram import render_hub, safe
 router = Router()
 logger = logging.getLogger(__name__)
 
-PAYMENT_STATUS_ICONS = {
-    "completed": "✅",
-    "cancelled": "❌",
-    "failed": "⚠️",
-    "refunded": "↩️",
-    "requires_manual_review": "🧪",
-    "pending": "⏳",
-}
-
 
 async def _render_profile(
     target,
@@ -50,7 +41,6 @@ async def _render_profile(
 ):
     profiles = await get_user_profiles(session, user.id)
     profiles_count = len(profiles)
-
     total_traffic = sum(
         p.traffic_down + p.traffic_up
         for p in profiles
@@ -67,7 +57,6 @@ async def _render_profile(
 
     if has_access:
         device_limit = user.device_limit or 0
-
         tariff_name = (
             f"{get_tariff_display_name(device_limit)} "
             f"({device_limit} устр.)"
@@ -95,9 +84,7 @@ async def _render_profile(
             referrals_count=referrals_count,
             referral_days=user.referral_days,
         )
-
         kb = get_profile_keyboard()
-
     else:
         rendered = texts.PROFILE_TEXT_INACTIVE.format(
             name=safe(user.first_name or "Пользователь"),
@@ -108,7 +95,6 @@ async def _render_profile(
         )
 
         builder = InlineKeyboardBuilder()
-
         builder.button(
             text="🚀 Купить доступ",
             callback_data="menu_buy",
@@ -125,9 +111,7 @@ async def _render_profile(
             text="🏠 В главное меню",
             callback_data="back_to_main_menu",
         )
-
         builder.adjust(1, 1, 1, 1)
-
         kb = builder.as_markup()
 
     await render_hub(
@@ -209,23 +193,19 @@ async def show_history(
         rendered = texts.HISTORY_HEADER + texts.HISTORY_EMPTY
     else:
         rendered = texts.HISTORY_HEADER
-
         for payment in payments[:10]:
-            status_icon = PAYMENT_STATUS_ICONS.get(
+            status_icon = texts.PAYMENT_STATUS_ICONS.get(
                 payment.status,
                 "⏳",
             )
-
             date = format_datetime(
                 payment.paid_at or payment.created_at
             )
-
             currency = (
                 "⭐"
                 if payment.currency == "stars"
                 else "₽"
             )
-
             rendered += (
                 f"{status_icon} {date} | "
                 f"{payment.amount} {currency}\n"
@@ -267,7 +247,6 @@ async def show_referral(
     )
 
     bot_info = await callback.bot.get_me()
-
     referral_link = (
         f"https://t.me/{bot_info.username}"
         f"?start=ref_{db_user.telegram_id}"
@@ -313,14 +292,12 @@ async def show_referrals_list(
         rendered = texts.REFERRAL_LIST_EMPTY
     else:
         rendered = texts.REFERRAL_LIST_HEADER
-
         for referral in referrals[:20]:
             safe_user = (
                 f"@{safe(referral.username)}"
                 if referral.username
                 else f"ID: {referral.telegram_id}"
             )
-
             rendered += f"• {safe_user}\n"
 
         if len(referrals) > 20:
@@ -329,9 +306,9 @@ async def show_referrals_list(
                 f"рефералов</i>"
             )
 
-        rendered += texts.REFERRAL_LIST_FOOTER.format(
-            count=len(referrals),
-        )
+    rendered += texts.REFERRAL_LIST_FOOTER.format(
+        count=len(referrals),
+    )
 
     await render_hub(
         callback.bot,

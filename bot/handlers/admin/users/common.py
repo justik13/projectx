@@ -27,22 +27,12 @@ MANUAL_GRANT_ALLOWED_STATUSES = {
     "requires_manual_review",
 }
 
-PAYMENT_STATUS_NAMES = {
-    "pending": "⏳ Ожидает",
-    "completed": "✅ Завершён",
-    "cancelled": "❌ Отменён",
-    "failed": "⚠️ Ошибка",
-    "refunded": "↩️ Возврат",
-    "requires_manual_review": "🧪 Ручная проверка",
-}
-
 
 def _validate_positive_int(text: str | None) -> int | None:
     if not text or not text.strip().isdigit():
         return None
 
     value = int(text.strip())
-
     MAX_DAYS = 36500
 
     if value < 1 or value > MAX_DAYS:
@@ -54,23 +44,15 @@ def _validate_positive_int(text: str | None) -> int | None:
 def _is_subscription_active(user: User) -> bool:
     if not user.subscription_end:
         return False
-
     return not is_expired(user.subscription_end)
 
 
 def _format_time_left(subscription_end) -> str:
-    """
-    Форматирует остаток подписки для админки.
-
-    Важно:
-    - вечная подписка должна показываться как "∞ навсегда";
-    - нельзя показывать 27000 дней для даты 2100-01-01.
-    """
     if not subscription_end:
         return "—"
 
     if subscription_end.year >= 2100:
-        return "∞ навсегда"
+        return texts.ADMIN_SUB_PERMANENT_LABEL
 
     current_time = now_utc()
     delta = subscription_end - current_time
@@ -82,13 +64,12 @@ def _format_time_left(subscription_end) -> str:
     hours = delta.seconds // 3600
 
     if days >= 36500:
-        return "∞ навсегда"
+        return texts.ADMIN_SUB_PERMANENT_LABEL
 
     if days > 0:
         return f"{days} дн. {hours} ч."
 
     minutes = (delta.seconds % 3600) // 60
-
     return f"{hours} ч. {minutes} мин."
 
 
@@ -98,7 +79,6 @@ async def _get_active_tariffs(session: AsyncSession) -> list[Tariff]:
         .where(Tariff.is_active == True)
         .order_by(Tariff.device_limit)
     )
-
     return list(result.scalars().all())
 
 
@@ -108,13 +88,10 @@ async def _get_tariff_groups(
     tariffs = await _get_active_tariffs(session)
 
     groups: dict[int, list[Tariff]] = {}
-
     for tariff in tariffs:
         limit = tariff.device_limit
-
         if limit not in groups:
             groups[limit] = []
-
         groups[limit].append(tariff)
 
     return groups
@@ -136,9 +113,7 @@ async def _get_user_with_profiles(
         .where(User.telegram_id == telegram_id)
         .options(selectinload(User.profiles))
     )
-
     result = await session.execute(stmt)
-
     return result.scalar_one_or_none()
 
 
@@ -168,17 +143,13 @@ async def _build_users_list_text_and_kb(
                 and user.subscription_end > current_time
                 else "🔴"
             )
-
             ban = "🚫" if user.is_banned else ""
-
             username = (
                 f"@{safe(user.username)}"
                 if user.username
                 else f"ID:{user.telegram_id}"
             )
-
             days = format_days_left(user.subscription_end)
-
             profiles_count = (
                 len(user.profiles)
                 if user.profiles
@@ -198,7 +169,6 @@ async def _build_users_list_text_and_kb(
             text="⬅️",
             callback_data=f"admin_users_page:{page - 1}",
         )
-
     if page < total_pages:
         builder.button(
             text="➡️",
@@ -209,14 +179,12 @@ async def _build_users_list_text_and_kb(
         text="🔍 Поиск по ID",
         callback_data="admin_users_search",
     )
-
     builder.button(
         text="← В админку",
         callback_data="admin_menu",
     )
 
     builder.adjust(1)
-
     return rendered, builder
 
 
@@ -226,14 +194,12 @@ async def _render_user_card(
     session: AsyncSession,
 ):
     profiles = user.profiles if user.profiles else []
-
     referrals = await get_user_referrals(
         session,
         user.telegram_id,
     )
 
     current_time = now_utc()
-
     rendered = format_user_card_text(
         user,
         profiles,
@@ -260,14 +226,12 @@ async def _show_user_card_edit(
     session: AsyncSession,
 ):
     profiles = await get_user_profiles(session, user.id)
-
     referrals = await get_user_referrals(
         session,
         user.telegram_id,
     )
 
     current_time = now_utc()
-
     rendered = format_user_card_text(
         user,
         profiles,
@@ -286,13 +250,12 @@ async def _show_user_card_edit(
         )
     except TelegramBadRequest as e:
         logger.debug(f"_show_user_card_edit edit_text failed: {e}")
-
-    await render_hub(
-        message.bot,
-        message.chat.id,
-        rendered,
-        get_admin_user_card_keyboard(
-            user.telegram_id,
-            user.is_banned,
-        ),
-    )
+        await render_hub(
+            message.bot,
+            message.chat.id,
+            rendered,
+            get_admin_user_card_keyboard(
+                user.telegram_id,
+                user.is_banned,
+            ),
+        )

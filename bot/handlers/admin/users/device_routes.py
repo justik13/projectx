@@ -40,10 +40,9 @@ async def admin_user_devices(
     telegram_id = int(callback.data.split(":")[1])
 
     user = await _get_user_with_profiles(session, telegram_id)
-
     if not user:
         await callback.message.edit_text(
-            "❌ Пользователь не найден."
+            texts.ERROR_USER_NOT_FOUND
         )
         return
 
@@ -61,13 +60,11 @@ async def admin_user_devices(
         text = texts.ADMIN_USER_DEVICES_HEADER.format(
             telegram_id=telegram_id
         )
-
         for profile in profiles:
             name = (
                 getattr(profile, "device_name", None)
                 or f"Устройство #{profile.id}"
             )
-
             text += f"\n• {safe(name)}"
 
     try:
@@ -102,7 +99,6 @@ async def admin_delete_device_confirm(
     profile_id = int(parts[2])
 
     profile = await get_profile_by_id(session, profile_id)
-
     if not profile:
         await callback.answer(
             texts.ERROR_PROFILE_NOT_FOUND,
@@ -111,7 +107,6 @@ async def admin_delete_device_confirm(
         return
 
     server = await get_server_by_id(session, profile.server_id)
-
     flag = server.country_flag if server else "🌍"
     server_name = server.name if server else "Неизвестно"
 
@@ -162,7 +157,6 @@ async def admin_delete_device_apply(
 
     try:
         profile = await get_profile_by_id(session, profile_id)
-
         if not profile:
             await callback.answer(
                 texts.ERROR_PROFILE_NOT_FOUND,
@@ -190,8 +184,7 @@ async def admin_delete_device_apply(
 
         if not success:
             await callback.answer(
-                "⚠️ Не удалось удалить устройство. "
-                "Сервер недоступен.",
+                texts.ADMIN_DELETE_DEVICE_FAILED,
                 show_alert=True,
             )
             return
@@ -219,10 +212,8 @@ async def admin_delete_device_apply(
             f"admin_delete_device_apply error: {e}",
             exc_info=True,
         )
-
         await session.rollback()
-
         await callback.answer(
-            "❌ Ошибка при удалении устройства",
+            texts.ADMIN_DELETE_DEVICE_ERROR,
             show_alert=True,
         )

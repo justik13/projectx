@@ -42,7 +42,6 @@ from services.workers.heartbeat import set_bot_ref
 from bot.handlers.webhook import setup_webhook_routes
 from bot.handlers.admin.broadcast import resume_pending_broadcasts
 
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - [%(request_id)s] %(name)s: %(message)s",
@@ -57,7 +56,6 @@ for handler in root_logger.handlers:
 
 logger = logging.getLogger(__name__)
 
-
 #
 # Анти-спам кэш для глобальных error-алертов.
 #
@@ -68,7 +66,6 @@ _error_alert_cache: TTLCache[str, bool] = TTLCache(
     maxsize=10000,
     ttl=300.0,
 )
-
 
 _SECRET_PATTERNS = [
     (
@@ -92,6 +89,11 @@ _SECRET_PATTERNS = [
         re.compile(r"[A-Za-z0-9+/]{40,}={0,2}"),
         "[LONG_TOKEN_REDACTED]",
     ),
+    # ═══ НОВОЕ (Спринт 4.1): vpn:// URI с base64url ═══
+    (
+        re.compile(r"vpn://[A-Za-z0-9_-]{20,}"),
+        "[VPN_URI_REDACTED]",
+    ),
 ]
 
 
@@ -104,15 +106,14 @@ def _sanitize_text(text: str) -> str:
     - токены;
     - секреты;
     - пароли;
-    - длинные base64/JWT-подобные строки
-
+    - длинные base64/JWT-подобные строки;
+    - vpn:// URI (содержат приватные ключи WireGuard)
     не попадали в journalctl и админские алерты.
     """
     if not text:
         return ""
 
     sanitized = text
-
     for pattern, replacement in _SECRET_PATTERNS:
         sanitized = pattern.sub(replacement, sanitized)
 
@@ -121,10 +122,8 @@ def _sanitize_text(text: str) -> str:
 
 def _sanitize_short(text: str, limit: int = 200) -> str:
     sanitized = _sanitize_text(text)
-
     if len(sanitized) <= limit:
         return sanitized
-
     return sanitized[:limit] + "..."
 
 
@@ -175,15 +174,10 @@ async def global_error_handler(event: ErrorEvent, **kwargs) -> bool:
             _sanitize_short(str(exception), 200)
         )
 
-        error_msg = (
-            f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА БОТА</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔍 <b>Request ID:</b> <code>{request_id}</code>\n"
-            f"⚠️ <b>Тип:</b> <code>{error_type_safe}</code>\n"
-            f"📝 <b>Описание:</b> <i>{error_short}</i>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>Полный лог доступен через:\n"
-            f"<code>journalctl -u projectx-bot | grep {request_id}</code></i>"
+        error_msg = texts.ALERT_CRITICAL_BOT_ERROR.format(
+            request_id=request_id,
+            error_type=error_type_safe,
+            error_short=error_short,
         )
 
         alert_key = f"{error_type_safe}:{error_short}"
@@ -236,10 +230,8 @@ async def setup_bot_commands(bot: Bot):
     commands = [
         BotCommand(command="start", description="🚀 Запустить бота"),
     ]
-
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-
     logger.info("Bot commands configured")
 
 
@@ -248,7 +240,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
 
     bot = Bot(token=settings.BOT_TOKEN)
     storage = RedisStorage.from_url(settings.REDIS_URL)
-
     dp = Dispatcher(storage=storage)
 
     # Correlation/request_id.
@@ -274,7 +265,6 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     # User context and ban checks.
     dp.message.middleware(UserContextMiddleware())
     dp.callback_query.middleware(UserContextMiddleware())
-
     dp.message.middleware(BanCheckMiddleware())
     dp.callback_query.middleware(BanCheckMiddleware())
 
@@ -331,7 +321,6 @@ async def start_webhook_server(port: int):
     await site.start()
 
     logger.info("Webhook server started on 127.0.0.1:%d", port)
-
     return runner
 
 
@@ -402,7 +391,6 @@ async def main():
         set_bot_ref(bot)
 
         webhook_runner = None
-
         if settings.PLATEGA_MERCHANT_ID and settings.PLATEGA_SECRET:
             webhook_runner = await start_webhook_server(
                 settings.PLATEGA_WEBHOOK_PORT
@@ -426,7 +414,6 @@ async def main():
         await start_background_workers(bot)
 
         logger.info("Запуск polling...")
-
         polling_task = asyncio.create_task(dp.start_polling(bot))
         shutdown_task = asyncio.create_task(shutdown_event.wait())
 
@@ -438,7 +425,6 @@ async def main():
         if shutdown_event.is_set():
             logger.info("Shutdown requested, stopping polling...")
             await dp.stop_polling()
-
             polling_task.cancel()
             try:
                 await polling_task
@@ -458,7 +444,6 @@ async def main():
 
     finally:
         logger.info("Stopping background workers...")
-
         try:
             await stop_background_workers()
         except Exception as e:
@@ -473,14 +458,12 @@ async def main():
 
         try:
             from services.device_service import close_redis as close_device_redis
-
             await close_device_redis()
         except Exception as e:
             logger.error("Failed to close device Redis: %s", e)
 
         try:
             from services.payment_service import close_redis as close_payment_redis
-
             await close_payment_redis()
         except Exception as e:
             logger.error("Failed to close payment Redis: %s", e)
