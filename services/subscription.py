@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import Optional
 
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.constants import (
@@ -46,10 +47,8 @@ class SubscriptionService:
         telegram_id: int,
     ) -> bool:
         user = await get_user_by_telegram_id(session, telegram_id)
-
         if not user or user.is_banned or not user.subscription_end:
             return False
-
         return not is_expired(user.subscription_end)
 
     @staticmethod
@@ -75,19 +74,15 @@ class SubscriptionService:
 
         current_id = ref_id
         chain_visited = {telegram_id, ref_id}
-
         for _ in range(5):
             if not current_id:
                 break
-
             current_user = await get_user_by_telegram_id(
                 session,
                 current_id,
             )
-
             if not current_user or not current_user.referred_by:
                 break
-
             if current_user.referred_by in chain_visited:
                 logger.warning(
                     "Circular referral chain detected for user %s, "
@@ -96,7 +91,6 @@ class SubscriptionService:
                     ref_id,
                 )
                 return False
-
             chain_visited.add(current_user.referred_by)
             current_id = current_user.referred_by
 
@@ -134,9 +128,7 @@ class SubscriptionService:
             user.is_deleted = False
             user.deleted_at = None
             await session.flush()
-
             invalidate_user_cache(telegram_id)
-
             logger.info(
                 "Restored soft-deleted user %s on onboarding",
                 telegram_id,
@@ -144,11 +136,9 @@ class SubscriptionService:
 
         if user is not None:
             changed = False
-
             if username is not None and user.username != username:
                 user.username = username
                 changed = True
-
             if first_name is not None and user.first_name != first_name:
                 user.first_name = first_name
                 changed = True
@@ -165,11 +155,9 @@ class SubscriptionService:
                     telegram_id,
                     ref_id,
                 )
-
                 if is_valid:
                     user.referred_by = ref_id
                     changed = True
-
                     logger.info(
                         "Late referral binding: user %s bound to "
                         "referrer %s",
@@ -180,41 +168,63 @@ class SubscriptionService:
             if changed:
                 await session.flush()
                 invalidate_user_cache(telegram_id)
-
             return user
 
         referred_by = None
-
         if ref_id is not None:
             is_valid = await SubscriptionService._validate_referral(
                 session,
                 telegram_id,
                 ref_id,
             )
-
             if is_valid:
                 referred_by = ref_id
-
                 logger.info(
                     "New user %s referred by %s",
                     telegram_id,
                     ref_id,
                 )
 
-        user = await create_user(
-            session,
-            telegram_id,
-            username,
-            first_name,
-            referred_by,
-        )
+        #
+        # ИСПРАВЛЕНО (БАГ 1):
+        #
+        # Обёрнут create_user в try/except IntegrityError.
+        #
+        # Если два одновременных /start от нового пользователя
+        # пройдут get_user_by_telegram_id_any → None, оба попытаются
+        # create_user. Второй упадёт с IntegrityError (unique на
+        # telegram_id). Теперь вместо 500 ошибки мы делаем rollback
+        # и перечитываем пользователя, созданного первым запросом.
+        #
+        try:
+            user = await create_user(
+                session,
+                telegram_id,
+                username,
+                first_name,
+                referred_by,
+            )
+        except IntegrityError:
+            await session.rollback()
+            user = await get_user_by_telegram_id_any(
+                session,
+                telegram_id,
+            )
+            if user is not None and user.is_deleted:
+                user.is_deleted = False
+                user.deleted_at = None
+                await session.flush()
+            logger.info(
+                "process_onboarding: IntegrityError caught for "
+                "telegram_id=%s, re-read existing user",
+                telegram_id,
+            )
 
         #
         # Критично: иначе UserContextMiddleware может ещё 15 секунд
         # отдавать None для только что созданного пользователя.
         #
         invalidate_user_cache(telegram_id)
-
         return user
 
     @staticmethod
@@ -226,7 +236,6 @@ class SubscriptionService:
         new_tariff_id: Optional[int] = None,
     ) -> Optional[User]:
         user = await get_user_by_telegram_id(session, telegram_id)
-
         if not user:
             return None
 
@@ -235,7 +244,6 @@ class SubscriptionService:
                 session,
                 user.id,
             )
-
             if profiles_count > new_device_limit:
                 raise ValueError(
                     f"Cannot downgrade: {profiles_count} devices > "
@@ -244,7 +252,6 @@ class SubscriptionService:
                 )
 
         now = now_utc()
-
         had_active_subscription = bool(
             user.subscription_end and user.subscription_end > now
         )
@@ -265,7 +272,6 @@ class SubscriptionService:
                 if had_active_subscription
                 else now
             )
-
             new_end = (
                 PERMANENT_END_DATE
                 if days >= PERMANENT_SUBSCRIPTION_DAYS
@@ -273,7 +279,6 @@ class SubscriptionService:
             )
 
         user.subscription_end = new_end
-
         user.notified_3d = False
         user.notified_1d = False
         user.notified_2h = False
@@ -300,7 +305,6 @@ class SubscriptionService:
             if new_device_limit > old_device_limit:
                 user.device_creations_today = 0
                 user.last_creation_date = None
-
                 logger.info(
                     "extend_subscription: user %s upgraded from "
                     "%s to %s devices. Daily creations counter "
@@ -314,7 +318,6 @@ class SubscriptionService:
             user.current_tariff_id = new_tariff_id
 
         await session.flush()
-
         invalidate_user_cache(telegram_id)
 
         #
@@ -362,7 +365,6 @@ class SubscriptionService:
             .where(VPNProfile.id.in_(profile_ids))
             .values(is_active=target_active)
         )
-
         await session.flush()
 
         expires_ts = (
@@ -370,7 +372,6 @@ class SubscriptionService:
             if target_active
             else None
         )
-
         target_status = "active" if target_active else "disabled"
 
         queue_post_commit_task(
@@ -398,20 +399,17 @@ class SubscriptionService:
                     session,
                     user_id,
                 )
-
                 if not profiles:
                     return
 
                 server_ids = {p.server_id for p in profiles}
                 servers_map = {}
-
                 for sid in server_ids:
                     server = await get_server_by_id(session, sid)
                     if server and server.api_url and server.api_key:
                         servers_map[sid] = server
 
                 tasks = []
-
                 for profile in profiles:
                     server = servers_map.get(profile.server_id)
                     if not server:
@@ -452,11 +450,9 @@ class SubscriptionService:
                         *tasks,
                         return_exceptions=True,
                     )
-
                     success = sum(
                         1 for r in results if r is True
                     )
-
                     logger.info(
                         "Access state sync: %s/%s servers updated "
                         "for user_id=%s, status=%s",
@@ -465,7 +461,6 @@ class SubscriptionService:
                         user_id,
                         target_status,
                     )
-
         except Exception as e:
             logger.error(
                 "Access state sync failed for user_id=%s: %s",

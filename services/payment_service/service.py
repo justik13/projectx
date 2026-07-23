@@ -122,7 +122,6 @@ class PaymentService:
         }
 
         changed = False
-
         for field_name, field_value in snapshot_fields.items():
             if hasattr(payment, field_name):
                 setattr(payment, field_name, field_value)
@@ -187,7 +186,6 @@ class PaymentService:
         4. Если что-то не так, платёж переводится в manual review.
         """
         payment_obj = await session.get(Payment, payment_id)
-
         if not payment_obj:
             return False, "not_found"
 
@@ -199,15 +197,12 @@ class PaymentService:
             user_lock_key = (
                 f"lock:payment_bonus:{payment_obj.user_id}"
             )
-
             redis_lock = redis.lock(
                 user_lock_key,
                 timeout=30,
                 blocking_timeout=15,
             )
-
             acquired = await redis_lock.acquire()
-
             if not acquired:
                 logger.warning(
                     "Payment %s: failed to acquire Redis bonus lock. "
@@ -230,7 +225,6 @@ class PaymentService:
                     session,
                     payment_id,
                 )
-
                 if not payment:
                     return False, "not_found"
 
@@ -271,14 +265,12 @@ class PaymentService:
                             _send_paid_after_cancel_alert_now(s)
                         ),
                     )
-
                     queue_post_commit_task(
                         session,
                         lambda s=snapshot: (
                             _notify_client_paid_after_cancel_now(s)
                         ),
                     )
-
                     return True, "paid_after_cancel"
 
                 if payment.status == "refunded":
@@ -308,11 +300,9 @@ class PaymentService:
                 tariff = payment.tariff
 
                 manual_review_reason = None
-
                 duration_days = _get_payment_snapshot_duration(
                     payment
                 )
-
                 device_limit = _get_payment_snapshot_device_limit(
                     payment
                 )
@@ -372,7 +362,6 @@ class PaymentService:
                         payment_id,
                         e,
                     )
-
                     await PaymentService._mark_manual_review_direct(
                         session,
                         payment,
@@ -387,7 +376,6 @@ class PaymentService:
                         e,
                         exc_info=True,
                     )
-
                     await PaymentService._mark_manual_review_direct(
                         session,
                         payment,
@@ -403,13 +391,11 @@ class PaymentService:
                     session,
                     user.id,
                 )
-
                 successful_payments = [
                     p
                     for p in payments
                     if p.status == "completed"
                 ]
-
                 is_first_payment = len(successful_payments) == 1
 
                 if user.referred_by:
@@ -430,7 +416,6 @@ class PaymentService:
 
                 user.last_payment_at = now_utc()
                 await session.flush()
-
                 invalidate_user_cache(user.telegram_id)
 
                 try:
@@ -457,7 +442,6 @@ class PaymentService:
                     payment_id,
                     user.telegram_id,
                 )
-
                 return True, "success"
 
         except Exception as e:
@@ -505,7 +489,6 @@ class PaymentService:
                     session,
                     payment_id,
                 )
-
                 if not payment:
                     return False, "Платёж не найден"
 
@@ -519,7 +502,6 @@ class PaymentService:
                     return False, "Недопустимый статус платежа"
 
                 user = payment.user
-
                 if not user:
                     return False, "Пользователь не найден"
 
@@ -532,7 +514,6 @@ class PaymentService:
                 duration_days = _get_payment_snapshot_duration(
                     payment
                 )
-
                 device_limit = _get_payment_snapshot_device_limit(
                     payment
                 )
@@ -541,10 +522,8 @@ class PaymentService:
                     return False, "Не найдены условия покупки"
 
                 payment.status = "completed"
-
                 if not payment.paid_at:
                     payment.paid_at = now_utc()
-
                 await session.flush()
 
                 await _log_event_safe(
@@ -573,14 +552,12 @@ class PaymentService:
                         payment_id,
                         e,
                     )
-
                     await PaymentService._mark_manual_review_direct(
                         session,
                         payment,
                         "device_limit_exceeded",
                         "force_grant_payment",
                     )
-
                     return False, "Превышен лимит устройств"
                 except Exception as e:
                     logger.error(
@@ -590,27 +567,23 @@ class PaymentService:
                         e,
                         exc_info=True,
                     )
-
                     await PaymentService._mark_manual_review_direct(
                         session,
                         payment,
                         "status_failed",
                         "force_grant_payment",
                     )
-
                     return False, f"Ошибка продления: {e}"
 
                 payments = await get_user_payments(
                     session,
                     user.id,
                 )
-
                 successful_payments = [
                     p
                     for p in payments
                     if p.status == "completed"
                 ]
-
                 is_first_payment = len(successful_payments) == 1
 
                 if user.referred_by:
@@ -631,7 +604,6 @@ class PaymentService:
 
                 user.last_payment_at = now_utc()
                 await session.flush()
-
                 invalidate_user_cache(user.telegram_id)
 
                 try:
@@ -688,7 +660,6 @@ class PaymentService:
         settings = get_settings()
 
         decimal_amount = _to_decimal(amount)
-
         if decimal_amount is None:
             logger.error(
                 "create_platega_payment: invalid amount %s",
@@ -697,7 +668,6 @@ class PaymentService:
             return None, None
 
         tariff = await get_tariff_by_id(session, tariff_id)
-
         if not tariff:
             logger.error(
                 "create_platega_payment: tariff %s not found",
@@ -727,21 +697,16 @@ class PaymentService:
         )
 
         description = f"Payment #{payment.id}"
-
         clean_username = bot_username.lstrip("@")
-
         return_url = settings.PLATEGA_RETURN_URL.format(
             bot_username=clean_username,
         )
-
         failed_url = settings.PLATEGA_FAILED_URL.format(
             bot_username=clean_username,
         )
-
         payload = f"payment_{payment.id}"
 
         client = PlategaClient()
-
         transaction = await client.create_transaction(
             amount=float(decimal_amount),
             currency="RUB",
@@ -754,7 +719,6 @@ class PaymentService:
         if not transaction:
             payment.status = "failed"
             payment.manual_review_reason = "payment_create_error"
-
             try:
                 await session.flush()
             except Exception:
@@ -786,7 +750,6 @@ class PaymentService:
                     "Failed to log payment failure to audit: %s",
                     e,
                 )
-
             return None, None
 
         external_id = (
@@ -795,7 +758,6 @@ class PaymentService:
             or transaction.get("paymentId")
             or transaction.get("invoiceId")
         )
-
         payment_url = (
             transaction.get("redirect")
             or transaction.get("redirectUrl")
@@ -807,7 +769,6 @@ class PaymentService:
         if external_id is None or not payment_url:
             payment.status = "failed"
             payment.manual_review_reason = "payment_create_error"
-
             try:
                 await session.flush()
             except Exception:
@@ -839,14 +800,12 @@ class PaymentService:
                     "Failed to log payment failure to audit: %s",
                     e,
                 )
-
             return None, None
 
         payment.external_id = str(external_id)
         payment.payment_url = str(payment_url)
 
         raw_payment_method = transaction.get("paymentMethod")
-
         payment.payment_method = (
             str(raw_payment_method)
             if raw_payment_method is not None
@@ -854,7 +813,6 @@ class PaymentService:
         )
 
         await session.flush()
-
         return payment, None
 
     @staticmethod
@@ -867,6 +825,19 @@ class PaymentService:
         callback_payload: str | None = None,
         callback_currency: str | None = None,
     ) -> tuple:
+        #
+        # ИСПРАВЛЕНО (БАГ 2):
+        #
+        # Добавлен .with_for_update() к запросу payment.
+        #
+        # Раньше CANCELED-ветка читала payment без блокировки строки.
+        # При одновременных CONFIRMED + CANCELED callback'ах оба могли
+        # прочитать status="pending", и CANCELED мог перезаписать
+        # completed на cancelled после того, как CONFIRMED закоммитил.
+        #
+        # Теперь SELECT ... FOR UPDATE блокирует строку, и второй
+        # callback дождётся завершения первого перед чтением.
+        #
         stmt = (
             select(Payment)
             .options(
@@ -874,8 +845,8 @@ class PaymentService:
                 selectinload(Payment.tariff),
             )
             .where(Payment.external_id == transaction_id)
+            .with_for_update()
         )
-
         result = await session.execute(stmt)
         payment = result.scalar_one_or_none()
 
@@ -941,14 +912,12 @@ class PaymentService:
                         _send_paid_after_cancel_alert_now(s)
                     ),
                 )
-
                 queue_post_commit_task(
                     session,
                     lambda s=snapshot: (
                         _notify_client_paid_after_cancel_now(s)
                     ),
                 )
-
                 return True, "paid_after_cancel"
 
             if payment.status == "refunded":
@@ -964,11 +933,9 @@ class PaymentService:
             #
             if callback_amount is None:
                 client = PlategaClient()
-
                 status_data = await client.check_status(
                     transaction_id,
                 )
-
                 if (
                     status_data
                     and status_data.get("amount") is not None
@@ -976,10 +943,8 @@ class PaymentService:
                     recovered = _to_decimal(
                         status_data["amount"]
                     )
-
                     if recovered is not None:
                         callback_amount = recovered
-
                         logger.info(
                             "Payment provider callback: amount "
                             "recovered via API check_status: %s "
@@ -994,18 +959,15 @@ class PaymentService:
                     "and API verification failed for transaction=%s",
                     transaction_id,
                 )
-
                 await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_missing",
                     source="platega_callback",
                 )
-
                 return False, "manual_review"
 
             callback_decimal = _to_decimal(callback_amount)
-
             if callback_decimal is None:
                 logger.error(
                     "Payment provider callback: invalid callback "
@@ -1013,14 +975,12 @@ class PaymentService:
                     callback_amount,
                     transaction_id,
                 )
-
                 await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_mismatch",
                     source="platega_callback",
                 )
-
                 return False, "manual_review"
 
             #
@@ -1035,14 +995,12 @@ class PaymentService:
                     payment.id,
                     transaction_id,
                 )
-
                 await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "amount_mismatch",
                     source="platega_callback",
                 )
-
                 return False, "manual_review"
 
             #
@@ -1052,11 +1010,9 @@ class PaymentService:
                 callback_currency_norm = str(
                     callback_currency
                 ).upper()
-
                 payment_currency_norm = str(
                     payment.currency
                 ).upper()
-
                 if (
                     payment_currency_norm
                     != callback_currency_norm
@@ -1070,18 +1026,15 @@ class PaymentService:
                         payment.id,
                         transaction_id,
                     )
-
                     await PaymentService._set_manual_review(
                         session,
                         payment.id,
                         "currency_mismatch",
                         source="platega_callback",
                     )
-
                     return False, "manual_review"
 
             expected_payload = f"payment_{payment.id}"
-
             if (
                 callback_payload not in (None, "")
                 and callback_payload != expected_payload
@@ -1093,14 +1046,12 @@ class PaymentService:
                     callback_payload,
                     payment.id,
                 )
-
                 await PaymentService._set_manual_review(
                     session,
                     payment.id,
                     "payload_mismatch",
                     source="platega_callback",
                 )
-
                 return False, "manual_review"
 
             success, result_code = (
@@ -1109,7 +1060,6 @@ class PaymentService:
                     payment.id,
                 )
             )
-
             return success, result_code
 
         elif status == "CANCELED":
@@ -1135,7 +1085,6 @@ class PaymentService:
                     "for completed payment %s",
                     payment.id,
                 )
-
                 snapshot = _build_payment_snapshot(payment)
 
                 await _log_event_safe(
@@ -1167,7 +1116,6 @@ class PaymentService:
                         )
                     ),
                 )
-
                 return True, "manual_review"
 
             payment.status = "cancelled"
@@ -1199,7 +1147,6 @@ class PaymentService:
                     "Failed to log payment cancellation to audit: %s",
                     e,
                 )
-
             return True, "success"
 
         elif status == "CHARGEBACKED":
@@ -1213,7 +1160,6 @@ class PaymentService:
             "Unknown payment provider status: %s",
             status,
         )
-
         return False, "error"
 
     @staticmethod
@@ -1225,7 +1171,6 @@ class PaymentService:
             session,
             payment_id,
         )
-
         if not payment or not payment.external_id:
             return False, "not_found"
 
@@ -1245,13 +1190,10 @@ class PaymentService:
             status_data = await client.check_status(
                 payment.external_id,
             )
-
             if status_data:
                 provider_status = status_data.get("status")
-
                 if provider_status == "CONFIRMED":
                     callback_amount = status_data.get("amount")
-
                     if callback_amount is None:
                         logger.error(
                             "check_platega_payment: cancelled payment "
@@ -1259,20 +1201,17 @@ class PaymentService:
                             "provider. Moving to manual review.",
                             payment.id,
                         )
-
                         await PaymentService._set_manual_review(
                             session,
                             payment.id,
                             "amount_missing",
                             source="check_platega_payment_cancelled",
                         )
-
                         return False, "manual_review"
 
                     callback_decimal = _to_decimal(
                         callback_amount
                     )
-
                     if (
                         callback_decimal is None
                         or payment.amount != callback_decimal
@@ -1283,22 +1222,18 @@ class PaymentService:
                             "amount_mismatch",
                             source="check_platega_payment_cancelled",
                         )
-
                         return False, "manual_review"
 
                     callback_currency = status_data.get(
                         "currency"
                     )
-
                     if callback_currency:
                         callback_currency_norm = str(
                             callback_currency
                         ).upper()
-
                         payment_currency_norm = str(
                             payment.currency
                         ).upper()
-
                         if (
                             payment_currency_norm
                             != callback_currency_norm
@@ -1311,7 +1246,6 @@ class PaymentService:
                                     "check_platega_payment_cancelled"
                                 ),
                             )
-
                             return False, "manual_review"
 
                     return (
@@ -1345,7 +1279,6 @@ class PaymentService:
         status_data = await client.check_status(
             payment.external_id,
         )
-
         if not status_data:
             return False, "api_error"
 
@@ -1353,7 +1286,6 @@ class PaymentService:
 
         if status == "CONFIRMED":
             callback_amount = status_data.get("amount")
-
             if callback_amount is None:
                 await PaymentService._set_manual_review(
                     session,
@@ -1361,11 +1293,9 @@ class PaymentService:
                     "amount_missing",
                     source="check_platega_payment",
                 )
-
                 return False, "manual_review"
 
             callback_decimal = _to_decimal(callback_amount)
-
             if (
                 callback_decimal is None
                 or payment.amount != callback_decimal
@@ -1376,20 +1306,16 @@ class PaymentService:
                     "amount_mismatch",
                     source="check_platega_payment",
                 )
-
                 return False, "manual_review"
 
             callback_currency = status_data.get("currency")
-
             if callback_currency:
                 callback_currency_norm = str(
                     callback_currency
                 ).upper()
-
                 payment_currency_norm = str(
                     payment.currency
                 ).upper()
-
                 if (
                     payment_currency_norm
                     != callback_currency_norm
@@ -1400,7 +1326,6 @@ class PaymentService:
                         "currency_mismatch",
                         source="check_platega_payment",
                     )
-
                     return False, "manual_review"
 
             success, result_code = (
@@ -1409,7 +1334,6 @@ class PaymentService:
                     payment.id,
                 )
             )
-
             return success, result_code
 
         elif status == "CANCELED":
@@ -1419,7 +1343,6 @@ class PaymentService:
                     "for completed payment %s",
                     payment.id,
                 )
-
                 snapshot = _build_payment_snapshot(payment)
                 transaction_id = payment.external_id or "—"
 
@@ -1453,7 +1376,6 @@ class PaymentService:
                         )
                     ),
                 )
-
                 return False, "manual_review"
 
             if payment.status != "cancelled":
@@ -1486,7 +1408,6 @@ class PaymentService:
                         "Failed to log payment cancellation to audit: %s",
                         e,
                     )
-
             return False, "cancelled"
 
         elif status == "CHARGEBACKED":
@@ -1528,22 +1449,18 @@ class PaymentService:
                 manual_review_reason=reason,
             )
         )
-
         result = await session.execute(stmt)
         await session.flush()
 
         if result.rowcount == 0:
             current = await session.get(Payment, payment_id)
-
             if current and current.status == "completed":
                 return True, "already_processed"
-
             if (
                 current
                 and current.status == "requires_manual_review"
             ):
                 return True, "manual_review"
-
             return (
                 False,
                 current.status if current else "not_found",
@@ -1597,7 +1514,6 @@ class PaymentService:
                     session,
                     payment_id,
                 )
-
                 if not payment:
                     return False, "not_found"
 
@@ -1610,10 +1526,8 @@ class PaymentService:
                     return True, "already_processed"
 
                 was_completed = payment.status == "completed"
-
                 payment.status = "refunded"
                 payment.manual_review_reason = None
-
                 await session.flush()
 
                 await _log_event_safe(
@@ -1626,7 +1540,6 @@ class PaymentService:
                 )
 
                 user = payment.user
-
                 if user:
                     current_time = now_utc()
 
@@ -1638,7 +1551,6 @@ class PaymentService:
                         user.subscription_end = current_time
                         user.current_tariff_id = None
                         user.device_limit = 0
-
                         await session.flush()
 
                         #
@@ -1648,7 +1560,6 @@ class PaymentService:
                             _get_payment_snapshot_duration(payment)
                             or 0
                         )
-
                         if (
                             user.referred_by
                             and duration_days >= 30
@@ -1671,7 +1582,6 @@ class PaymentService:
                                         )
                                     )
                                 )
-
                                 was_first_payment = (
                                     completed_before == 0
                                 )
@@ -1689,7 +1599,6 @@ class PaymentService:
                                         user.referred_by,
                                     )
                                 )
-
                                 if (
                                     referrer
                                     and bonus_referrer > 0
@@ -1752,7 +1661,6 @@ class PaymentService:
                                             days=bonus_user
                                         )
                                     )
-
                                     logger.info(
                                         "Chargeback: rolled back "
                                         "first-purchase user bonus "
@@ -1789,7 +1697,6 @@ class PaymentService:
                                 e,
                                 exc_info=True,
                             )
-
                     else:
                         logger.warning(
                             "Chargeback for non-completed payment %s: "
@@ -1835,7 +1742,6 @@ class PaymentService:
                         _send_chargeback_alert_now(s, tid)
                     ),
                 )
-
                 queue_post_commit_task(
                     session,
                     lambda s=snapshot: (
