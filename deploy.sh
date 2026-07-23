@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-IFS=$'\n\t'
+IFS=$'
+\t'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -68,10 +69,10 @@ update_redis_env_if_exists() {
 rollback() {
     local step="$1"
     local error_msg="$2"
-    echo -e "${RED}═══════════════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
+    echo -e "${RED}═══════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}🚨 ROLLBACK TRIGGERED at step: $step${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}Error: $error_msg${NC}" | tee -a "$ROLLBACK_LOG"
-    echo -e "${RED}═══════════════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
+    echo -e "${RED}═══════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
 
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         systemctl stop "$SERVICE_NAME" 2>/dev/null || true
@@ -139,6 +140,7 @@ install_dependencies() {
 
     local install_log
     install_log=$(mktemp)
+
     if ! apt-get install -y \
         python3 python3-venv python3-pip python3-dev \
         git curl wget rsync build-essential cron logrotate \
@@ -150,6 +152,7 @@ install_dependencies() {
 $(tail -20 "$install_log")"
     fi
     rm -f "$install_log"
+
     success "Системные зависимости установлены"
 
     if ! id "projectx" &>/dev/null; then
@@ -185,6 +188,7 @@ setup_postgresql() {
             error "PostgreSQL не слушает порт $PG_PORT после 15 секунд ожидания. Проверьте: journalctl -u postgresql"
         fi
     done
+
     success "PostgreSQL запущен и слушает порт $PG_PORT"
 
     PG_PASS_FILE="$(mktemp /tmp/projectx_pg_pass.XXXXXX)"
@@ -196,17 +200,17 @@ setup_postgresql() {
         echo ""
         [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
 
-        # Валидация: пробуем подключиться
         if ! PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$PG_PORT" -U projectx -d projectx_bot -c "SELECT 1;" >/dev/null 2>&1; then
             error "Не удалось подключиться к БД с указанным паролем. Проверьте пароль."
         fi
         success "Подключение к существующей БД подтверждено"
-
-        printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
+        printf '%s
+' "$DB_PASSWORD" > "$PG_PASS_FILE"
         return
     fi
 
     log "Создание пользователя и базы данных PostgreSQL..."
+
     read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD
     echo ""
     [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
@@ -231,14 +235,14 @@ EOF
         error "Не удалось создать БД."
     fi
 
-    # Валидация: пробуем подключиться
     sleep 1
     if ! PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$PG_PORT" -U projectx -d projectx_bot -c "SELECT 1;" >/dev/null 2>&1; then
         error "БД создана, но подключение не проходит. Проверьте pg_hba.conf."
     fi
 
     success "Пользователь projectx и база projectx_bot созданы и проверены"
-    printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
+    printf '%s
+' "$DB_PASSWORD" > "$PG_PASS_FILE"
 }
 
 setup_redis() {
@@ -249,13 +253,10 @@ setup_redis() {
         systemctl enable redis-server || true
     fi
 
-    #
-    # Если в существующем .env уже есть REDIS_PASSWORD, переиспользуем его.
-    # Иначе генерируем новый пароль.
-    #
     if [[ -f "$PROJECT_DIR/.env" ]]; then
         REDIS_PASSWORD=$(grep '^REDIS_PASSWORD=' "$PROJECT_DIR/.env" 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
     fi
+
     if [[ -z "$REDIS_PASSWORD" ]]; then
         REDIS_PASSWORD=$(openssl rand -hex 32)
     fi
@@ -288,15 +289,9 @@ setup_redis() {
         fi
     fi
 
-    #
-    # Если .env уже существует, сразу обновляем в нём Redis-пароль,
-    # даже если позже пользователь откажется перезаписывать .env целиком.
-    #
     update_redis_env_if_exists
 
-    # Ждём, пока Redis полностью поднимется после рестарта
     sleep 2
-
     local redis_check=0
     for i in $(seq 1 10); do
         if redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping 2>/dev/null | grep -q "PONG"; then
@@ -305,9 +300,11 @@ setup_redis() {
         fi
         sleep 1
     done
+
     if [[ $redis_check -eq 0 ]]; then
         error "Redis не отвечает после настройки."
     fi
+
     success "Redis настроен, запущен и защищён паролем"
 }
 
@@ -384,6 +381,7 @@ migrate_to_opt() {
 
 setup_venv() {
     log "Настройка Python VENV..."
+
     [ ! -d "$VENV_DIR" ] && python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
@@ -393,6 +391,7 @@ setup_venv() {
         error "Ошибка установки pip. Лог: $pip_log
 $(tail -20 "$pip_log")"
     fi
+
     success "Зависимости Python установлены"
 }
 
@@ -411,7 +410,6 @@ setup_env() {
     echo ""
     [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
 
-    # Базовая валидация формата токена
     if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]]; then
         warn "Токен не похож на стандартный формат Telegram (число:строка). Убедитесь, что это корректный токен."
     fi
@@ -424,16 +422,16 @@ setup_env() {
     read -p "Введите SUPPORT_USERNAME: " SUPPORT_USERNAME
     SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
 
-    echo -e "${BLUE}[4/4]${NC} Platega Merchant ID (Enter для пропуска)"
-    read -p "Введите ID: " PLATEGA_MERCHANT_ID
-    PLATEGA_SECRET=""
-    PLATEGA_CALLBACK_DOMAIN=""
-    if [ -n "$PLATEGA_MERCHANT_ID" ]; then
-        read -s -p "Введите PLATEGA_SECRET (скрыт): " PLATEGA_SECRET
+    #
+    # ИСПРАВЛЕНО: YooKassa вместо Platega.
+    #
+    echo -e "${BLUE}[4/4]${NC} YooKassa (Enter для пропуска)"
+    read -p "Введите YOOKASSA_SHOP_ID: " YOOKASSA_SHOP_ID
+    YOOKASSA_SECRET_KEY=""
+    if [ -n "$YOOKASSA_SHOP_ID" ]; then
+        read -s -p "Введите YOOKASSA_SECRET_KEY (скрыт): " YOOKASSA_SECRET_KEY
         echo ""
-        [ -z "$PLATEGA_SECRET" ] && error "PLATEGA_SECRET обязателен"
-        read -p "Введите домен для callback: " PLATEGA_CALLBACK_DOMAIN
-        [ -z "$PLATEGA_CALLBACK_DOMAIN" ] && error "Домен обязателен"
+        [ -z "$YOOKASSA_SECRET_KEY" ] && error "YOOKASSA_SECRET_KEY обязателен при указанном YOOKASSA_SHOP_ID"
     fi
 
     local EXISTING_KEY=""
@@ -487,32 +485,24 @@ setup_env() {
     #
     # Production-safe defaults для SSRF protection.
     #
-    # Если Amnezia API находится локально, например:
-    #   http://127.0.0.1:4001
-    # то при необходимости можно вручную изменить:
-    #   ALLOW_LOCAL_HTTP=true
-    #
-    # Для внешнего HTTPS API рекомендуется оставить:
-    #   ALLOW_LOCAL_HTTP=false
-    #   ALLOW_LOCAL_HTTPS=false
-    #
     write_env_var "ALLOW_LOCAL_HTTP" "false"
     write_env_var "ALLOW_LOCAL_HTTPS" "false"
 
     write_env_var "REDIS_KEY_PREFIX" "projectx_bot:"
 
-    if [ -n "$PLATEGA_MERCHANT_ID" ]; then
-        local CALLBACK_URL="https://${PLATEGA_CALLBACK_DOMAIN}/webhook/platega"
-        write_env_var "PLATEGA_MERCHANT_ID" "$PLATEGA_MERCHANT_ID"
-        write_env_var "PLATEGA_SECRET" "$PLATEGA_SECRET"
-        write_env_var "PLATEGA_CALLBACK_URL" "$CALLBACK_URL"
-        write_env_var "PLATEGA_WEBHOOK_PORT" "8080"
+    #
+    # ИСПРАВЛЕНО: YooKassa вместо Platega.
+    #
+    if [ -n "$YOOKASSA_SHOP_ID" ]; then
+        write_env_var "YOOKASSA_SHOP_ID" "$YOOKASSA_SHOP_ID"
+        write_env_var "YOOKASSA_SECRET_KEY" "$YOOKASSA_SECRET_KEY"
+        write_env_var "YOOKASSA_RETURN_URL" "https://t.me/\${BOT_USERNAME}"
+        write_env_var "YOOKASSA_WEBHOOK_PORT" "8080"
     fi
 
     chown projectx:projectx "$PROJECT_DIR/.env"
     chmod 600 "$PROJECT_DIR/.env"
 
-    # Валидация: проверяем, что .env не пустой и содержит ключевые поля
     if [[ ! -s "$PROJECT_DIR/.env" ]]; then
         error ".env файл пуст после записи!"
     fi
@@ -551,11 +541,13 @@ asyncio.run(init_db())
         warn "Ошибка инициализации БД"
         return 1
     fi
+
     success "БД инициализирована"
 }
 
 setup_systemd() {
     log "Настройка systemd сервиса..."
+
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
     cat > "$SERVICE_FILE" << EOF
@@ -586,31 +578,35 @@ EOF
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+
     success "Systemd настроен"
 }
 
 setup_nginx_ssl() {
-    if ! grep -q "PLATEGA_CALLBACK_URL" "$PROJECT_DIR/.env" 2>/dev/null; then
+    #
+    # ИСПРАВЛЕНО: YooKassa вместо Platega.
+    #
+    if ! grep -q "YOOKASSA_SHOP_ID" "$PROJECT_DIR/.env" 2>/dev/null; then
         return
     fi
 
-    local URL
-    URL=$(grep "^PLATEGA_CALLBACK_URL=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
-    local DOMAIN
-    DOMAIN=$(echo "$URL" | sed -E 's|https?://([^/:]+).*|\1|')
-    [ -z "$DOMAIN" ] && return
+    local SHOP_ID
+    SHOP_ID=$(grep "^YOOKASSA_SHOP_ID=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
+    [ -z "$SHOP_ID" ] && return
 
     local WEBHOOK_PORT
-    WEBHOOK_PORT=$(grep "^PLATEGA_WEBHOOK_PORT=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
+    WEBHOOK_PORT=$(grep "^YOOKASSA_WEBHOOK_PORT=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
     WEBHOOK_PORT=${WEBHOOK_PORT:-8080}
 
-    log "Настройка Nginx для $DOMAIN"
+    log "Настройка Nginx для YooKassa webhook"
 
-    # Проверяем, что nginx установлен
     if ! command -v nginx &>/dev/null; then
         warn "Nginx не установлен, пропускаю настройку reverse proxy"
         return
     fi
+
+    read -p "Домен для webhook (например: api.example.com): " DOMAIN
+    [ -z "$DOMAIN" ] && return
 
     rm -f /etc/nginx/sites-enabled/default
 
@@ -621,7 +617,12 @@ server {
     listen 80;
     server_name $DOMAIN;
 
-    location /webhook/platega {
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        allow all;
+    }
+
+    location /webhook/yookassa {
         limit_req zone=mylimit burst=20 nodelay;
         proxy_pass http://127.0.0.1:${WEBHOOK_PORT};
         proxy_set_header Host \$host;
@@ -657,17 +658,20 @@ NGINXEOF
     if ! timeout 120 certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" --redirect >/dev/null 2>&1; then
         error "SSL не получен. Платёжный webhook нельзя считать готовым."
     fi
+
     success "SSL получен и Nginx переведён на HTTPS"
 }
 
 setup_backup() {
     log "Настройка бэкапов..."
+
     mkdir -p "$BACKUP_DIR"
     chown projectx:projectx "$BACKUP_DIR"
 
     cat > /usr/local/bin/projectx-backup.sh << 'EOF'
 #!/bin/bash
 set -euo pipefail
+
 DIR="/root/backups/projectx"
 DATE=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$DIR"
@@ -690,6 +694,7 @@ EOF
     cat > /usr/local/bin/projectx-restore.sh << 'EOF'
 #!/bin/bash
 set -euo pipefail
+
 DIR="/root/backups/projectx"
 SERVICE_NAME="projectx-bot"
 PROJECT_DIR="/opt/projectx-bot"
@@ -742,6 +747,7 @@ EOF
     chmod +x /usr/local/bin/projectx-restore.sh
 
     (crontab -l 2>/dev/null | grep -v "projectx-backup" || true; echo "0 3 * * * /usr/local/bin/projectx-backup.sh") | crontab -
+
     success "Автобэкапы и restore-скрипт настроены"
 }
 
@@ -755,12 +761,10 @@ HEARTBEAT_FILE="/opt/projectx-bot/.heartbeat"
 MAX_AGE=300
 SERVICE_NAME="projectx-bot"
 
-# Если сервис не enabled — не трогаем
 if [ "$(systemctl is-enabled $SERVICE_NAME 2>/dev/null)" != "enabled" ]; then
     exit 0
 fi
 
-# Если сервис не активен — пытаемся запустить
 if ! systemctl is-active --quiet $SERVICE_NAME; then
     COUNT=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
     if [ "$COUNT" -ge 5 ]; then
@@ -771,24 +775,15 @@ if ! systemctl is-active --quiet $SERVICE_NAME; then
     exit 0
 fi
 
-# Сервис активен — проверяем heartbeat
 NOW=$(date +%s)
-
 if [ ! -f "$HEARTBEAT_FILE" ]; then
-    #
-    # Heartbeat-файл отсутствует.
-    # Даём grace period: если сервис запущен менее 5 минут назад,
-    # не перезапускаем (бот ещё инициализируется).
-    #
     SERVICE_START=$(systemctl show $SERVICE_NAME --property=ActiveEnterTimestampMonotonic 2>/dev/null | cut -d'=' -f2)
     if [[ -n "$SERVICE_START" && "$SERVICE_START" =~ ^[0-9]+$ ]]; then
-        # ActiveEnterTimestampMonotonic в микросекундах
         UPTIME_SEC=$(( (NOW * 1000000 - SERVICE_START) / 1000000 ))
         if [ "$UPTIME_SEC" -lt 300 ]; then
             exit 0
         fi
     fi
-
     COUNT=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
     if [ "$COUNT" -ge 5 ]; then
         exit 0
@@ -800,7 +795,6 @@ fi
 
 HB=$(awk '{print $1}' "$HEARTBEAT_FILE" 2>/dev/null)
 
-# Если heartbeat содержит STOPPED — сервис штатно остановлен, не трогаем
 if [[ "$HB" == "STOPPED" ]]; then
     exit 0
 fi
@@ -818,7 +812,6 @@ if [[ "$HB" =~ ^[0-9]+$ ]]; then
         rm -f "$CRASH_FILE"
     fi
 else
-    # Некорректное содержимое heartbeat
     COUNT=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
     if [ "$COUNT" -ge 5 ]; then
         exit 0
@@ -830,19 +823,21 @@ EOF
     chmod +x /usr/local/bin/projectx-healthcheck.sh
 
     (crontab -l 2>/dev/null | grep -v "projectx-healthcheck" || true; echo "*/5 * * * * /usr/local/bin/projectx-healthcheck.sh") | crontab -
+
     success "Healthcheck настроен"
 }
 
 start_bot() {
     log "Запуск бота..."
+
     systemctl start "$SERVICE_NAME"
 
     local wait_count=0
     local max_wait=30
+
     while [ $wait_count -lt $max_wait ]; do
         sleep 1
         if systemctl is-active --quiet "$SERVICE_NAME"; then
-            # Дополнительная проверка: сервис не упал сразу после старта
             sleep 3
             if systemctl is-active --quiet "$SERVICE_NAME"; then
                 success "Бот успешно запущен!"
@@ -857,8 +852,9 @@ start_bot() {
 }
 
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v8.2 (Hardened + Validated + Grace Period)${NC}
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v9.0 (YooKassa + Hardened + Validated)${NC}
 "
+
     mkdir -p /var/log "$SNAPSHOT_DIR"
     echo "=== Deploy started: $(date) ===" > "$LOG_FILE"
 

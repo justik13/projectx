@@ -30,6 +30,7 @@ from bot.middlewares import (
     PrivateChatMiddleware,
 )
 from bot.middlewares.ban_check import BanCheckMiddleware
+from bot.middlewares.clean_chat import stop_clean_chat_worker
 from config.settings import get_settings
 from database.connection import close_db, init_db
 from services.amnezia_client import close_http_session
@@ -41,7 +42,11 @@ from services.workers import (
 )
 from services.workers.heartbeat import set_bot_ref
 from bot.handlers.webhook import setup_webhook_routes
-from bot.handlers.admin.broadcast import resume_pending_broadcasts
+from bot.handlers.admin.broadcast import (
+    resume_pending_broadcasts,
+    _background_tasks,
+    _broadcast_stop_events,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +56,6 @@ logging.basicConfig(
     ),
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-
 root_logger = logging.getLogger()
 root_logger.addFilter(CorrelationFilter())
 for handler in root_logger.handlers:
@@ -117,7 +121,6 @@ async def global_error_handler(
     from bot.middlewares.correlation import (
         get_current_request_id,
     )
-
     request_id = get_current_request_id()
     exception = event.exception
     error_type = type(exception).__name__
@@ -131,9 +134,11 @@ async def global_error_handler(
         tb_text = "".join(tb_lines)
         tb_sanitized = _sanitize_text(tb_text)
         if len(tb_sanitized) > 4000:
-            tb_sanitized = tb_sanitized[:4000] + "\n...[truncated]"
+            tb_sanitized = tb_sanitized[:4000] + "
+...[truncated]"
         logger.critical(
-            "[%s] Unhandled exception: %s\n%s",
+            "[%s] Unhandled exception: %s
+%s",
             request_id, error_type, tb_sanitized,
         )
     except Exception:
@@ -292,7 +297,6 @@ def _validate_yookassa_config() -> bool:
     settings = get_settings()
     has_shop = bool(settings.YOOKASSA_SHOP_ID.strip())
     has_secret = bool(settings.YOOKASSA_SECRET_KEY.strip())
-
     if has_shop and not has_secret:
         logger.critical(
             "❌ YOOKASSA_SHOP_ID задан, но "
@@ -301,7 +305,6 @@ def _validate_yookassa_config() -> bool:
             "Укажите YOOKASSA_SECRET_KEY в .env."
         )
         return False
-
     if has_secret and not has_shop:
         logger.critical(
             "❌ YOOKASSA_SECRET_KEY задан, но "
@@ -309,8 +312,24 @@ def _validate_yookassa_config() -> bool:
             "Укажите оба параметра или удалите оба."
         )
         return False
-
     return True
+
+
+async def _stop_broadcast_tasks():
+    """
+    Останавливает фоновые задачи рассылки при shutdown.
+    """
+    for event in _broadcast_stop_events.values():
+        event.set()
+    tasks = list(_background_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=10)
+    logger.info(
+        "Broadcast tasks stopped (%s tasks)",
+        len(tasks),
+    )
 
 
 async def main():
@@ -320,7 +339,6 @@ async def main():
         if not settings.DB_ENCRYPTION_KEY:
             logger.critical("❌ DB_ENCRYPTION_KEY пуст!")
             return
-
         try:
             Fernet(settings.DB_ENCRYPTION_KEY.encode("utf-8"))
         except Exception as e:
@@ -412,7 +430,6 @@ async def main():
         logger.critical(
             "Fatal error in main: %s", e, exc_info=True,
         )
-
     finally:
         logger.info("Stopping background workers...")
         try:
@@ -422,10 +439,35 @@ async def main():
                 "Error stopping workers: %s", e,
             )
 
+        #
+        # ИСПРАВЛЕНО: остановка broadcast tasks.
+        #
+        # Раньше _background_tasks и _broadcast_stop_events
+        # не очищались при shutdown. Рассылка могла
+        # продолжать отправлять сообщения после shutdown.
+        #
+        try:
+            await _stop_broadcast_tasks()
+        except Exception as e:
+            logger.error(
+                "Error stopping broadcast tasks: %s", e,
+            )
+
+        #
+        # ИСПРАВЛЕНО: остановка CleanChat worker.
+        #
+        # Раньше _delete_worker_task не отменялся при shutdown.
+        #
+        try:
+            await stop_clean_chat_worker()
+        except Exception as e:
+            logger.error(
+                "Error stopping CleanChat worker: %s", e,
+            )
+
         logger.info("Cleaning up resources...")
         if "webhook_runner" in locals() and webhook_runner:
             await webhook_runner.cleanup()
-
         await close_http_session()
         await close_yookassa_session()
 

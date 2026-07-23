@@ -8,7 +8,7 @@ from .payment import (
     get_change_tariff_keyboard,
     get_payment_method_keyboard,
     get_payment_success_keyboard,
-    get_sbp_payment_keyboard,
+    get_yookassa_payment_keyboard,
 )
 from .admin.dashboard import (
     get_admin_menu,
@@ -54,7 +54,7 @@ __all__ = [
     "get_change_tariff_keyboard",
     "get_payment_method_keyboard",
     "get_payment_success_keyboard",
-    "get_sbp_payment_keyboard",
+    "get_yookassa_payment_keyboard",
     # admin dashboard
     "get_admin_menu",
     "get_audit_keyboard",

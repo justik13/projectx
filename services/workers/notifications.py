@@ -6,6 +6,7 @@ from datetime import timedelta
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from cachetools import TTLCache
 from sqlalchemy import or_, select
 
 from bot import texts
@@ -26,17 +27,18 @@ NOTIFICATION_START_DELAY = 60.0
 GRACE_PERIOD_HOURS = 48
 
 #
-# ИСПРАВЛЕНО: отслеживание последнего типа уведомления
-# для каждого пользователя.
+# ИСПРАВЛЕНО: TTLCache вместо бесконечного dict.
 #
-# Раньше один notification_retry_count использовался для всех
-# типов уведомлений (3d, 1d, 2h, expired, grace_12h).
-# Если 3d-уведомление не удалось 4 раза, 1d-уведомление тоже
-# ждало backoff 2^3 * 1800 = 4 часа.
+# Раньше _last_notification_type: dict[int, str] рос
+# бесконечно. Каждый пользователь, получивший уведомление,
+# добавлял запись. За год — десятки тысяч записей.
 #
-# Теперь при смене типа уведомления retry_count сбрасывается.
+# Теперь TTLCache с TTL=24 часа и maxsize=10000.
 #
-_last_notification_type: dict[int, str] = {}
+_last_notification_type: TTLCache[int, str] = TTLCache(
+    maxsize=10000,
+    ttl=86400,
+)
 
 
 class NotificationRateLimiter:
@@ -178,6 +180,7 @@ async def _send_pre_expiry_notifications(
 
     for i in range(0, len(user_ids), NOTIFICATION_BATCH_SIZE):
         batch_ids = user_ids[i : i + NOTIFICATION_BATCH_SIZE]
+
         async with session_scope() as session:
             users_result = await session.execute(
                 select(User).where(User.id.in_(batch_ids))
@@ -195,7 +198,6 @@ async def _send_pre_expiry_notifications(
                     continue
 
                 retry_count = user.notification_retry_count or 0
-
                 if retry_count >= MAX_RETRY_COUNT:
                     user.notified_3d = True
                     user.notified_1d = True
@@ -237,9 +239,6 @@ async def _send_pre_expiry_notifications(
                 if not msg:
                     continue
 
-                #
-                # ИСПРАВЛЕНО: сброс retry при смене типа.
-                #
                 _maybe_reset_retry_on_type_change(
                     user,
                     notification_type,
@@ -329,6 +328,7 @@ async def _send_post_expiry_notifications(
 
     for i in range(0, len(user_ids), NOTIFICATION_BATCH_SIZE):
         batch_ids = user_ids[i : i + NOTIFICATION_BATCH_SIZE]
+
         async with session_scope() as session:
             users_result = await session.execute(
                 select(User).where(User.id.in_(batch_ids))
@@ -350,7 +350,6 @@ async def _send_post_expiry_notifications(
                     continue
 
                 retry_count = user.notification_retry_count or 0
-
                 if retry_count >= MAX_RETRY_COUNT:
                     user.notified_expired = True
                     user.notified_grace_12h = True
@@ -386,9 +385,6 @@ async def _send_post_expiry_notifications(
                 if not msg:
                     continue
 
-                #
-                # ИСПРАВЛЕНО: сброс retry при смене типа.
-                #
                 _maybe_reset_retry_on_type_change(
                     user,
                     notification_type,

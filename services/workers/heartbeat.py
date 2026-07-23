@@ -4,21 +4,12 @@ import os
 import time
 from pathlib import Path
 
+from cachetools import TTLCache
 from services.amnezia_client import _circuit_breakers
 from config.settings import get_settings
 
 logger = logging.getLogger("BackgroundWorker")
 
-#
-# ИСПРАВЛЕНО: абсолютный путь вместо относительного.
-#
-# Раньше HEARTBEAT_FILE = Path("./.heartbeat").
-# Если working directory менялся, healthcheck-скрипт
-# не находил файл.
-#
-# Теперь путь определяется через переменную окружения
-# PROJECTX_DIR или через расположение самого файла.
-#
 _PROJECT_DIR = os.environ.get(
     "PROJECTX_DIR",
     os.path.dirname(
@@ -28,10 +19,21 @@ _PROJECT_DIR = os.environ.get(
     ),
 )
 HEARTBEAT_FILE = Path(_PROJECT_DIR) / ".heartbeat"
-
 HEARTBEAT_INTERVAL = 60.0
 
-_api_alert_sent: dict[str, float] = {}
+#
+# ИСПРАВЛЕНО: TTLCache вместо бесконечного dict.
+#
+# Раньше _api_alert_sent: dict[str, float] рос бесконечно.
+# Каждый server URL, у которого circuit breaker перешёл
+# в OPEN, добавлял запись. Записи не удалялись.
+#
+# Теперь TTLCache с TTL=2 часа и maxsize=1000.
+#
+_api_alert_sent: TTLCache[str, float] = TTLCache(
+    maxsize=1000,
+    ttl=7200,
+)
 _API_ALERT_COOLDOWN = 1800.0
 
 _bot_ref = None
@@ -93,11 +95,16 @@ async def _check_circuit_breakers():
             pass
 
         alert_msg = (
-            f"⚠️ <b>Сервер Amnezia недоступен!</b>\n"
-            f"🌍 <b>{server_name}</b>\n"
-            f"🔗 <code>{api_url}</code>\n"
-            f"❌ CircuitBreaker перешёл в OPEN\n"
-            f"🔄 Попытки восстановления каждые {cb.recovery_timeout:.0f}с\n"
+            f"⚠️ <b>Сервер Amnezia недоступен!</b>
+"
+            f"🌐 <b>{server_name}</b>
+"
+            f"🔗 <code>{api_url}</code>
+"
+            f"❌ CircuitBreaker перешёл в OPEN
+"
+            f"🔄 Попытки восстановления каждые {cb.recovery_timeout:.0f}с
+"
             f"💡 Проверьте сервер вручную"
         )
 
@@ -144,9 +151,11 @@ def _write_heartbeat(final: bool = False):
     try:
         temp_file = HEARTBEAT_FILE.with_suffix(".tmp")
         if final:
-            content = f"STOPPED {int(time.time())}\n"
+            content = f"STOPPED {int(time.time())}
+"
         else:
-            content = f"{int(time.time())}\n"
+            content = f"{int(time.time())}
+"
         with open(temp_file, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()

@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -11,7 +12,7 @@ from bot.keyboards import (
     get_back_button,
     get_payment_method_keyboard,
     get_payment_success_keyboard,
-    get_sbp_payment_keyboard,
+    get_yookassa_payment_keyboard,
 )
 from config.settings import get_settings
 from database.repositories.payments_repo import (
@@ -53,8 +54,8 @@ def _get_payment_tariff_name(payment) -> str:
     return get_tariff_display_name(device_limit)
 
 
-@router.callback_query(F.data.startswith("pay_sbp:"))
-async def pay_sbp(
+@router.callback_query(F.data.startswith("pay_yookassa:"))
+async def pay_yookassa(
     callback: CallbackQuery,
     state: FSMContext,
     session: AsyncSession = None,
@@ -96,7 +97,7 @@ async def pay_sbp(
             await render_hub(
                 callback.bot,
                 callback.message.chat.id,
-                texts.PAYMENT_SBP_UNAVAILABLE,
+                texts.PAYMENT_YOOKASSA_UNAVAILABLE,
                 get_back_button(back_callback),
             )
             return
@@ -141,11 +142,20 @@ async def pay_sbp(
             return
 
         bot_info = await callback.bot.get_me()
+
+        #
+        # ИСПРАВЛЕНО: Decimal вместо float для денег.
+        #
+        # float(199.99) → 199.99000000000001
+        # Decimal(str(...)) → Decimal('199.99')
+        #
+        amount = Decimal(str(tariff.price_rub))
+
         payment, _ = await PaymentService.create_yookassa_payment(
             session=session,
             user_id=db_user.id,
             tariff_id=tariff.id,
-            amount=float(tariff.price_rub),
+            amount=amount,
             telegram_id=db_user.telegram_id,
             bot_username=bot_info.username,
         )
@@ -161,15 +171,16 @@ async def pay_sbp(
 
         await state.update_data(payment_id=payment.id)
 
-        text = texts.PAYMENT_SBP_INSTRUCTIONS.format(
+        text = texts.PAYMENT_YOOKASSA_INSTRUCTIONS.format(
             amount=tariff.price_rub,
             payment_url=safe(payment.payment_url),
         )
+
         await render_hub(
             callback.bot,
             callback.message.chat.id,
             text,
-            get_sbp_payment_keyboard(
+            get_yookassa_payment_keyboard(
                 payment.payment_url,
                 payment.id,
                 tariff.id,
@@ -179,7 +190,7 @@ async def pay_sbp(
         )
 
     except Exception as e:
-        logger.error(f"pay_sbp error: {e}", exc_info=True)
+        logger.error(f"pay_yookassa error: {e}", exc_info=True)
         await callback.answer(
             texts.PAYMENT_CREATE_ERROR,
             show_alert=True,
@@ -247,6 +258,7 @@ async def check_payment_status(
             else "—"
         )
         tariff_name = _get_payment_tariff_name(payment)
+
         text = (
             texts.PAYMENT_SUCCESS_RENEW.format(
                 tariff_name=tariff_name,
@@ -258,6 +270,7 @@ async def check_payment_status(
                 valid_until=valid_until,
             )
         )
+
         await render_hub(
             callback.bot,
             callback.message.chat.id,
@@ -272,12 +285,14 @@ async def check_payment_status(
         )
         payment = await get_payment_by_id(session, payment_id)
         tariff_name = _get_payment_tariff_name(payment)
+
         text = texts.PAYMENT_PAID_AFTER_CANCEL.format(
             amount=payment.amount if payment else "—",
             currency=payment.currency if payment else "—",
             tariff_name=tariff_name,
             payment_id=payment_id,
         )
+
         builder = InlineKeyboardBuilder()
         builder.button(
             text="💬 Написать в поддержку",
@@ -288,6 +303,7 @@ async def check_payment_status(
             callback_data="back_to_main_menu",
         )
         builder.adjust(1, 1)
+
         await render_hub(
             callback.bot,
             callback.message.chat.id,
@@ -300,6 +316,7 @@ async def check_payment_status(
         support_username = (
             settings.SUPPORT_USERNAME.lstrip("@")
         )
+
         builder = InlineKeyboardBuilder()
         builder.button(
             text="💬 Написать в поддержку",
@@ -310,6 +327,7 @@ async def check_payment_status(
             callback_data="back_to_main_menu",
         )
         builder.adjust(1, 1)
+
         await render_hub(
             callback.bot,
             callback.message.chat.id,
@@ -321,14 +339,17 @@ async def check_payment_status(
         await callback.answer(
             texts.PAYMENT_API_ERROR, show_alert=True,
         )
+
     elif result_code == "refunded":
         await callback.answer(
             texts.PAYMENT_REFUNDED_SHORT, show_alert=True,
         )
+
     elif result_code == "cancelled":
         await callback.answer(
             texts.PAYMENT_CANCELLED_SHORT, show_alert=True,
         )
+
     else:
         await callback.answer(
             texts.PAYMENT_NOT_RECEIVED, show_alert=True,
@@ -394,16 +415,19 @@ async def cancel_invoice(
     if tariff and tariff.is_active:
         device_limit = getattr(tariff, "device_limit", 2)
         tariff_name = get_tariff_display_name(device_limit)
+
         text = texts.PAYMENT_CHECKOUT_TEXT.format(
             tariff_name=tariff_name,
             duration_days=tariff.duration_days,
             price_rub=tariff.price_rub,
         )
+
         settings = get_settings()
         sbp_enabled = bool(
             settings.YOOKASSA_SHOP_ID
             and settings.YOOKASSA_SECRET_KEY
         )
+
         await render_hub(
             callback.bot,
             callback.message.chat.id,

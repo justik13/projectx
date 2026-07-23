@@ -19,7 +19,7 @@ LOCKED_ACTION_PREFIXES = (
     # Генерация конфигураций.
     "download_conf:",
     # Платежи.
-    "pay_sbp:",
+    "pay_yookassa:",
     "check_payment:",
     "cancel_invoice:",
     # Админские действия с подпиской.
@@ -34,15 +34,11 @@ LOCKED_ACTION_PREFIXES = (
     "admin_manual_grant_apply:",
     # Админские действия с серверами.
     "confirm_server_delete:",
-    "admin_server_toggle:",
     "admin_server_toggle_apply:",
     # Админские действия с тарифами.
-    "admin_tariff_toggle:",
     "admin_tariff_toggle_apply:",
-    "admin_tariff_delete:",
     "admin_tariff_delete_apply:",
     # Режим технических работ.
-    "admin_maintenance_toggle",
     "admin_maintenance_toggle_apply",
     # Рассылка.
     "broadcast_send_all",
@@ -69,12 +65,10 @@ class ActionLockMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         callback_data = event.data or ""
-
         if not _is_locked_action(callback_data):
             return await handler(event, data)
 
         lock = get_user_action_lock(user_id)
-
         if lock.locked():
             try:
                 await event.answer(

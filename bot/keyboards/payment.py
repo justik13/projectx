@@ -42,7 +42,6 @@ def get_tariff_duration_keyboard(
             text=text,
             callback_data=f"select_tariff:{t.id}:{source}",
         )
-
     if source == "change":
         builder.button(
             text="← Назад",
@@ -92,17 +91,7 @@ def get_change_tariff_keyboard(
     *,
     is_subscription_active: bool = False,
 ) -> InlineKeyboardMarkup:
-    """
-    Клавиатура смены тарифа.
-
-    Если подписка активна, тарифы с меньшим лимитом
-    показываются с 🔒, но НЕ скрываются.
-
-    При нажатии пользователь получит понятное объяснение
-    в select_tariff_type (серверная проверка даунгрейда).
-    """
     builder = InlineKeyboardBuilder()
-
     grouped: dict[int, list] = {}
     for t in tariffs:
         limit = getattr(t, "device_limit", 2)
@@ -122,7 +111,6 @@ def get_change_tariff_keyboard(
             text=group_name,
             callback_data=f"select_tariff_type:{limit}:change",
         )
-
     builder.button(
         text="← Назад",
         callback_data="back_to_main_menu",
@@ -138,13 +126,11 @@ def get_payment_method_keyboard(
     source: str = "showcase",
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-
     if sbp_enabled:
         builder.button(
-            text="🏦 СБП / Карта",
-            callback_data=f"pay_sbp:{tariff_id}:{source}",
+            text="💳 Оплатить",
+            callback_data=f"pay_yookassa:{tariff_id}:{source}",
         )
-
     if source == "renew":
         builder.button(
             text="← Назад",
@@ -160,7 +146,6 @@ def get_payment_method_keyboard(
             text="← В главное меню",
             callback_data="back_to_main_menu",
         )
-
     builder.adjust(1)
     return builder.as_markup()
 
@@ -183,7 +168,7 @@ def get_payment_success_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_sbp_payment_keyboard(
+def get_yookassa_payment_keyboard(
     payment_url: str,
     payment_id: int,
     tariff_id: int,

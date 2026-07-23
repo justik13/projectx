@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
+from cachetools import TTLCache
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
@@ -18,7 +19,18 @@ from .common import _render_connections
 
 router = Router()
 
-_deleting_devices: set[int] = set()
+#
+# ИСПРАВЛЕНО: TTLCache вместо бесконечного set.
+#
+# Раньше _deleting_devices: set[int] рос бесконечно.
+# Если процесс упадёт между add и discard, при рестарте
+# set чистый (ок), но для единообразия и защиты от edge cases
+# используем TTLCache с TTL=5 минут.
+#
+_deleting_devices: TTLCache[int, bool] = TTLCache(
+    maxsize=5000,
+    ttl=300,
+)
 
 
 @router.callback_query(F.data.startswith("request_delete_device:"))
@@ -32,8 +44,8 @@ async def request_delete_device(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-
     profile = await get_profile_by_id(session, profile_id)
+
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -61,8 +73,8 @@ async def cancel_delete_device(
     await state.clear()
 
     profile_id = int(callback.data.split(":")[1])
-
     profile = await get_profile_by_id(session, profile_id)
+
     if not profile or not db_user or profile.user_id != db_user.id:
         await callback.answer(
             texts.ERROR_ACCESS_DENIED,
@@ -96,13 +108,14 @@ async def confirm_delete_device(
         )
         return
 
-    _deleting_devices.add(profile_id)
+    _deleting_devices[profile_id] = True
 
     try:
         await callback.answer(texts.DEVICE_DELETING_PROGRESS)
         await state.clear()
 
         profile = await get_profile_by_id(session, profile_id)
+
         if (
             not profile
             or not db_user
@@ -136,6 +149,5 @@ async def confirm_delete_device(
                 user,
                 session,
             )
-
     finally:
-        _deleting_devices.discard(profile_id)
+        _deleting_devices.pop(profile_id, None)

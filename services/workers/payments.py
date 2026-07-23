@@ -4,7 +4,7 @@ from datetime import timedelta
 
 from aiogram import Bot
 from cachetools import TTLCache
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from bot.constants import (
     STALE_PAYMENT_THRESHOLD,
@@ -13,14 +13,13 @@ from bot.constants import (
 from config.settings import get_settings
 from database.connection import session_scope
 from database.models import Payment, User
-from services.audit_service import AuditService
 from services.payment_service import PaymentService
 from utils.datetime_helpers import now_utc
 
 logger = logging.getLogger("BackgroundWorker")
 
 #
-# ИСПРАВЛЕНО: TTLCache вместо бесконечного set.
+# TTLCache вместо бесконечного set.
 #
 # Раньше _alerted_stale_payments: set[int] рос бесконечно.
 # intersection_update чистил удалённые, но ID завершённых
@@ -117,7 +116,8 @@ async def stale_payments_checker_loop(
 async def _process_stale_payments(bot: Bot, settings):
     current_time = now_utc()
     threshold = current_time - timedelta(hours=1)
-    sbp_payment_ids = []
+
+    yookassa_payment_ids = []
 
     async with session_scope() as session:
         stmt = (
@@ -132,13 +132,13 @@ async def _process_stale_payments(bot: Bot, settings):
         )
         result = await session.execute(stmt)
         for payment, telegram_id in result.all():
-            if payment.external_id and payment.currency == "RUB":
-                sbp_payment_ids.append(payment.id)
+            if payment.external_id:
+                yookassa_payment_ids.append(payment.id)
 
-    for payment_id in sbp_payment_ids:
+    for payment_id in yookassa_payment_ids:
         try:
             async with session_scope() as session:
-                await PaymentService.check_platega_payment(
+                await PaymentService.check_yookassa_payment(
                     session,
                     payment_id,
                 )
@@ -155,6 +155,7 @@ async def _process_stale_payments(bot: Bot, settings):
 async def _alert_new_stale_payments(bot: Bot, settings):
     current_time = now_utc()
     threshold = current_time - timedelta(hours=1)
+
     new_stale_for_alert = []
 
     async with session_scope() as session:
@@ -174,7 +175,7 @@ async def _alert_new_stale_payments(bot: Bot, settings):
         ]
 
         #
-        # ИСПРАВЛЕНО: TTLCache сам чистит устаревшие записи.
+        # TTLCache сам чистит устаревшие записи.
         # intersection_update больше не нужен.
         #
         new_stale_for_alert = [
@@ -188,7 +189,7 @@ async def _alert_new_stale_payments(bot: Bot, settings):
 
     msg = (
         f"⚠️ <b>Новые зависшие платежи (pending > 1ч)</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{'─' * 20}\n"
         f"Количество: <b>{len(new_stale_for_alert)}</b>\n"
     )
     for payment, telegram_id in new_stale_for_alert[:10]:

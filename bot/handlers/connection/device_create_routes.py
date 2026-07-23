@@ -5,6 +5,7 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from cachetools import TTLCache
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
@@ -28,7 +29,6 @@ from services.device_service import (
 from services.maintenance_service import MaintenanceService
 from services.subscription import SubscriptionService
 from utils.telegram import render_hub, safe
-
 from .common import (
     DEVICE_NAME_REGEX,
     _get_effective_device_limit,
@@ -38,7 +38,19 @@ from .common import (
 router = Router()
 logger = logging.getLogger(__name__)
 
-_creating_devices: set[int] = set()
+#
+# ИСПРАВЛЕНО: TTLCache вместо бесконечного set.
+#
+# Раньше _creating_devices: set[int] рос бесконечно.
+# Если пользователь начал создание устройства, но никогда
+# не введёт имя (закроет бот), запись оставалась навсегда.
+#
+# Теперь TTLCache с TTL=5 минут и maxsize=5000.
+#
+_creating_devices: TTLCache[int, bool] = TTLCache(
+    maxsize=5000,
+    ttl=300,
+)
 
 
 def _get_no_subscription_keyboard():
@@ -144,20 +156,9 @@ async def start_add_device(
         await callback.answer()
         return
 
-    #
-    # ИСПРАВЛЕНО: защита НЕ снимается здесь.
-    #
-    # Раньше _creating_devices.discard(user_id) вызывался в finally
-    # сразу после показа списка серверов. Это позволяло пользователю
-    # нажать «Добавить устройство» повторно, пока он в FSM-состоянии
-    # choose_server.
-    #
-    # Теперь защита снимается только:
-    # - в select_server при ошибках;
-    # - в enter_device_name.finally (успех или ошибка).
-    #
-    _creating_devices.add(user_id)
+    _creating_devices[user_id] = True
     success = False
+
     try:
         await callback.answer()
         await state.clear()
@@ -174,7 +175,7 @@ async def start_add_device(
 
         builder = InlineKeyboardBuilder()
         for server in servers:
-            flag = server.country_flag or "🌍"
+            flag = server.country_flag or "🌐"
             builder.button(
                 text=f"{flag} {server.name}",
                 callback_data=f"select_server:{server.id}",
@@ -195,7 +196,7 @@ async def start_add_device(
         success = True
     finally:
         if not success:
-            _creating_devices.discard(user_id)
+            _creating_devices.pop(user_id, None)
 
 
 @router.callback_query(
@@ -219,7 +220,7 @@ async def select_server(
             session,
             back_to="back_to_connections",
         )
-        _creating_devices.discard(callback.from_user.id)
+        _creating_devices.pop(callback.from_user.id, None)
         await state.clear()
         return
 
@@ -237,19 +238,18 @@ async def select_server(
             texts.ERROR_NO_SUBSCRIPTION,
             _get_no_subscription_keyboard(),
         )
-        _creating_devices.discard(callback.from_user.id)
+        _creating_devices.pop(callback.from_user.id, None)
         await state.clear()
         return
 
     server_id = int(callback.data.split(":")[1])
     server = await get_server_by_id(session, server_id)
-
     if not server:
         await callback.answer(
             texts.ERROR_LOCATION_NOT_FOUND,
             show_alert=True,
         )
-        _creating_devices.discard(callback.from_user.id)
+        _creating_devices.pop(callback.from_user.id, None)
         await state.clear()
         return
 
@@ -260,14 +260,14 @@ async def select_server(
             texts.ERROR_SERVER_DISABLED,
             get_back_button("add_device"),
         )
-        _creating_devices.discard(callback.from_user.id)
+        _creating_devices.pop(callback.from_user.id, None)
         await state.clear()
         return
 
     await state.update_data(server_id=server_id)
     await state.set_state(DeviceCreationStates.enter_device_name)
 
-    flag = server.country_flag or "🌍"
+    flag = server.country_flag or "🌐"
     await render_hub(
         callback.bot,
         callback.message.chat.id,
@@ -277,7 +277,6 @@ async def select_server(
         ),
         get_back_button("add_device"),
     )
-    # ← НЕ снимаем защиту здесь, переходим в enter_device_name
 
 
 @router.message(DeviceCreationStates.enter_device_name)
@@ -298,7 +297,7 @@ async def enter_device_name(
             session,
             back_to="back_to_connections",
         )
-        _creating_devices.discard(user_id)
+        _creating_devices.pop(user_id, None)
         await state.clear()
         return
 
@@ -316,7 +315,7 @@ async def enter_device_name(
             texts.ERROR_NO_SUBSCRIPTION,
             _get_no_subscription_keyboard(),
         )
-        _creating_devices.discard(user_id)
+        _creating_devices.pop(user_id, None)
         await state.clear()
         return
 
@@ -329,7 +328,8 @@ async def enter_device_name(
         )
         return
 
-    _creating_devices.add(user_id)
+    _creating_devices[user_id] = True
+
     try:
         if not message.text or message.text.startswith("/"):
             await render_hub(
@@ -482,7 +482,7 @@ async def enter_device_name(
         )
         success_text = texts.DEVICE_ADDED_SUCCESS.format(
             device_name=safe(device_name),
-            flag=server.country_flag if server else "🌍",
+            flag=server.country_flag if server else "🌐",
             server_name=safe(server.name) if server else "—",
         )
         await render_hub(
@@ -493,4 +493,4 @@ async def enter_device_name(
         )
         await state.clear()
     finally:
-        _creating_devices.discard(user_id)
+        _creating_devices.pop(user_id, None)
