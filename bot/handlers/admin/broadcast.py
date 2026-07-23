@@ -71,7 +71,8 @@ class BroadcastRateLimiter:
                     self.tokens -= 1.0
                     return
 
-            await asyncio.sleep(1.0 / self.rate)
+                wait_time = (1.0 - self.tokens) / self.rate
+            await asyncio.sleep(wait_time)
 
 
 _broadcast_limiter = BroadcastRateLimiter(rate=20.0)
@@ -486,48 +487,42 @@ async def _send_broadcast_to_users_with_resume(
         if stop_event:
             stop_event.clear()
 
-        #
-        # ИСПРАВЛЕНО (БАГ 3):
-        # cleanup выполняется ВСЕГДА, потому что admin_id
-        # приходит как параметр и не зависит от наличия
-        # записи BroadcastProgress в БД.
-        #
         _broadcast_in_progress.discard(admin_id)
         _cleanup_stop_event(admin_id)
 
-    if final_progress and admin_id:
-        try:
-            await bot.send_message(
-                admin_id,
-                texts.BROADCAST_RESULT.format(
-                    success_count=final_progress.success_count,
-                    fail_count=final_progress.fail_count,
-                    label=final_progress.label,
-                    total_count=final_progress.total_count,
-                ),
-                reply_markup=get_broadcast_result_keyboard(),
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to send broadcast result to admin {admin_id}: {e}"
-            )
-
-        try:
-            async with session_scope() as session:
-                await AuditService.log_action(
-                    session,
+        if final_progress and admin_id:
+            try:
+                await bot.send_message(
                     admin_id,
-                    "BROADCAST",
-                    details=(
-                        f"to {final_progress.label}: "
-                        f"{final_progress.success_count} success, "
-                        f"{final_progress.fail_count} fail, "
-                        f"status={final_progress.status}"
+                    texts.BROADCAST_RESULT.format(
+                        success_count=final_progress.success_count,
+                        fail_count=final_progress.fail_count,
+                        label=final_progress.label,
+                        total_count=final_progress.total_count,
                     ),
+                    reply_markup=get_broadcast_result_keyboard(),
+                    parse_mode="HTML",
                 )
-        except Exception as e:
-            logger.error(f"Failed to log broadcast audit: {e}")
+            except Exception as e:
+                logger.error(
+                    f"Failed to send broadcast result to admin {admin_id}: {e}"
+                )
+
+            try:
+                async with session_scope() as session:
+                    await AuditService.log_action(
+                        session,
+                        admin_id,
+                        "BROADCAST",
+                        details=(
+                            f"to {final_progress.label}: "
+                            f"{final_progress.success_count} success, "
+                            f"{final_progress.fail_count} fail, "
+                            f"status={final_progress.status}"
+                        ),
+                    )
+            except Exception as e:
+                logger.error(f"Failed to log broadcast audit: {e}")
 
 
 async def resume_pending_broadcasts(bot):

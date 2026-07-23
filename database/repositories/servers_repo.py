@@ -1,9 +1,6 @@
-import asyncio
 from typing import List, Optional, TypedDict
-
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from database.models import Server, VPNProfile
 from services.slots_cache import get_cached_peer_count
 
@@ -36,10 +33,6 @@ async def get_active_servers(
 async def get_available_servers(
     session: AsyncSession,
 ) -> List[Server]:
-    """
-    Возвращает активные серверы со свободными слотами.
-    Один запрос с LEFT JOIN вместо двух отдельных.
-    """
     profile_counts = (
         select(
             VPNProfile.server_id,
@@ -48,7 +41,6 @@ async def get_available_servers(
         .group_by(VPNProfile.server_id)
         .subquery()
     )
-
     stmt = (
         select(Server)
         .outerjoin(
@@ -108,7 +100,6 @@ async def update_server(
             continue
         if hasattr(server, key):
             setattr(server, key, value)
-
     await session.flush()
     await session.refresh(server)
     return server
@@ -125,15 +116,6 @@ async def delete_server(
 async def get_total_free_ips(
     session: AsyncSession,
 ) -> int:
-    """
-    Считает свободные слоты БЕЗ API-запросов.
-
-    Использует только кэш slots_cache (TTL 300 сек).
-    Если кэш пуст — fallback на количество профилей из БД.
-
-    Результат: дашборд рендерится за <1 секунды
-    при любом состоянии API.
-    """
     active_servers = await get_active_servers(session)
     if not active_servers:
         return 0
@@ -158,7 +140,6 @@ async def get_total_free_ips(
             real_count = db_counts.get(server.id, 0)
         free_slots = server.max_clients - real_count
         total_free += max(0, free_slots)
-
     return total_free
 
 
@@ -199,7 +180,6 @@ async def delete_profiles_by_server_id(
     server_id: int,
 ) -> int:
     from sqlalchemy import delete as sql_delete
-
     stmt = sql_delete(VPNProfile).where(
         VPNProfile.server_id == server_id,
     )
