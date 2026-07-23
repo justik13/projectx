@@ -257,8 +257,8 @@ ID: <code>{telegram_id}</code>
 <b>6. Безопасны ли мои данные?</b>
 Мы не ведём логи вашей активности. Все подключения используют современные защищённые протоколы.""",
 
-    "TOS_AGREEMENT_URL": "https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19",
-    "PRIVACY_POLICY_URL": "https://telegra.ph/Politika-konfidencialnosti-04-01-26",
+    "TOS_AGREEMENT_URL": "https://telegra.ph/Polzovatelskoe-soglashenie-07-23-48",
+    "PRIVACY_POLICY_URL": "https://telegra.ph/Politika-konfidencialnosti-07-23-84",
 
     # ============================================================
     # PAYMENT / SHOWCASE
