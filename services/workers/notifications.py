@@ -57,7 +57,7 @@ class NotificationRateLimiter:
                     return
 
                 wait_time = (1.0 - self.tokens) / self.rate
-                await asyncio.sleep(wait_time)
+            await asyncio.sleep(wait_time)
 
 
 _notification_limiter = NotificationRateLimiter(rate=25.0)
