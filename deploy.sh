@@ -9,6 +9,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+BOLD='\033[1m'
 
 PROJECT_NAME="projectx-bot"
 START_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -700,7 +701,7 @@ setup_env() {
     if [ -n "$YOOKASSA_SHOP_ID" ]; then
         write_env_var "YOOKASSA_SHOP_ID" "$YOOKASSA_SHOP_ID"
         write_env_var "YOOKASSA_SECRET_KEY" "$YOOKASSA_SECRET_KEY"
-        write_env_var "YOOKASSA_RETURN_URL" "https://t.me/\${BOT_USERNAME}"
+        write_env_var "YOOKASSA_RETURN_URL" "https://t.me/{bot_username}"
         write_env_var "YOOKASSA_WEBHOOK_PORT" "8080"
     fi
 
