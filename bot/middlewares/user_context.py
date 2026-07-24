@@ -31,15 +31,6 @@ def invalidate_user_cache(telegram_id: int) -> None:
     _user_cache.pop(telegram_id, None)
 
 
-def clear_user_cache() -> None:
-    """
-    Полная очистка кэша пользователей.
-    Используется при массовых обновлениях (например, смена
-    device_limit у тарифа с >50 пользователями).
-    """
-    _user_cache.clear()
-
-
 class UserContextMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -84,17 +75,7 @@ class UserContextMiddleware(BaseMiddleware):
             elif existing_any is not None and not existing_any.is_deleted:
                 user = existing_any
             else:
-                #
                 # ИСПРАВЛЕНО: используем SAVEPOINT вместо rollback.
-                #
-                # Раньше IntegrityError приводил к session.rollback(),
-                # который откатывал ВСЮ сессию, включая изменения,
-                # сделанные ранее в том же handler'е (аудит, FSM и т.д.).
-                #
-                # Теперь create_user обёрнут в begin_nested() (SAVEPOINT).
-                # При IntegrityError откатывается только SAVEPOINT,
-                # внешняя транзакция остаётся целой.
-                #
                 try:
                     async with session.begin_nested():
                         user = await create_user(
@@ -110,10 +91,6 @@ class UserContextMiddleware(BaseMiddleware):
                         type(event).__name__,
                     )
                 except IntegrityError:
-                    #
-                    # Гонка: пользователь мог быть создан параллельно.
-                    # SAVEPOINT откатился, внешняя транзакция цела.
-                    #
                     existing_any = await get_user_by_telegram_id_any(
                         session,
                         telegram_id,

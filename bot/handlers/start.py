@@ -72,15 +72,7 @@ async def cmd_start(
     data = await state.get_data()
     payment_id = data.get("payment_id")
 
-    #
     # ИСПРАВЛЕНО: /start больше НЕ отменяет платёж.
-    #
-    # Раньше если пользователь нажал /start случайно во время
-    # оплаты, платёж отменялся без предупреждения.
-    #
-    # Теперь платёж остаётся pending и будет обработан
-    # webhook'ом или кнопкой «Я оплатил».
-    #
     if payment_id:
         logger.info(
             "User %s pressed /start with active payment %s. "
@@ -126,8 +118,8 @@ async def cmd_start(
         user.telegram_id,
     )
     is_admin = user.telegram_id in get_settings().ADMIN_IDS
-
     name = safe(user.first_name or "Пользователь")
+
     text = texts.HUB_HEADER.format(name=name)
     kb = get_hub_keyboard(
         is_admin=is_admin,
@@ -168,7 +160,6 @@ async def back_to_main_menu(
                 show_alert=True,
             )
             return
-
         db_user = await SubscriptionService.process_onboarding(
             session,
             callback.from_user.id,
@@ -178,20 +169,20 @@ async def back_to_main_menu(
         )
         invalidate_user_cache(callback.from_user.id)
 
-        if not db_user:
-            await callback.answer(
-                texts.ERROR_USER_NOT_FOUND,
-                show_alert=True,
-            )
-            return
+    if not db_user:
+        await callback.answer(
+            texts.ERROR_USER_NOT_FOUND,
+            show_alert=True,
+        )
+        return
 
     is_active = await SubscriptionService.check_access(
         session,
         db_user.telegram_id,
     )
     is_admin = db_user.telegram_id in get_settings().ADMIN_IDS
-
     name = safe(db_user.first_name or "Пользователь")
+
     text = texts.HUB_HEADER.format(name=name)
     kb = get_hub_keyboard(
         is_admin=is_admin,

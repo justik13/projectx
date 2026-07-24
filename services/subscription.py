@@ -29,74 +29,41 @@ from utils.datetime_helpers import is_expired, now_utc
 
 logger = logging.getLogger(__name__)
 
-# Количество повторных попыток синхронизации статуса на серверах
-_SYNC_MAX_RETRIES = 3
-
 
 class SubscriptionService:
     @staticmethod
-    async def sync_access_state(
-        session: AsyncSession,
-        user: User,
-    ) -> None:
-        """
-        Публичная обёртка для админских действий.
-        """
+    async def sync_access_state(session: AsyncSession, user: User) -> None:
         await SubscriptionService._sync_access_state(session, user)
 
     @staticmethod
-    async def check_access(
-        session: AsyncSession,
-        telegram_id: int,
-    ) -> bool:
+    async def check_access(session: AsyncSession, telegram_id: int) -> bool:
         user = await get_user_by_telegram_id(session, telegram_id)
         if not user or user.is_banned or not user.subscription_end:
             return False
         return not is_expired(user.subscription_end)
 
     @staticmethod
-    async def _validate_referral(
-        session: AsyncSession,
-        telegram_id: int,
-        ref_id: int,
-    ) -> bool:
+    async def _validate_referral(session: AsyncSession, telegram_id: int, ref_id: int) -> bool:
         if ref_id == telegram_id:
-            logger.warning(
-                "Referral: self-referral attempt by %s",
-                telegram_id,
-            )
+            logger.warning("Referral: self-referral attempt by %s", telegram_id)
             return False
-
         ref_user = await get_user_by_telegram_id(session, ref_id)
         if not ref_user:
-            logger.warning(
-                "Referral: referrer %s not found in DB",
-                ref_id,
-            )
+            logger.warning("Referral: referrer %s not found in DB", ref_id)
             return False
-
         current_id = ref_id
         chain_visited = {telegram_id, ref_id}
         for _ in range(5):
             if not current_id:
                 break
-            current_user = await get_user_by_telegram_id(
-                session,
-                current_id,
-            )
+            current_user = await get_user_by_telegram_id(session, current_id)
             if not current_user or not current_user.referred_by:
                 break
             if current_user.referred_by in chain_visited:
-                logger.warning(
-                    "Circular referral chain detected for user %s, "
-                    "ref_id %s",
-                    telegram_id,
-                    ref_id,
-                )
+                logger.warning("Circular referral chain detected for user %s, ref_id %s", telegram_id, ref_id)
                 return False
             chain_visited.add(current_user.referred_by)
             current_id = current_user.referred_by
-
         return True
 
     @staticmethod
@@ -107,26 +74,14 @@ class SubscriptionService:
         first_name: str | None,
         ref_id: int | None = None,
     ) -> Optional[User]:
-        #
-        # Ищем пользователя включая soft-deleted.
-        #
-        user = await get_user_by_telegram_id_any(
-            session,
-            telegram_id,
-        )
+        user = await get_user_by_telegram_id_any(session, telegram_id)
 
-        #
-        # Если пользователь был soft-deleted, восстанавливаем его.
-        #
         if user is not None and user.is_deleted:
             user.is_deleted = False
             user.deleted_at = None
             await session.flush()
             invalidate_user_cache(telegram_id)
-            logger.info(
-                "Restored soft-deleted user %s on onboarding",
-                telegram_id,
-            )
+            logger.info("Restored soft-deleted user %s on onboarding", telegram_id)
 
         if user is not None:
             changed = False
@@ -136,26 +91,12 @@ class SubscriptionService:
             if first_name is not None and user.first_name != first_name:
                 user.first_name = first_name
                 changed = True
-
-            #
-            # Поздняя привязка реферала.
-            #
             if ref_id is not None and user.referred_by is None:
-                is_valid = await SubscriptionService._validate_referral(
-                    session,
-                    telegram_id,
-                    ref_id,
-                )
+                is_valid = await SubscriptionService._validate_referral(session, telegram_id, ref_id)
                 if is_valid:
                     user.referred_by = ref_id
                     changed = True
-                    logger.info(
-                        "Late referral binding: user %s bound to "
-                        "referrer %s",
-                        telegram_id,
-                        ref_id,
-                    )
-
+                    logger.info("Late referral binding: user %s bound to referrer %s", telegram_id, ref_id)
             if changed:
                 await session.flush()
                 invalidate_user_cache(telegram_id)
@@ -163,64 +104,26 @@ class SubscriptionService:
 
         referred_by = None
         if ref_id is not None:
-            is_valid = await SubscriptionService._validate_referral(
-                session,
-                telegram_id,
-                ref_id,
-            )
+            is_valid = await SubscriptionService._validate_referral(session, telegram_id, ref_id)
             if is_valid:
                 referred_by = ref_id
-                logger.info(
-                    "New user %s referred by %s",
-                    telegram_id,
-                    ref_id,
-                )
+                logger.info("New user %s referred by %s", telegram_id, ref_id)
 
-        #
-        # ИСПРАВЛЕНО (Фаза 1, фикс 1):
-        #
-        # Обёрнуто в begin_nested() (SAVEPOINT) вместо session.rollback().
-        #
-        # Раньше IntegrityError приводил к session.rollback(),
-        # который откатывал ВСЮ транзакцию handler'а, включая
-        # изменения сделанные ранее (аудит, обновление профиля и т.д.).
-        #
-        # Теперь при IntegrityError откатывается только SAVEPOINT,
-        # внешняя транзакция остаётся целой.
-        #
+        # ИСПРАВЛЕНО (БАГ 1): try/except IntegrityError.
         try:
-            async with session.begin_nested():
-                user = await create_user(
-                    session,
-                    telegram_id,
-                    username,
-                    first_name,
-                    referred_by,
-                )
+            user = await create_user(session, telegram_id, username, first_name, referred_by)
         except IntegrityError:
-            #
-            # Гонка: два одновременных /start от нового пользователя.
-            # SAVEPOINT откатился, внешняя транзакция цела.
-            # Перечитываем пользователя, созданного первым запросом.
-            #
-            user = await get_user_by_telegram_id_any(
-                session,
-                telegram_id,
-            )
+            await session.rollback()
+            user = await get_user_by_telegram_id_any(session, telegram_id)
             if user is not None and user.is_deleted:
                 user.is_deleted = False
                 user.deleted_at = None
                 await session.flush()
             logger.info(
-                "process_onboarding: IntegrityError caught for "
-                "telegram_id=%s, re-read existing user",
+                "process_onboarding: IntegrityError caught for telegram_id=%s, re-read existing user",
                 telegram_id,
             )
 
-        #
-        # Критично: иначе UserContextMiddleware может ещё 15 секунд
-        # отдавать None для только что созданного пользователя.
-        #
         invalidate_user_cache(telegram_id)
         return user
 
@@ -237,15 +140,11 @@ class SubscriptionService:
             return None
 
         if new_device_limit is not None:
-            profiles_count = await get_user_profiles_count(
-                session,
-                user.id,
-            )
+            profiles_count = await get_user_profiles_count(session, user.id)
             if profiles_count > new_device_limit:
                 raise ValueError(
                     f"Cannot downgrade: {profiles_count} devices > "
-                    f"{new_device_limit} limit. "
-                    f"User must delete devices first."
+                    f"{new_device_limit} limit. User must delete devices first."
                 )
 
         now = now_utc()
@@ -253,10 +152,6 @@ class SubscriptionService:
             user.subscription_end and user.subscription_end > now
         )
 
-        #
-        # Если days == 0 и активной подписки нет,
-        # не делаем подписку "активной до сейчас".
-        #
         if days == 0 and not had_active_subscription:
             new_end = user.subscription_end
         else:
@@ -287,12 +182,8 @@ class SubscriptionService:
                 user.device_creations_today = 0
                 user.last_creation_date = None
                 logger.info(
-                    "extend_subscription: user %s upgraded from "
-                    "%s to %s devices. Daily creations counter "
-                    "reset to 0.",
-                    telegram_id,
-                    old_device_limit,
-                    new_device_limit,
+                    "extend_subscription: user %s upgraded from %s to %s devices. Daily creations counter reset to 0.",
+                    telegram_id, old_device_limit, new_device_limit,
                 )
 
         if new_tariff_id is not None:
@@ -300,18 +191,11 @@ class SubscriptionService:
 
         await session.flush()
         invalidate_user_cache(telegram_id)
-
         await SubscriptionService._sync_access_state(session, user)
         return user
 
     @staticmethod
-    async def _sync_access_state(
-        session: AsyncSession,
-        user: User,
-    ) -> None:
-        """
-        Синхронизирует is_active у профилей в БД и статус на сервере.
-        """
+    async def _sync_access_state(session: AsyncSession, user: User) -> None:
         target_active = bool(
             user.subscription_end
             and not is_expired(user.subscription_end)
@@ -340,11 +224,7 @@ class SubscriptionService:
         queue_post_commit_task(
             session,
             lambda uid=user.id, ts=expires_ts, st=target_status: (
-                SubscriptionService._sync_expires_to_servers(
-                    uid,
-                    ts,
-                    st,
-                )
+                SubscriptionService._sync_expires_to_servers(uid, ts, st)
             ),
         )
 
@@ -354,22 +234,11 @@ class SubscriptionService:
         expires_ts: Optional[int],
         target_status: str = "active",
     ):
-        #
-        # ИСПРАВЛЕНО (Фаза 2, фикс 7):
-        #
-        # Добавлены повторные попытки (до 3) с экспоненциальным
-        # backoff. Раньше при ошибке API задача молча падала,
-        # и expiresAt на сервере не обновлялся до следующего
-        # цикла traffic sync (15 минут).
-        #
         from database.connection import session_scope
 
         try:
             async with session_scope() as session:
-                profiles = await get_user_profiles(
-                    session,
-                    user_id,
-                )
+                profiles = await get_user_profiles(session, user_id)
                 if not profiles:
                     return
 
@@ -385,86 +254,34 @@ class SubscriptionService:
                     server = servers_map.get(profile.server_id)
                     if not server:
                         continue
-                    client = AmneziaClient(
-                        server.api_url,
-                        server.api_key,
-                    )
+                    client = AmneziaClient(server.api_url, server.api_key)
                     clear_expires_at = (
-                        target_status == "active"
-                        and expires_ts is None
+                        target_status == "active" and expires_ts is None
                     )
                     tasks.append(
                         client.update_client(
                             client_id=profile.peer_id,
-                            expires_at=(
-                                expires_ts
-                                if target_status == "active"
-                                else None
-                            ),
+                            expires_at=(expires_ts if target_status == "active" else None),
                             status=target_status,
                             clear_expires_at=clear_expires_at,
                         )
                     )
 
-                if not tasks:
-                    return
-
-                #
-                # Retry-логика: до 3 попыток с backoff 1s, 2s.
-                #
-                for attempt in range(_SYNC_MAX_RETRIES):
-                    results = await asyncio.gather(
-                        *tasks,
-                        return_exceptions=True,
-                    )
-                    success = sum(
-                        1 for r in results if r is True
-                    )
-                    failed = len(tasks) - success
-
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    success = sum(1 for r in results if r is True)
                     logger.info(
-                        "Access state sync: %s/%s servers updated "
-                        "for user_id=%s, status=%s (attempt %s/%s)",
-                        success,
-                        len(tasks),
-                        user_id,
-                        target_status,
-                        attempt + 1,
-                        _SYNC_MAX_RETRIES,
+                        "Access state sync: %s/%s servers updated for user_id=%s, status=%s",
+                        success, len(tasks), user_id, target_status,
                     )
-
-                    if failed == 0:
-                        break
-
-                    if attempt < _SYNC_MAX_RETRIES - 1:
-                        backoff = 2 ** attempt
-                        logger.warning(
-                            "Access state sync: %s failures, "
-                            "retrying in %ss",
-                            failed,
-                            backoff,
-                        )
-                        await asyncio.sleep(backoff)
-
         except Exception as e:
-            logger.error(
-                "Access state sync failed for user_id=%s: %s",
-                user_id,
-                e,
-                exc_info=True,
-            )
+            logger.error("Access state sync failed for user_id=%s: %s", user_id, e, exc_info=True)
 
     @staticmethod
-    async def get_expires_timestamp(
-        user: User,
-    ) -> Optional[int]:
-        if (
-            not user.subscription_end
-            or user.subscription_end.year >= 2100
-        ):
+    async def get_expires_timestamp(user: User) -> Optional[int]:
+        if not user.subscription_end or user.subscription_end.year >= 2100:
             logger.info(
-                "get_expires_timestamp: user %s has permanent "
-                "subscription, sending expiresAt=null to API",
+                "get_expires_timestamp: user %s has permanent subscription, sending expiresAt=null to API",
                 user.telegram_id,
             )
             return None

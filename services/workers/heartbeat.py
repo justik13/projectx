@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from cachetools import TTLCache
+
 from services.amnezia_client import _circuit_breakers
 from config.settings import get_settings
 
@@ -12,28 +13,13 @@ logger = logging.getLogger("BackgroundWorker")
 
 _PROJECT_DIR = os.environ.get(
     "PROJECTX_DIR",
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))
-        )
-    ),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
 )
 HEARTBEAT_FILE = Path(_PROJECT_DIR) / ".heartbeat"
 HEARTBEAT_INTERVAL = 60.0
 
-#
 # ИСПРАВЛЕНО: TTLCache вместо бесконечного dict.
-#
-# Раньше _api_alert_sent: dict[str, float] рос бесконечно.
-# Каждый server URL, у которого circuit breaker перешёл
-# в OPEN, добавлял запись. Записи не удалялись.
-#
-# Теперь TTLCache с TTL=2 часа и maxsize=1000.
-#
-_api_alert_sent: TTLCache[str, float] = TTLCache(
-    maxsize=1000,
-    ttl=7200,
-)
+_api_alert_sent: TTLCache[str, float] = TTLCache(maxsize=1000, ttl=7200)
 _API_ALERT_COOLDOWN = 1800.0
 
 _bot_ref = None
@@ -46,17 +32,12 @@ async def heartbeat_loop(shutdown_event: asyncio.Event):
     while not shutdown_event.is_set():
         try:
             try:
-                await asyncio.wait_for(
-                    shutdown_event.wait(),
-                    timeout=HEARTBEAT_INTERVAL,
-                )
+                await asyncio.wait_for(shutdown_event.wait(), timeout=HEARTBEAT_INTERVAL)
                 break
             except asyncio.TimeoutError:
                 pass
-
             _write_heartbeat()
             await _check_circuit_breakers()
-
         except asyncio.CancelledError:
             logger.info("Heartbeat worker cancelled")
             break
@@ -80,7 +61,6 @@ async def _check_circuit_breakers():
     for api_url, cb in list(_circuit_breakers.items()):
         if not cb.is_open:
             continue
-
         last_alert = _api_alert_sent.get(api_url, 0)
         if now - last_alert < _API_ALERT_COOLDOWN:
             continue
@@ -95,45 +75,22 @@ async def _check_circuit_breakers():
             pass
 
         alert_msg = (
-            f"⚠️ <b>Сервер Amnezia недоступен!</b>
-"
-            f"🌐 <b>{server_name}</b>
-"
-            f"🔗 <code>{api_url}</code>
-"
-            f"❌ CircuitBreaker перешёл в OPEN
-"
-            f"🔄 Попытки восстановления каждые {cb.recovery_timeout:.0f}с
-"
+            f"⚠️ <b>Сервер Amnezia недоступен!</b>\n"
+            f"🌍 <b>{server_name}</b>\n"
+            f"🔗 <code>{api_url}</code>\n"
+            f"❌ CircuitBreaker перешёл в OPEN\n"
+            f"🔄 Попытки восстановления каждые {cb.recovery_timeout:.0f}с\n"
             f"💡 Проверьте сервер вручную"
         )
 
         if _bot_ref is not None:
             for admin_id in settings.ADMIN_IDS:
                 try:
-                    await _bot_ref.send_message(
-                        admin_id,
-                        alert_msg,
-                        parse_mode="HTML",
-                    )
-                    logger.info(
-                        "CircuitBreaker alert sent to admin %s for %s",
-                        admin_id,
-                        server_name,
-                    )
+                    await _bot_ref.send_message(admin_id, alert_msg, parse_mode="HTML")
                 except Exception as e:
-                    logger.warning(
-                        "Failed to send CB alert to admin %s: %s",
-                        admin_id,
-                        e,
-                    )
+                    logger.warning("Failed to send CB alert to admin %s: %s", admin_id, e)
         else:
-            logger.warning(
-                "🚨 CircuitBreaker OPEN for server '%s' (%s). "
-                "bot_ref is None.",
-                server_name,
-                api_url,
-            )
+            logger.warning("CircuitBreaker OPEN for server '%s' (%s). bot_ref is None.", server_name, api_url)
 
         _api_alert_sent[api_url] = now
 
@@ -151,11 +108,9 @@ def _write_heartbeat(final: bool = False):
     try:
         temp_file = HEARTBEAT_FILE.with_suffix(".tmp")
         if final:
-            content = f"STOPPED {int(time.time())}
-"
+            content = f"STOPPED {int(time.time())}\n"
         else:
-            content = f"{int(time.time())}
-"
+            content = f"{int(time.time())}\n"
         with open(temp_file, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
