@@ -20,6 +20,7 @@ BACKUP_DIR="/root/backups/projectx"
 LOG_FILE="/var/log/projectx-deploy.log"
 SNAPSHOT_DIR="/root/.projectx-snapshots"
 ROLLBACK_LOG="/var/log/projectx-rollback.log"
+
 PG_PASS_FILE=""
 REDIS_PASSWORD=""
 
@@ -69,10 +70,11 @@ update_redis_env_if_exists() {
 rollback() {
     local step="$1"
     local error_msg="$2"
-    echo -e "${RED}═══════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
+
+    echo -e "${RED}═══════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}🚨 ROLLBACK TRIGGERED at step: $step${NC}" | tee -a "$ROLLBACK_LOG"
     echo -e "${RED}Error: $error_msg${NC}" | tee -a "$ROLLBACK_LOG"
-    echo -e "${RED}═══════════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
+    echo -e "${RED}═══════════════════════════════════════${NC}" | tee -a "$ROLLBACK_LOG"
 
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         systemctl stop "$SERVICE_NAME" 2>/dev/null || true
@@ -140,7 +142,6 @@ install_dependencies() {
 
     local install_log
     install_log=$(mktemp)
-
     if ! apt-get install -y \
         python3 python3-venv python3-pip python3-dev \
         git curl wget rsync build-essential cron logrotate \
@@ -188,7 +189,6 @@ setup_postgresql() {
             error "PostgreSQL не слушает порт $PG_PORT после 15 секунд ожидания. Проверьте: journalctl -u postgresql"
         fi
     done
-
     success "PostgreSQL запущен и слушает порт $PG_PORT"
 
     PG_PASS_FILE="$(mktemp /tmp/projectx_pg_pass.XXXXXX)"
@@ -204,13 +204,11 @@ setup_postgresql() {
             error "Не удалось подключиться к БД с указанным паролем. Проверьте пароль."
         fi
         success "Подключение к существующей БД подтверждено"
-        printf '%s
-' "$DB_PASSWORD" > "$PG_PASS_FILE"
+        printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
         return
     fi
 
     log "Создание пользователя и базы данных PostgreSQL..."
-
     read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD
     echo ""
     [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
@@ -222,9 +220,9 @@ setup_postgresql() {
     su - postgres -c "psql -v ON_ERROR_STOP=1" <<EOF
 DO \$\$
 BEGIN
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
-        CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
-    END IF;
+   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
+      CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
+   END IF;
 END
 \$\$;
 CREATE DATABASE projectx_bot OWNER projectx;
@@ -241,8 +239,7 @@ EOF
     fi
 
     success "Пользователь projectx и база projectx_bot созданы и проверены"
-    printf '%s
-' "$DB_PASSWORD" > "$PG_PASS_FILE"
+    printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
 }
 
 setup_redis() {
@@ -256,7 +253,6 @@ setup_redis() {
     if [[ -f "$PROJECT_DIR/.env" ]]; then
         REDIS_PASSWORD=$(grep '^REDIS_PASSWORD=' "$PROJECT_DIR/.env" 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
     fi
-
     if [[ -z "$REDIS_PASSWORD" ]]; then
         REDIS_PASSWORD=$(openssl rand -hex 32)
     fi
@@ -300,7 +296,6 @@ setup_redis() {
         fi
         sleep 1
     done
-
     if [[ $redis_check -eq 0 ]]; then
         error "Redis не отвечает после настройки."
     fi
@@ -357,6 +352,7 @@ setup_firewall() {
     ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
     ufw deny 8080/tcp comment 'Webhook Internal' >/dev/null 2>&1 || true
     ufw deny 6379/tcp comment 'Redis (blocked external)' >/dev/null 2>&1 || true
+
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
     ufw --force enable >/dev/null 2>&1 || error "Ошибка включения UFW"
@@ -384,6 +380,7 @@ setup_venv() {
 
     [ ! -d "$VENV_DIR" ] && python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
+
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
 
     local pip_log="$PROJECT_DIR/pip-install.log"
@@ -409,7 +406,6 @@ setup_env() {
     read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN
     echo ""
     [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
-
     if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]]; then
         warn "Токен не похож на стандартный формат Telegram (число:строка). Убедитесь, что это корректный токен."
     fi
@@ -418,13 +414,27 @@ setup_env() {
     read -p "Введите ADMIN_IDS: " ADMIN_IDS
     [ -z "$ADMIN_IDS" ] && error "ADMIN_IDS обязательны"
 
+    # ──────────────────────────────────────────────────────────
+    # ИСПРАВЛЕНО: конвертация ADMIN_IDS в JSON-список для
+    # pydantic-settings (List[int] требует формат [1,2,3]).
+    #
+    # Было:  write_env_var "ADMIN_IDS" "872658825"
+    #        → .env: ADMIN_IDS='872658825'
+    #        → pydantic: ValidationError (int, не list)
+    #
+    # Стало: ADMIN_IDS_JSON="[872658825]"
+    #        → .env: ADMIN_IDS='[872658825]'
+    #        → pydantic: List[int] = [872658825] ✓
+    # ──────────────────────────────────────────────────────────
+    ADMIN_IDS_JSON=$(echo "$ADMIN_IDS" | sed 's/[[:space:]]//g' | sed 's/^/[/' | sed 's/$/]/')
+    if ! echo "$ADMIN_IDS_JSON" | grep -qE '^\[[0-9]+(,[0-9]+)*\]$'; then
+        error "ADMIN_IDS должны содержать только числовые Telegram ID через запятую (например: 123456789, 987654321)"
+    fi
+
     echo -e "${BLUE}[3/4]${NC} Username поддержки [support]"
     read -p "Введите SUPPORT_USERNAME: " SUPPORT_USERNAME
     SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
 
-    #
-    # ИСПРАВЛЕНО: YooKassa вместо Platega.
-    #
     echo -e "${BLUE}[4/4]${NC} YooKassa (Enter для пропуска)"
     read -p "Введите YOOKASSA_SHOP_ID: " YOOKASSA_SHOP_ID
     YOOKASSA_SECRET_KEY=""
@@ -471,7 +481,7 @@ setup_env() {
     : > "$PROJECT_DIR/.env"
 
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
-    write_env_var "ADMIN_IDS" "$ADMIN_IDS"
+    write_env_var "ADMIN_IDS" "$ADMIN_IDS_JSON"
     write_env_var "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
     write_env_var "DB_ENCRYPTION_KEY" "$DB_KEY"
 
@@ -481,18 +491,10 @@ setup_env() {
 
     write_env_var "REDIS_PASSWORD" "$REDIS_PASSWORD"
     write_env_var "REDIS_URL" "redis://:${REDIS_PASSWORD}@localhost:6379/0"
-
-    #
-    # Production-safe defaults для SSRF protection.
-    #
     write_env_var "ALLOW_LOCAL_HTTP" "false"
     write_env_var "ALLOW_LOCAL_HTTPS" "false"
-
     write_env_var "REDIS_KEY_PREFIX" "projectx_bot:"
 
-    #
-    # ИСПРАВЛЕНО: YooKassa вместо Platega.
-    #
     if [ -n "$YOOKASSA_SHOP_ID" ]; then
         write_env_var "YOOKASSA_SHOP_ID" "$YOOKASSA_SHOP_ID"
         write_env_var "YOOKASSA_SECRET_KEY" "$YOOKASSA_SECRET_KEY"
@@ -583,9 +585,6 @@ EOF
 }
 
 setup_nginx_ssl() {
-    #
-    # ИСПРАВЛЕНО: YooKassa вместо Platega.
-    #
     if ! grep -q "YOOKASSA_SHOP_ID" "$PROJECT_DIR/.env" 2>/dev/null; then
         return
     fi
@@ -671,7 +670,6 @@ setup_backup() {
     cat > /usr/local/bin/projectx-backup.sh << 'EOF'
 #!/bin/bash
 set -euo pipefail
-
 DIR="/root/backups/projectx"
 DATE=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$DIR"
@@ -694,7 +692,6 @@ EOF
     cat > /usr/local/bin/projectx-restore.sh << 'EOF'
 #!/bin/bash
 set -euo pipefail
-
 DIR="/root/backups/projectx"
 SERVICE_NAME="projectx-bot"
 PROJECT_DIR="/opt/projectx-bot"
@@ -776,6 +773,7 @@ if ! systemctl is-active --quiet $SERVICE_NAME; then
 fi
 
 NOW=$(date +%s)
+
 if [ ! -f "$HEARTBEAT_FILE" ]; then
     SERVICE_START=$(systemctl show $SERVICE_NAME --property=ActiveEnterTimestampMonotonic 2>/dev/null | cut -d'=' -f2)
     if [[ -n "$SERVICE_START" && "$SERVICE_START" =~ ^[0-9]+$ ]]; then
@@ -834,7 +832,6 @@ start_bot() {
 
     local wait_count=0
     local max_wait=30
-
     while [ $wait_count -lt $max_wait ]; do
         sleep 1
         if systemctl is-active --quiet "$SERVICE_NAME"; then
