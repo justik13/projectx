@@ -10,8 +10,8 @@ from utils.datetime_helpers import now_utc
 
 ALLOWED_USER_UPDATE_FIELDS = {
     "username", "first_name", "subscription_end", "device_limit",
-    "current_tariff_id", "is_banned", "is_bot_blocked", "is_deleted",
-    "deleted_at", "referred_by", "referral_days", "device_creations_today",
+    "current_tariff_id", "is_banned", "is_bot_blocked",
+    "referred_by", "referral_days", "device_creations_today",
     "last_creation_date", "last_payment_at", "notified_3d", "notified_1d",
     "notified_2h", "notified_expired", "notified_grace_12h",
     "notification_retry_count", "last_notification_attempt",
@@ -72,11 +72,13 @@ async def extend_subscription(session: AsyncSession, user: User, days: int) -> U
         current_end = user.subscription_end
     else:
         current_end = now
+
     if days >= 36500:
         from bot.constants import PERMANENT_END_DATE
         new_end = PERMANENT_END_DATE
     else:
         new_end = current_end + timedelta(days=days)
+
     return await update_user(session, user, subscription_end=new_end)
 
 

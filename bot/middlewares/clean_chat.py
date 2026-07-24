@@ -52,7 +52,6 @@ async def _delete_worker():
 def _ensure_worker_started():
     global _delete_queue, _delete_worker_task
     if _delete_queue is None:
-        # ИСПРАВЛЕНО: maxsize увеличен с 1000 до 5000.
         _delete_queue = asyncio.Queue(maxsize=5000)
     if _delete_worker_task is None or _delete_worker_task.done():
         _delete_worker_task = asyncio.create_task(_delete_worker())
@@ -70,8 +69,10 @@ async def stop_clean_chat_worker():
             await _delete_worker_task
         except asyncio.CancelledError:
             pass
-    _delete_worker_task = None
-    logger.info("CleanChat worker stopped")
+        _delete_worker_task = None
+        logger.info("CleanChat worker stopped")
+    else:
+        _delete_worker_task = None
 
 
 class CleanChatMiddleware(BaseMiddleware):
@@ -96,6 +97,7 @@ class CleanChatMiddleware(BaseMiddleware):
                 return await handler(event, data)
 
             _ensure_worker_started()
+
             try:
                 await asyncio.wait_for(
                     _delete_queue.put(

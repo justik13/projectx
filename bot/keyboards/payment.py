@@ -122,11 +122,11 @@ def get_change_tariff_keyboard(
 def get_payment_method_keyboard(
     tariff_id: int,
     device_limit: int | None = None,
-    sbp_enabled: bool = False,
+    payment_enabled: bool = False,
     source: str = "showcase",
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if sbp_enabled:
+    if payment_enabled:
         builder.button(
             text="💳 Оплатить",
             callback_data=f"pay_yookassa:{tariff_id}:{source}",

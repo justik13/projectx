@@ -31,6 +31,15 @@ def invalidate_user_cache(telegram_id: int) -> None:
     _user_cache.pop(telegram_id, None)
 
 
+def clear_user_cache() -> None:
+    """Полная очистка кэша пользователей.
+
+    Используется при массовых изменениях (например, смена device_limit тарифа),
+    когда дешевле очистить весь кэш, чем вызывать pop() для каждого пользователя.
+    """
+    _user_cache.clear()
+
+
 class UserContextMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -39,6 +48,7 @@ class UserContextMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         telegram_id: int | None = None
+
         if isinstance(event, Message) and event.from_user:
             telegram_id = event.from_user.id
         elif isinstance(event, CallbackQuery) and event.from_user:
@@ -75,7 +85,6 @@ class UserContextMiddleware(BaseMiddleware):
             elif existing_any is not None and not existing_any.is_deleted:
                 user = existing_any
             else:
-                # ИСПРАВЛЕНО: используем SAVEPOINT вместо rollback.
                 try:
                     async with session.begin_nested():
                         user = await create_user(

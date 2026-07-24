@@ -143,12 +143,6 @@ async def pay_yookassa(
 
         bot_info = await callback.bot.get_me()
 
-        #
-        # ИСПРАВЛЕНО: Decimal вместо float для денег.
-        #
-        # float(199.99) → 199.99000000000001
-        # Decimal(str(...)) → Decimal('199.99')
-        #
         amount = Decimal(str(tariff.price_rub))
 
         payment, _ = await PaymentService.create_yookassa_payment(
@@ -423,7 +417,7 @@ async def cancel_invoice(
         )
 
         settings = get_settings()
-        sbp_enabled = bool(
+        payment_enabled = bool(
             settings.YOOKASSA_SHOP_ID
             and settings.YOOKASSA_SECRET_KEY
         )
@@ -435,7 +429,7 @@ async def cancel_invoice(
             get_payment_method_keyboard(
                 tariff.id,
                 device_limit,
-                sbp_enabled=sbp_enabled,
+                payment_enabled=payment_enabled,
                 source=source,
             ),
         )
