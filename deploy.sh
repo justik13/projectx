@@ -29,6 +29,12 @@ success() { echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] [✓]${NC} $1" | tee
 warn()    { echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] [!]${NC} $1" | tee -a "$LOG_FILE"; }
 error()   { echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] [✗]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
 
+# ──────────────────────────────────────────────────────────────
+#  Мягкие ошибки ввода: НЕ завершают скрипт, а просят повторить
+# ──────────────────────────────────────────────────────────────
+input_error() { echo -e "${RED}  ✗ $1${NC}"; }
+input_hint()  { echo -e "${CYAN}  💡 $1${NC}"; }
+
 cleanup_temp_files() {
     if [[ -n "${PG_PASS_FILE:-}" ]]; then
         rm -f "$PG_PASS_FILE" 2>/dev/null || true
@@ -99,6 +105,116 @@ rollback() {
     error "Deploy failed. Check $ROLLBACK_LOG for details."
 }
 
+# ══════════════════════════════════════════════════════════════
+#  ФУНКЦИИ БЕЗОПАСНОГО ВВОДА (цикл вместо exit)
+# ══════════════════════════════════════════════════════════════
+
+# Читает непустое значение. Повторяет пока не введено.
+# /cancel → возвращает 1 (вызывающий код решает что делать)
+read_required() {
+    local prompt="$1"
+    local var_name="$2"
+    local hint="${3:-}"
+    local value=""
+
+    while true; do
+        read -p "$prompt" value
+        if [[ "$value" == "/cancel" ]]; then
+            return 1
+        fi
+        if [[ -n "$value" ]]; then
+            eval "$var_name=\"\$value\""
+            return 0
+        fi
+        input_error "Поле не может быть пустым."
+        [[ -n "$hint" ]] && input_hint "$hint"
+    done
+}
+
+# Читает скрытое (секретное) значение. Повторяет пока не введено.
+read_required_secret() {
+    local prompt="$1"
+    local var_name="$2"
+    local hint="${3:-}"
+    local value=""
+
+    while true; do
+        read -s -p "$prompt" value
+        echo ""
+        if [[ "$value" == "/cancel" ]]; then
+            return 1
+        fi
+        if [[ -n "$value" ]]; then
+            eval "$var_name=\"\$value\""
+            return 0
+        fi
+        input_error "Поле не может быть пустым."
+        [[ -n "$hint" ]] && input_hint "$hint"
+    done
+}
+
+# Валидация ADMIN_IDS: числа через запятую → JSON-массив
+# Возвращает результат в переменную, имя которой передано как $2
+read_admin_ids() {
+    local raw=""
+    local json=""
+
+    while true; do
+        read -p "Введите ADMIN_IDS (Telegram ID через запятую): " raw
+
+        if [[ "$raw" == "/cancel" ]]; then
+            return 1
+        fi
+        if [[ -z "$raw" ]]; then
+            input_error "ADMIN_IDS не могут быть пустыми."
+            input_hint "Пример: 123456789 или 123456789, 987654321"
+            continue
+        fi
+
+        # Убираем пробелы, оборачиваем в JSON-массив
+        json=$(echo "$raw" | sed 's/[[:space:]]//g' | sed 's/^/[/' | sed 's/$/]/')
+
+        # Валидация: только цифры и запятые внутри скобок
+        if echo "$json" | grep -qE '^\[[0-9]+(,[0-9]+)*\]$'; then
+            eval "$1=\"\$json\""
+            echo -e "${GREEN}  ✓ ADMIN_IDS: $json${NC}"
+            return 0
+        fi
+
+        input_error "Неверный формат. Допустимы только числа через запятую."
+        input_hint "Пример: 123456789 или 123456789, 987654321"
+    done
+}
+
+# Валидация пароля БД: 8+ символов, безопасный набор
+read_db_password() {
+    local pass=""
+
+    while true; do
+        read -s -p "Введите пароль для пользователя БД projectx: " pass
+        echo ""
+
+        if [[ "$pass" == "/cancel" ]]; then
+            return 1
+        fi
+        if [[ -z "$pass" ]]; then
+            input_error "Пароль не может быть пустым."
+            continue
+        fi
+        if [[ ! "$pass" =~ ^[a-zA-Z0-9_@#%^*+=-]{8,}$ ]]; then
+            input_error "Пароль должен быть 8+ символов: латиница, цифры, _@#%^*+=-"
+            continue
+        fi
+
+        eval "$1=\"\$pass\""
+        return 0
+    done
+}
+
+# ══════════════════════════════════════════════════════════════
+#  PRE-FLIGHT (системные проверки — error() здесь уместен)
+# ══════════════════════════════════════════════════════════════
+
 preflight_checks() {
     log "Запуск pre-flight проверок..."
 
@@ -135,6 +251,10 @@ preflight_checks() {
     success "Pre-flight проверки пройдены"
 }
 
+# ══════════════════════════════════════════════════════════════
+#  ЗАВИСИМОСТИ
+# ══════════════════════════════════════════════════════════════
+
 install_dependencies() {
     log "Установка системных зависимостей (PostgreSQL + Redis)..."
 
@@ -164,6 +284,10 @@ $(tail -20 "$install_log")"
     fi
 }
 
+# ══════════════════════════════════════════════════════════════
+#  POSTGRESQL (с повторным вводом пароля)
+# ══════════════════════════════════════════════════════════════
+
 setup_postgresql() {
     log "Настройка базы данных PostgreSQL..."
 
@@ -186,7 +310,7 @@ setup_postgresql() {
         sleep 1
         wait_count=$((wait_count + 1))
         if [ $wait_count -ge 15 ]; then
-            error "PostgreSQL не слушает порт $PG_PORT после 15 секунд ожидания. Проверьте: journalctl -u postgresql"
+            error "PostgreSQL не слушает порт $PG_PORT после 15 секунд ожидания."
         fi
     done
     success "PostgreSQL запущен и слушает порт $PG_PORT"
@@ -194,53 +318,91 @@ setup_postgresql() {
     PG_PASS_FILE="$(mktemp /tmp/projectx_pg_pass.XXXXXX)"
     chmod 600 "$PG_PASS_FILE"
 
+    # ── БД уже существует → просим пароль с проверкой ──
     if su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='projectx_bot'\"" 2>/dev/null | grep -q 1; then
-        warn "База данных projectx_bot уже существует. Пропускаем создание."
-        read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD
-        echo ""
-        [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
+        warn "База данных projectx_bot уже существует."
 
-        if ! PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$PG_PORT" -U projectx -d projectx_bot -c "SELECT 1;" >/dev/null 2>&1; then
-            error "Не удалось подключиться к БД с указанным паролем. Проверьте пароль."
-        fi
-        success "Подключение к существующей БД подтверждено"
+        local DB_PASSWORD=""
+        local db_ok=false
+        local attempts=0
+        local max_attempts=5
+
+        while [[ "$db_ok" == "false" ]]; do
+            attempts=$((attempts + 1))
+            if [[ $attempts -gt $max_attempts ]]; then
+                error "Слишком много неудачных попыток подключения к БД."
+            fi
+
+            read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD
+            echo ""
+
+            if [[ -z "$DB_PASSWORD" ]]; then
+                input_error "Пароль не может быть пустым."
+                continue
+            fi
+
+            if PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$PG_PORT" -U projectx -d projectx_bot -c "SELECT 1;" >/dev/null 2>&1; then
+                db_ok=true
+                success "Подключение к существующей БД подтверждено"
+            else
+                input_error "Не удалось подключиться к БД с указанным паролем. Попытка $attempts/$max_attempts."
+                input_hint "Проверьте пароль или создайте пользователя заново."
+            fi
+        done
+
         printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
         return
     fi
 
+    # ── Новая БД → создаём с валидацией пароля ──
     log "Создание пользователя и базы данных PostgreSQL..."
-    read -s -p "Введите пароль для пользователя БД projectx: " DB_PASSWORD
-    echo ""
-    [ -z "$DB_PASSWORD" ] && error "Пароль не может быть пустым"
 
-    if [[ ! "$DB_PASSWORD" =~ ^[a-zA-Z0-9_@#%^*+=-]{8,}$ ]]; then
-        error "Пароль должен быть 8+ символов, только латиница/цифры/символы _@#%^*+=-"
+    local DB_PASSWORD=""
+    if ! read_db_password DB_PASSWORD; then
+        error "Ввод пароля БД отменён пользователем."
     fi
 
     su - postgres -c "psql -v ON_ERROR_STOP=1" <<EOF
 DO \$\$
 BEGIN
-   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
-      CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
-   END IF;
+IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'projectx') THEN
+CREATE USER projectx WITH PASSWORD '$DB_PASSWORD';
+END IF;
 END
 \$\$;
 CREATE DATABASE projectx_bot OWNER projectx;
 GRANT ALL PRIVILEGES ON DATABASE projectx_bot TO projectx;
 EOF
-
     if [[ $? -ne 0 ]]; then
         error "Не удалось создать БД."
     fi
 
     sleep 1
-    if ! PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$PG_PORT" -U projectx -d projectx_bot -c "SELECT 1;" >/dev/null 2>&1; then
-        error "БД создана, но подключение не проходит. Проверьте pg_hba.conf."
-    fi
+
+    # Проверяем подключение; если не прошло — даём повторить
+    local db_ok=false
+    local attempts=0
+    while [[ "$db_ok" == "false" ]]; do
+        attempts=$((attempts + 1))
+        if [[ $attempts -gt 3 ]]; then
+            error "БД создана, но подключение не проходит после 3 попыток. Проверьте pg_hba.conf."
+        fi
+        if PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -p "$PG_PORT" -U projectx -d projectx_bot -c "SELECT 1;" >/dev/null 2>&1; then
+            db_ok=true
+        else
+            input_error "БД создана, но подключение не проходит. Попытка $attempts/3."
+            input_hint "Возможно, pg_hba.conf не разрешает md5/scram для 127.0.0.1."
+            sleep 2
+        fi
+    done
 
     success "Пользователь projectx и база projectx_bot созданы и проверены"
     printf '%s\n' "$DB_PASSWORD" > "$PG_PASS_FILE"
 }
+
+# ══════════════════════════════════════════════════════════════
+#  REDIS
+# ══════════════════════════════════════════════════════════════
 
 setup_redis() {
     log "Настройка Redis для FSM Storage..."
@@ -253,6 +415,7 @@ setup_redis() {
     if [[ -f "$PROJECT_DIR/.env" ]]; then
         REDIS_PASSWORD=$(grep '^REDIS_PASSWORD=' "$PROJECT_DIR/.env" 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
     fi
+
     if [[ -z "$REDIS_PASSWORD" ]]; then
         REDIS_PASSWORD=$(openssl rand -hex 32)
     fi
@@ -260,14 +423,12 @@ setup_redis() {
     local redis_conf="/etc/redis/redis.conf"
     if [[ -f "$redis_conf" ]]; then
         cp "$redis_conf" "$redis_conf.backup-$(date +%s)" 2>/dev/null || true
-
         sed -i '/^bind /d' "$redis_conf"
         sed -i '/^maxmemory /d' "$redis_conf"
         sed -i '/^maxmemory-policy /d' "$redis_conf"
         sed -i '/^save /d' "$redis_conf"
         sed -i '/^appendonly /d' "$redis_conf"
         sed -i '/^requirepass /d' "$redis_conf"
-
         echo "" >> "$redis_conf"
         echo "# === ProjectX Bot Config ===" >> "$redis_conf"
         echo "bind 127.0.0.1" >> "$redis_conf"
@@ -276,10 +437,8 @@ setup_redis() {
         echo 'save ""' >> "$redis_conf"
         echo "appendonly no" >> "$redis_conf"
         echo "requirepass $REDIS_PASSWORD" >> "$redis_conf"
-
         chown redis:redis "$redis_conf"
         chmod 640 "$redis_conf"
-
         if ! systemctl restart redis-server; then
             error "Redis restart failed."
         fi
@@ -299,7 +458,6 @@ setup_redis() {
     if [[ $redis_check -eq 0 ]]; then
         error "Redis не отвечает после настройки."
     fi
-
     success "Redis настроен, запущен и защищён паролем"
 }
 
@@ -311,9 +469,8 @@ verify_infrastructure() {
     if [[ -z "$PG_PORT" ]]; then
         PG_PORT=5432
     fi
-
     if ! ss -tlnp | grep -qE ":${PG_PORT}\s"; then
-        error "PostgreSQL не слушает порт $PG_PORT. Проверьте: journalctl -u postgresql"
+        error "PostgreSQL не слушает порт $PG_PORT."
     fi
     success "PostgreSQL слушает порт $PG_PORT"
 
@@ -323,9 +480,12 @@ verify_infrastructure() {
     success "Redis полностью функционирует"
 }
 
+# ══════════════════════════════════════════════════════════════
+#  FIREWALL
+# ══════════════════════════════════════════════════════════════
+
 setup_firewall() {
     log "Настройка UFW firewall..."
-
     if ! command -v ufw &>/dev/null; then
         warn "UFW не установлен, пропуск"
         return
@@ -352,13 +512,15 @@ setup_firewall() {
     ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
     ufw deny 8080/tcp comment 'Webhook Internal' >/dev/null 2>&1 || true
     ufw deny 6379/tcp comment 'Redis (blocked external)' >/dev/null 2>&1 || true
-
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
     ufw --force enable >/dev/null 2>&1 || error "Ошибка включения UFW"
-
     success "UFW настроен безопасно"
 }
+
+# ══════════════════════════════════════════════════════════════
+#  SYNC / VENV
+# ══════════════════════════════════════════════════════════════
 
 migrate_to_opt() {
     if [ "$START_DIR" != "$PROJECT_DIR" ]; then
@@ -377,20 +539,23 @@ migrate_to_opt() {
 
 setup_venv() {
     log "Настройка Python VENV..."
-
     [ ! -d "$VENV_DIR" ] && python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
-
     pip install --upgrade pip setuptools wheel > /dev/null 2>&1
-
     local pip_log="$PROJECT_DIR/pip-install.log"
     if ! pip install -r "$PROJECT_DIR/requirements.txt" > "$pip_log" 2>&1; then
         error "Ошибка установки pip. Лог: $pip_log
 $(tail -20 "$pip_log")"
     fi
-
     success "Зависимости Python установлены"
 }
+
+# ══════════════════════════════════════════════════════════════
+#  .ENV — ПОЛНОСТЬЮ ПЕРЕОСМЫСЛЁННЫЙ ВВОД
+#  • Ни одна ошибка ввода не убивает скрипт
+#  • /cancel в любом поле → выход из setup_env (не из деплоя)
+#  • ADMIN_IDS конвертируется в JSON для pydantic List[int]
+# ══════════════════════════════════════════════════════════════
 
 setup_env() {
     log "Настройка .env файла..."
@@ -402,53 +567,86 @@ setup_env() {
         fi
     fi
 
-    echo -e "${BLUE}[1/4]${NC} Telegram Bot Token"
-    read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN
     echo ""
-    [ -z "$BOT_TOKEN" ] && error "Токен обязателен"
-    if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]]; then
-        warn "Токен не похож на стандартный формат Telegram (число:строка). Убедитесь, что это корректный токен."
-    fi
+    echo -e "${CYAN}Подсказка: введите ${BOLD}/cancel${NC}${CYAN} в любом поле для отмены настройки .env${NC}"
+    echo ""
 
-    echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов (через запятую)"
-    read -p "Введите ADMIN_IDS: " ADMIN_IDS
-    [ -z "$ADMIN_IDS" ] && error "ADMIN_IDS обязательны"
-
-    # ──────────────────────────────────────────────────────────
-    # ИСПРАВЛЕНО: конвертация ADMIN_IDS в JSON-список для
-    # pydantic-settings (List[int] требует формат [1,2,3]).
-    #
-    # Было:  write_env_var "ADMIN_IDS" "872658825"
-    #        → .env: ADMIN_IDS='872658825'
-    #        → pydantic: ValidationError (int, не list)
-    #
-    # Стало: ADMIN_IDS_JSON="[872658825]"
-    #        → .env: ADMIN_IDS='[872658825]'
-    #        → pydantic: List[int] = [872658825] ✓
-    # ──────────────────────────────────────────────────────────
-    ADMIN_IDS_JSON=$(echo "$ADMIN_IDS" | sed 's/[[:space:]]//g' | sed 's/^/[/' | sed 's/$/]/')
-    if ! echo "$ADMIN_IDS_JSON" | grep -qE '^\[[0-9]+(,[0-9]+)*\]$'; then
-        error "ADMIN_IDS должны содержать только числовые Telegram ID через запятую (например: 123456789, 987654321)"
-    fi
-
-    echo -e "${BLUE}[3/4]${NC} Username поддержки [support]"
-    read -p "Введите SUPPORT_USERNAME: " SUPPORT_USERNAME
-    SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
-
-    echo -e "${BLUE}[4/4]${NC} YooKassa (Enter для пропуска)"
-    read -p "Введите YOOKASSA_SHOP_ID: " YOOKASSA_SHOP_ID
-    YOOKASSA_SECRET_KEY=""
-    if [ -n "$YOOKASSA_SHOP_ID" ]; then
-        read -s -p "Введите YOOKASSA_SECRET_KEY (скрыт): " YOOKASSA_SECRET_KEY
+    # ── 1/4: BOT_TOKEN ──
+    echo -e "${BLUE}[1/4]${NC} Telegram Bot Token"
+    local BOT_TOKEN=""
+    while true; do
+        read -s -p "Введите BOT_TOKEN (скрыт): " BOT_TOKEN
         echo ""
-        [ -z "$YOOKASSA_SECRET_KEY" ] && error "YOOKASSA_SECRET_KEY обязателен при указанном YOOKASSA_SHOP_ID"
+        if [[ "$BOT_TOKEN" == "/cancel" ]]; then
+            warn "Настройка .env отменена. Используется существующий .env (если есть)."
+            return
+        fi
+        if [[ -z "$BOT_TOKEN" ]]; then
+            input_error "Токен не может быть пустым."
+            input_hint "Получите токен у @BotFather → /token"
+            continue
+        fi
+        if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]]; then
+            warn "Токен не похож на стандартный формат Telegram (число:строка)."
+            if ! confirm "Продолжить с этим значением?"; then
+                continue
+            fi
+        fi
+        break
+    done
+
+    # ── 2/4: ADMIN_IDS (с конвертацией в JSON) ──
+    echo -e "${BLUE}[2/4]${NC} Telegram ID администраторов"
+    local ADMIN_IDS_JSON=""
+    if ! read_admin_ids ADMIN_IDS_JSON; then
+        warn "Настройка .env отменена."
+        return
     fi
 
+    # ── 3/4: SUPPORT_USERNAME ──
+    echo -e "${BLUE}[3/4]${NC} Username поддержки [support]"
+    local SUPPORT_USERNAME=""
+    read -p "Введите SUPPORT_USERNAME: " SUPPORT_USERNAME
+    if [[ "$SUPPORT_USERNAME" == "/cancel" ]]; then
+        warn "Настройка .env отменена."
+        return
+    fi
+    SUPPORT_USERNAME=${SUPPORT_USERNAME:-support}
+    # Убираем @ если пользователь ввёл с @
+    SUPPORT_USERNAME="${SUPPORT_USERNAME#@}"
+
+    # ── 4/4: YooKassa (опционально, но с валидацией) ──
+    echo -e "${BLUE}[4/4]${NC} YooKassa (Enter для пропуска)"
+    local YOOKASSA_SHOP_ID=""
+    local YOOKASSA_SECRET_KEY=""
+    read -p "Введите YOOKASSA_SHOP_ID: " YOOKASSA_SHOP_ID
+    if [[ "$YOOKASSA_SHOP_ID" == "/cancel" ]]; then
+        warn "Настройка .env отменена."
+        return
+    fi
+
+    if [ -n "$YOOKASSA_SHOP_ID" ]; then
+        while true; do
+            read -s -p "Введите YOOKASSA_SECRET_KEY (скрыт): " YOOKASSA_SECRET_KEY
+            echo ""
+            if [[ "$YOOKASSA_SECRET_KEY" == "/cancel" ]]; then
+                warn "Настройка .env отменена."
+                return
+            fi
+            if [[ -z "$YOOKASSA_SECRET_KEY" ]]; then
+                input_error "YOOKASSA_SECRET_KEY обязателен при указанном YOOKASSA_SHOP_ID."
+                input_hint "Найдите ключ в кабинете YooKassa → Настройки → Секретный ключ"
+                continue
+            fi
+            break
+        done
+    fi
+
+    # ── DB_ENCRYPTION_KEY ──
     local EXISTING_KEY=""
     if [ -f "$PROJECT_DIR/.env" ]; then
         EXISTING_KEY=$(grep "^DB_ENCRYPTION_KEY=" "$PROJECT_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'")
     fi
-
     local DB_KEY
     if [ -n "$EXISTING_KEY" ]; then
         DB_KEY="$EXISTING_KEY"
@@ -458,14 +656,17 @@ setup_env() {
         log "Сгенерирован новый DB_ENCRYPTION_KEY"
     fi
 
+    # ── Пароль БД ──
     local DB_PASSWORD
     if [[ -n "${PG_PASS_FILE:-}" && -f "$PG_PASS_FILE" ]]; then
         DB_PASSWORD=$(cat "$PG_PASS_FILE")
         rm -f "$PG_PASS_FILE"
         PG_PASS_FILE=""
     else
-        read -s -p "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD
-        echo ""
+        if ! read_required_secret "Введите пароль от PostgreSQL (projectx): " DB_PASSWORD; then
+            warn "Настройка .env отменена."
+            return
+        fi
     fi
 
     local PG_PORT
@@ -478,6 +679,7 @@ setup_env() {
         REDIS_PASSWORD=$(openssl rand -hex 32)
     fi
 
+    # ── Запись .env ──
     : > "$PROJECT_DIR/.env"
 
     write_env_var "BOT_TOKEN" "$BOT_TOKEN"
@@ -505,6 +707,7 @@ setup_env() {
     chown projectx:projectx "$PROJECT_DIR/.env"
     chmod 600 "$PROJECT_DIR/.env"
 
+    # ── Финальная валидация файла ──
     if [[ ! -s "$PROJECT_DIR/.env" ]]; then
         error ".env файл пуст после записи!"
     fi
@@ -514,9 +717,16 @@ setup_env() {
     if ! grep -q "^DATABASE_URL=" "$PROJECT_DIR/.env"; then
         error ".env не содержит DATABASE_URL!"
     fi
+    if ! grep -q "^ADMIN_IDS=" "$PROJECT_DIR/.env"; then
+        error ".env не содержит ADMIN_IDS!"
+    fi
 
     success ".env защищён и валидирован (Порт БД: $PG_PORT)"
 }
+
+# ══════════════════════════════════════════════════════════════
+#  ПРАВА / БД / SYSTEMD / NGINX / BACKUP / MONITORING / START
+# ══════════════════════════════════════════════════════════════
 
 verify_permissions() {
     chown -R projectx:projectx "$PROJECT_DIR"
@@ -534,7 +744,6 @@ verify_permissions() {
 init_database() {
     log "Инициализация схемы БД PostgreSQL..."
     cd "$PROJECT_DIR"
-
     if ! runuser -u projectx -- "$VENV_DIR/bin/python" -c "
 import asyncio
 from database.connection import init_db
@@ -543,15 +752,12 @@ asyncio.run(init_db())
         warn "Ошибка инициализации БД"
         return 1
     fi
-
     success "БД инициализирована"
 }
 
 setup_systemd() {
     log "Настройка systemd сервиса..."
-
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=ProjectX Telegram Bot
@@ -577,10 +783,8 @@ ReadWritePaths=$PROJECT_DIR
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
-
     success "Systemd настроен"
 }
 
@@ -588,7 +792,6 @@ setup_nginx_ssl() {
     if ! grep -q "YOOKASSA_SHOP_ID" "$PROJECT_DIR/.env" 2>/dev/null; then
         return
     fi
-
     local SHOP_ID
     SHOP_ID=$(grep "^YOOKASSA_SHOP_ID=" "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d "\"'")
     [ -z "$SHOP_ID" ] && return
@@ -598,17 +801,25 @@ setup_nginx_ssl() {
     WEBHOOK_PORT=${WEBHOOK_PORT:-8080}
 
     log "Настройка Nginx для YooKassa webhook"
-
     if ! command -v nginx &>/dev/null; then
         warn "Nginx не установлен, пропускаю настройку reverse proxy"
         return
     fi
 
-    read -p "Домен для webhook (например: api.example.com): " DOMAIN
-    [ -z "$DOMAIN" ] && return
+    local DOMAIN=""
+    while true; do
+        read -p "Домен для webhook (например: api.example.com, Enter для пропуска): " DOMAIN
+        if [[ -z "$DOMAIN" ]]; then
+            warn "Домен не указан, пропускаю настройку Nginx/SSL"
+            return
+        fi
+        if [[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+            break
+        fi
+        input_error "Некорректный формат домена."
+    done
 
     rm -f /etc/nginx/sites-enabled/default
-
     cat > "/etc/nginx/sites-available/projectx" << NGINXEOF
 limit_req_zone \$binary_remote_addr zone=mylimit:10m rate=10r/s;
 
@@ -645,7 +856,6 @@ server {
 NGINXEOF
 
     ln -sf /etc/nginx/sites-available/projectx /etc/nginx/sites-enabled/
-
     if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx
         success "Nginx настроен"
@@ -653,17 +863,21 @@ NGINXEOF
         warn "Nginx конфиг невалиден, проверьте вручную: nginx -t"
     fi
 
-    read -p "Email для SSL (certbot): " LE_EMAIL
-    if ! timeout 120 certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" --redirect >/dev/null 2>&1; then
-        error "SSL не получен. Платёжный webhook нельзя считать готовым."
+    local LE_EMAIL=""
+    read -p "Email для SSL (certbot, Enter для пропуска): " LE_EMAIL
+    if [[ -z "$LE_EMAIL" ]]; then
+        warn "Email не указан, пропускаю получение SSL"
+        return
     fi
 
+    if ! timeout 120 certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "$LE_EMAIL" --redirect >/dev/null 2>&1; then
+        error "SSL не получен. Платёжный webhook нельзя считать готовым."
+    fi
     success "SSL получен и Nginx переведён на HTTPS"
 }
 
 setup_backup() {
     log "Настройка бэкапов..."
-
     mkdir -p "$BACKUP_DIR"
     chown projectx:projectx "$BACKUP_DIR"
 
@@ -673,18 +887,15 @@ set -euo pipefail
 DIR="/root/backups/projectx"
 DATE=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$DIR"
-
 if su - postgres -c "pg_dump -Fc projectx_bot" | gzip > "$DIR/db_$DATE.sql.gz"; then
     echo "[$(date)] PostgreSQL backup created"
 else
     echo "[$(date)] PostgreSQL backup FAILED" >&2
     exit 1
 fi
-
 cp /opt/projectx-bot/.env "$DIR/env_$DATE.bak"
 gzip "$DIR/env_$DATE.bak"
 chmod 600 "$DIR/env_$DATE.bak.gz" 2>/dev/null || true
-
 find "$DIR" -type f -mtime +30 -delete
 EOF
     chmod +x /usr/local/bin/projectx-backup.sh
@@ -848,8 +1059,12 @@ start_bot() {
     rollback "start_bot" "Бот не смог запуститься"
 }
 
+# ══════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════
+
 main() {
-    echo -e "${GREEN}🚀 ProjectX Bot Deploy v9.0 (YooKassa + Hardened + Validated)${NC}
+    echo -e "${GREEN}🚀 ProjectX Bot Deploy v10.0 (Resilient Input + YooKassa)${NC}
 "
 
     mkdir -p /var/log "$SNAPSHOT_DIR"
