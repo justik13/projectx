@@ -23,11 +23,21 @@ _user_cache: TTLCache[int, User | None] = TTLCache(
     maxsize=USER_CONTEXT_CACHE_MAX_SIZE,
     ttl=USER_CONTEXT_CACHE_TTL,
 )
+
 _SENTINEL = object()
 
 
 def invalidate_user_cache(telegram_id: int) -> None:
     _user_cache.pop(telegram_id, None)
+
+
+def clear_user_cache() -> None:
+    """
+    Полная очистка кэша пользователей.
+    Используется при массовых обновлениях (например, смена
+    device_limit у тарифа с >50 пользователями).
+    """
+    _user_cache.clear()
 
 
 class UserContextMiddleware(BaseMiddleware):
@@ -38,7 +48,6 @@ class UserContextMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         telegram_id: int | None = None
-
         if isinstance(event, Message) and event.from_user:
             telegram_id = event.from_user.id
         elif isinstance(event, CallbackQuery) and event.from_user:
@@ -70,7 +79,6 @@ class UserContextMiddleware(BaseMiddleware):
                 session,
                 telegram_id,
             )
-
             if existing_any is not None and existing_any.is_deleted:
                 user = None
             elif existing_any is not None and not existing_any.is_deleted:

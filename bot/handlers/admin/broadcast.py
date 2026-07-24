@@ -1,9 +1,7 @@
 import asyncio
 import logging
-import time
 
 from utils.telegram import render_hub, send_hub_photo, safe
-
 from aiogram.filters import StateFilter
 from aiogram import Router, F
 from aiogram.exceptions import (
@@ -29,13 +27,13 @@ from database.repositories.users_repo import mark_user_bot_blocked
 from services.audit_service import AuditService
 from utils.admin import is_admin
 from utils.datetime_helpers import now_utc
+from utils.global_rate_limiter import acquire_global_rate
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 _broadcast_stop_events: dict[int, asyncio.Event] = {}
 _broadcast_in_progress: set[int] = set()
-
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -44,33 +42,6 @@ def _start_background_task(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
-
-
-class BroadcastRateLimiter:
-    def __init__(self, rate: float = 20.0):
-        self.rate = rate
-        self.tokens = rate
-        self.last_refill = time.monotonic()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self):
-        while True:
-            async with self._lock:
-                now = time.monotonic()
-                elapsed = now - self.last_refill
-                self.tokens = min(
-                    self.rate,
-                    self.tokens + elapsed * self.rate,
-                )
-                self.last_refill = now
-                if self.tokens >= 1.0:
-                    self.tokens -= 1.0
-                    return
-                wait_time = (1.0 - self.tokens) / self.rate
-            await asyncio.sleep(wait_time)
-
-
-_broadcast_limiter = BroadcastRateLimiter(rate=20.0)
 
 
 def _get_stop_event(admin_id: int) -> asyncio.Event:
@@ -95,7 +66,6 @@ async def start_broadcast(
             show_alert=True,
         )
         return
-
     await state.clear()
     try:
         await callback.message.edit_text(
@@ -104,7 +74,6 @@ async def start_broadcast(
         )
     except TelegramBadRequest as e:
         logger.debug(f"start_broadcast edit_text failed: {e}")
-
     await state.set_state(AdminStates.entering_broadcast_message)
 
 
@@ -116,7 +85,6 @@ async def process_broadcast_message(
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-
     if message.text and message.text.startswith("/"):
         await state.clear()
         return
@@ -133,7 +101,6 @@ async def process_broadcast_message(
 
     media_id = None
     content_type = message.content_type
-
     if message.photo:
         media_id = message.photo[-1].file_id
     elif message.document:
@@ -173,7 +140,6 @@ async def process_broadcast_message(
                 get_broadcast_confirm_keyboard(),
                 parse_mode="HTML",
             )
-
         await state.update_data(
             broadcast_text=broadcast_text,
             media_id=media_id,
@@ -334,26 +300,21 @@ async def _send_broadcast_to_users_with_resume(
             progress = await session.get(BroadcastProgress, progress_id)
             if not progress:
                 return
-
             if progress.status == "stopping":
                 progress.status = "stopped"
                 await session.commit()
                 final_progress = progress
                 return
-
             if progress.status != "in_progress":
                 return
-
             should_finalize = True
             stop_event = _get_stop_event(admin_id)
             stop_event.clear()
-
             broadcast_text = progress.broadcast_text
             media_id = progress.media_id
             content_type = progress.content_type
             target_audience = progress.target_audience
             last_id = progress.last_processed_id
-
             logger.info(
                 f"Broadcast resume/start: admin={admin_id}, "
                 f"progress_id={progress_id}, starting from id {last_id}"
@@ -380,7 +341,12 @@ async def _send_broadcast_to_users_with_resume(
                     if stop_event and stop_event.is_set():
                         break
                     try:
-                        await _broadcast_limiter.acquire()
+                        #
+                        # ИСПРАВЛЕНО (Фаза 2, фикс 6):
+                        # Единый global rate limiter вместо
+                        # отдельного BroadcastRateLimiter.
+                        #
+                        await acquire_global_rate()
                         await _dispatch_message(
                             bot,
                             uid,
@@ -392,7 +358,7 @@ async def _send_broadcast_to_users_with_resume(
                     except TelegramRetryAfter as e:
                         await asyncio.sleep(e.retry_after + 1)
                         try:
-                            await _broadcast_limiter.acquire()
+                            await acquire_global_rate()
                             await _dispatch_message(
                                 bot,
                                 uid,
@@ -422,9 +388,8 @@ async def _send_broadcast_to_users_with_resume(
                     progress.success_count += local_success
                     progress.fail_count += local_fail
                     await session.commit()
-
-                local_success = 0
-                local_fail = 0
+                    local_success = 0
+                    local_fail = 0
 
         if should_finalize:
             async with session_scope() as session:
@@ -566,7 +531,6 @@ async def _start_broadcast_process(
     audience: str,
 ):
     admin_id = callback.from_user.id
-
     if admin_id in _broadcast_in_progress:
         await callback.answer(
             texts.BROADCAST_ALREADY_RUNNING,
@@ -575,33 +539,27 @@ async def _start_broadcast_process(
         return
 
     #
-    # ИСПРАВЛЕНО: дополнительная проверка в DB.
+    # ИСПРАВЛЕНО (Фаза 3, фикс 8):
     #
-    # _broadcast_in_progress — in-memory set. При рестарте бота
-    # он очищается. resume_pending_broadcasts восстанавливает
-    # из DB, но есть окно между стартом и resume.
+    # Раньше использовались две разные сессии:
+    #   1) session_scope() для проверки active broadcast в DB
+    #   2) session (из middleware) для count
     #
-    # Теперь проверяем DB, чтобы не запустить дублирующую рассылку.
+    # Между ними другой админ мог запустить broadcast.
+    # Теперь обе проверки в одной сессии (session из middleware).
     #
-    try:
-        async with session_scope() as check_session:
-            active_count = await check_session.scalar(
-                select(func.count(BroadcastProgress.id)).where(
-                    BroadcastProgress.admin_id == admin_id,
-                    BroadcastProgress.status == "in_progress",
-                )
-            )
-            if active_count and active_count > 0:
-                await callback.answer(
-                    texts.BROADCAST_ALREADY_RUNNING,
-                    show_alert=True,
-                )
-                return
-    except Exception as e:
-        logger.warning(
-            "Failed to check DB for active broadcasts: %s",
-            e,
+    active_count = await session.scalar(
+        select(func.count(BroadcastProgress.id)).where(
+            BroadcastProgress.admin_id == admin_id,
+            BroadcastProgress.status == "in_progress",
         )
+    )
+    if active_count and active_count > 0:
+        await callback.answer(
+            texts.BROADCAST_ALREADY_RUNNING,
+            show_alert=True,
+        )
+        return
 
     data = await state.get_data()
     broadcast_text = data.get("broadcast_text")
@@ -681,6 +639,14 @@ async def _start_broadcast_process(
     await state.clear()
 
 
+#
+# ИСПРАВЛЕНО (Фаза 1, фикс 2):
+#
+# Убрано session: AsyncSession = None.
+# Раньше при сбое middleware handler получал None
+# и падал с AttributeError на session.execute().
+# Теперь aiogram инжектит session из DBSessionMiddleware.
+#
 @router.callback_query(
     StateFilter(AdminStates.confirming_broadcast),
     F.data == "broadcast_send_all",
@@ -688,7 +654,7 @@ async def _start_broadcast_process(
 async def broadcast_to_all(
     callback: CallbackQuery,
     state: FSMContext,
-    session: AsyncSession = None,
+    session: AsyncSession,
 ):
     if not is_admin(callback.from_user.id):
         await callback.answer(
@@ -711,7 +677,7 @@ async def broadcast_to_all(
 async def broadcast_to_active(
     callback: CallbackQuery,
     state: FSMContext,
-    session: AsyncSession = None,
+    session: AsyncSession,
 ):
     if not is_admin(callback.from_user.id):
         await callback.answer(
@@ -735,9 +701,7 @@ async def stop_broadcast(callback: CallbackQuery):
             show_alert=True,
         )
         return
-
     admin_id = callback.from_user.id
-
     try:
         async with session_scope() as session:
             await session.execute(
@@ -752,10 +716,8 @@ async def stop_broadcast(callback: CallbackQuery):
         logger.error(
             f"Failed to set broadcast status to stopping: {e}"
         )
-
     stop_event = _get_stop_event(admin_id)
     stop_event.set()
-
     await callback.answer(
         texts.BROADCAST_STOPPING,
         show_alert=True,

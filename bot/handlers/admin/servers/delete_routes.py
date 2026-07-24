@@ -119,7 +119,18 @@ async def confirm_delete_server(
             VPNProfile.server_id == server.id
         ),
     )
-    profiles_data = result.all()
+    #
+    # ИСПРАВЛЕНО (Фаза 1, фикс 3):
+    #
+    # Раньше profiles_data = result.all() возвращал list[Row].
+    # Row-объекты SQLAlchemy привязаны к курсору и могут стать
+    # невалидными после session.close() в session_scope.finally.
+    # Background task _delete_server_background делал
+    # `for pid, peer in profiles_data` → crash в фоне.
+    #
+    # Теперь материализуем в plain tuples ДО queue_post_commit_task.
+    #
+    profiles_data = [(row[0], row[1]) for row in result.all()]
 
     deleted_profiles = await delete_profiles_by_server_id(
         session,
@@ -138,15 +149,7 @@ async def confirm_delete_server(
     )
 
     #
-    # ИСПРАВЛЕНО: PendingAPIDeletion создаётся ДО commit.
-    #
-    # Раньше PendingAPIDeletion создавался только в post-commit task
-    # (_delete_server_background). Если бот перезапускался между
-    # commit и выполнением post-commit task, пиры не удалялись
-    # из API, и PendingAPIDeletion не создавался.
-    #
-    # Теперь записи создаются в той же транзакции, что и удаление
-    # сервера. Cleanup worker подхватит их при любом раскладе.
+    # PendingAPIDeletion создаётся ДО commit.
     #
     if profiles_data:
         current_time = now_utc()
@@ -177,7 +180,7 @@ async def confirm_delete_server(
 
     #
     # Post-commit task пытается удалить пиры сразу.
-    # При успехе — удаляет записи из pending.
+    # При успехе — удалит записи из pending.
     # При ошибке — записи остаются, cleanup повторит.
     #
     if profiles_data:

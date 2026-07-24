@@ -18,7 +18,10 @@ from bot.keyboards import (
 from bot.keyboards.admin.users import (
     get_admin_confirm_action_keyboard,
 )
-from bot.middlewares.user_context import invalidate_user_cache
+from bot.middlewares.user_context import (
+    clear_user_cache,
+    invalidate_user_cache,
+)
 from bot.states import AdminStates
 from database.models import Payment, User, VPNProfile
 from database.repositories.tariffs_repo import (
@@ -38,6 +41,13 @@ logger = logging.getLogger(__name__)
 
 TARIFFS_PER_PAGE = 10
 
+#
+# Порог для полной очистки кэша пользователей.
+# Если тариф используют больше пользователей, чем этот порог,
+# дешевле очистить весь кэш, чем вызывать pop() для каждого.
+#
+_CACHE_CLEAR_THRESHOLD = 50
+
 
 async def _build_tariffs_list_text_and_kb(
     tariffs,
@@ -50,7 +60,6 @@ async def _build_tariffs_list_text_and_kb(
         f"(стр. {page}/{total_pages}) · Всего: {total}\n"
     )
     builder = InlineKeyboardBuilder()
-
     if not tariffs:
         rendered += "<i>Тарифов пока нет</i>\n"
     else:
@@ -65,7 +74,6 @@ async def _build_tariffs_list_text_and_kb(
                 ),
                 callback_data=f"admin_tariff_card:{tariff.id}",
             )
-
     if page > 1:
         builder.button(
             text="⬅️",
@@ -155,7 +163,6 @@ async def show_tariffs_list(
             show_alert=True,
         )
         return
-
     await state.clear()
     await _show_tariffs_list(callback, session, page=1)
     await callback.answer()
@@ -173,7 +180,6 @@ async def tariffs_pagination(
             show_alert=True,
         )
         return
-
     await state.clear()
     page = int(callback.data.split(":")[1])
     await _show_tariffs_list(callback, session, page=page)
@@ -187,10 +193,9 @@ async def _show_tariff_card(
     status = (
         "🟢 Активен"
         if tariff.is_active
-        else "🔴 Отключен"
+        else "🔴 Отключён"
     )
     device_limit = getattr(tariff, "device_limit", 2)
-
     rendered = texts.ADMIN_TARIFF_CARD.format(
         id=tariff.id,
         duration_days=tariff.duration_days,
@@ -198,7 +203,6 @@ async def _show_tariff_card(
         price_rub=tariff.price_rub,
         status=status,
     )
-
     try:
         await callback.message.edit_text(
             rendered,
@@ -224,7 +228,6 @@ async def show_tariff_card(
             show_alert=True,
         )
         return
-
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
@@ -234,7 +237,6 @@ async def show_tariff_card(
             show_alert=True,
         )
         return
-
     await _show_tariff_card(callback, tariff)
     await callback.answer()
 
@@ -251,7 +253,6 @@ async def toggle_tariff_confirm(
             show_alert=True,
         )
         return
-
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
@@ -287,7 +288,6 @@ async def toggle_tariff_confirm(
         )
     except TelegramBadRequest as e:
         logger.debug(f"toggle_tariff_confirm edit_text failed: {e}")
-
     await callback.answer()
 
 
@@ -303,7 +303,6 @@ async def toggle_tariff_apply(
             show_alert=True,
         )
         return
-
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
@@ -316,14 +315,6 @@ async def toggle_tariff_apply(
 
     new_status = not tariff.is_active
 
-    #
-    # Если тариф выключается, проверяем ожидающие платежи.
-    #
-    # Это защищает сценарий:
-    # - пользователь начал оплату;
-    # - админ выключил тариф;
-    # - платёж зависает или уходит в manual review.
-    #
     if not new_status:
         pending_count = await _get_pending_payments_count_for_tariff(
             session,
@@ -378,7 +369,6 @@ async def delete_tariff_handler(
             show_alert=True,
         )
         return
-
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
@@ -428,13 +418,11 @@ async def delete_tariff_handler(
         return
 
     device_limit = getattr(tariff, "device_limit", 2)
-
     text = texts.ADMIN_TARIFF_DELETE_CONFIRM.format(
         duration_days=tariff.duration_days,
         device_limit=device_limit,
         price_rub=tariff.price_rub,
     )
-
     try:
         await callback.message.edit_text(
             text,
@@ -446,7 +434,6 @@ async def delete_tariff_handler(
         )
     except TelegramBadRequest as e:
         logger.debug(f"delete_tariff_handler confirm edit_text failed: {e}")
-
     await callback.answer()
 
 
@@ -462,7 +449,6 @@ async def delete_tariff_apply(
             show_alert=True,
         )
         return
-
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     tariff = await get_tariff_by_id(session, tariff_id)
@@ -549,7 +535,6 @@ async def delete_tariff_apply(
         ),
         show_alert=True,
     )
-
     await _show_tariffs_list(callback, session, page=1)
 
 
@@ -565,12 +550,10 @@ async def _start_edit_tariff(
             show_alert=True,
         )
         return
-
     await state.clear()
     tariff_id = int(callback.data.split(":")[1])
     await state.update_data(tariff_id=tariff_id)
     await state.set_state(field_state)
-
     try:
         await callback.message.edit_text(
             prompt_text,
@@ -578,7 +561,6 @@ async def _start_edit_tariff(
         )
     except TelegramBadRequest as e:
         logger.debug(f"_start_edit_tariff edit_text failed: {e}")
-
     await callback.answer()
 
 
@@ -644,15 +626,6 @@ async def _apply_tariff_int_edit(
 
     old_value = getattr(tariff, field_name)
 
-    #
-    # Защита опасных изменений тарифа.
-    #
-    # Для duration_days и device_limit:
-    # - нельзя менять, если есть pending/requires_manual_review платежи;
-    #
-    # Для device_limit дополнительно:
-    # - нельзя уменьшать лимит, если у пользователей уже больше устройств.
-    #
     if field_name in ("duration_days", "device_limit"):
         pending_count = await _get_pending_payments_count_for_tariff(
             session,
@@ -696,10 +669,6 @@ async def _apply_tariff_int_edit(
             await state.clear()
             return
 
-    #
-    # Если меняется device_limit, нужно позже инвалидировать кэш
-    # пользователей, у которых обновится лимит.
-    #
     affected_telegram_ids: list[int] = []
     if field_name == "device_limit":
         users_stmt = select(User.telegram_id).where(
@@ -717,14 +686,6 @@ async def _apply_tariff_int_edit(
         **{field_name: new_value},
     )
 
-    #
-    # Если админ меняет лимит устройств у тарифа,
-    # нужно синхронизировать user.device_limit у пользователей,
-    # которые сейчас привязаны к этому тарифу.
-    #
-    # Иначе user.device_limit может остаться старым,
-    # что приведёт к расхождениям в проверках и отображении.
-    #
     if field_name == "device_limit":
         await session.execute(
             update(User)
@@ -736,8 +697,28 @@ async def _apply_tariff_int_edit(
         )
         await session.flush()
 
-        for telegram_id in affected_telegram_ids:
-            invalidate_user_cache(telegram_id)
+        #
+        # ИСПРАВЛЕНО (Фаза 3, фикс 12):
+        #
+        # Раньше: invalidate_user_cache(telegram_id) в цикле
+        # для каждого пользователя тарифа.
+        # При 5000 пользователях — 5000 вызовов dict.pop(),
+        # блокирующих event loop.
+        #
+        # Теперь: если пользователей > _CACHE_CLEAR_THRESHOLD,
+        # очищаем весь кэш одним вызовом clear().
+        #
+        if len(affected_telegram_ids) > _CACHE_CLEAR_THRESHOLD:
+            clear_user_cache()
+            logger.info(
+                "Cleared entire user cache (%s users affected "
+                "by tariff %s device_limit change)",
+                len(affected_telegram_ids),
+                tariff_id,
+            )
+        else:
+            for telegram_id in affected_telegram_ids:
+                invalidate_user_cache(telegram_id)
 
         logger.info(
             "Synced user.device_limit for tariff %s: %s -> %s",

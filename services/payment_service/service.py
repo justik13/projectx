@@ -1,7 +1,7 @@
 import logging
 from datetime import timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -87,7 +87,6 @@ async def _log_event_safe(
 
 
 class PaymentService:
-
     @staticmethod
     async def _apply_payment_snapshot(
         session: AsyncSession,
@@ -124,11 +123,14 @@ class PaymentService:
         payment.status = "requires_manual_review"
         payment.manual_review_reason = reason
         await session.flush()
+
         await _log_event_safe(
             session, payment.id, "manual_review",
             reason=reason, source=source,
         )
+
         snapshot = _build_payment_snapshot(payment)
+
         await AuditService.log_action(
             session,
             admin_id=0,
@@ -137,6 +139,7 @@ class PaymentService:
             target_id=payment.id,
             details=f"reason={reason}, source={source}",
         )
+
         queue_post_commit_task(
             session,
             lambda s=snapshot, r=reason, src=source: (
@@ -144,9 +147,10 @@ class PaymentService:
             ),
         )
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
     # Обработка успешного платежа
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+
     @staticmethod
     async def handle_successful_payment(
         session: AsyncSession,
@@ -158,6 +162,7 @@ class PaymentService:
 
         redis_lock = None
         acquired = False
+
         try:
             redis = await _get_redis()
             user_lock_key = (
@@ -235,8 +240,8 @@ class PaymentService:
 
                 user = payment.user
                 tariff = payment.tariff
-                manual_review_reason = None
 
+                manual_review_reason = None
                 duration_days = _get_payment_snapshot_duration(
                     payment
                 )
@@ -364,6 +369,7 @@ class PaymentService:
                 payment_id, e, exc_info=True,
             )
             return False, "error"
+
         finally:
             if redis_lock is not None and acquired:
                 try:
@@ -371,9 +377,10 @@ class PaymentService:
                 except Exception:
                     pass
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
     # Ручная выдача
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+
     @staticmethod
     async def force_grant_payment(
         session: AsyncSession,
@@ -381,6 +388,7 @@ class PaymentService:
         admin_id: int,
     ) -> tuple:
         allowed_statuses = MANUAL_GRANT_ALLOWED_STATUSES
+
         try:
             async with session.begin_nested():
                 payment = await get_payment_by_id_for_update(
@@ -388,10 +396,13 @@ class PaymentService:
                 )
                 if not payment:
                     return False, "Платёж не найден"
+
                 if payment.status == "completed":
                     return False, "Платёж уже выдан"
+
                 if payment.status == "refunded":
                     return False, "Платёж возвращён"
+
                 if payment.status not in allowed_statuses:
                     return False, "Недопустимый статус"
 
@@ -409,6 +420,7 @@ class PaymentService:
                 device_limit = _get_payment_snapshot_device_limit(
                     payment
                 )
+
                 if duration_days is None or device_limit is None:
                     return False, "Не найдены условия покупки"
 
@@ -459,6 +471,7 @@ class PaymentService:
                 is_first_payment = (
                     len(successful_payments) == 1
                 )
+
                 if user.referred_by:
                     try:
                         await ReferralService.process_bonus(
@@ -492,6 +505,7 @@ class PaymentService:
                     pass
 
                 return True, "ok"
+
         except Exception as e:
             logger.error(
                 "force_grant_payment failed: %s",
@@ -499,9 +513,10 @@ class PaymentService:
             )
             return False, f"Ошибка БД: {e}"
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
     # Создание платежа через YooKassa
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+
     @staticmethod
     async def create_yookassa_payment(
         session: AsyncSession,
@@ -512,8 +527,8 @@ class PaymentService:
         bot_username: str,
     ) -> tuple:
         from config.settings import get_settings
-        settings = get_settings()
 
+        settings = get_settings()
         decimal_amount = _to_decimal(amount)
         if decimal_amount is None:
             logger.error(
@@ -536,6 +551,7 @@ class PaymentService:
         await PaymentService._apply_payment_snapshot(
             session, payment, tariff,
         )
+
         await _log_event_safe(
             session, payment.id, "payment_created",
             source="yookassa",
@@ -610,9 +626,10 @@ class PaymentService:
 
         return payment, None
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
     # Обработка webhook от YooKassa
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+
     @staticmethod
     async def handle_yookassa_callback(
         session: AsyncSession,
@@ -623,6 +640,25 @@ class PaymentService:
         callback_payload: str | None = None,
         callback_currency: str | None = None,
     ) -> tuple:
+        #
+        # ИСПРАВЛЕНО (Фаза 3, фикс 9):
+        #
+        # Добавлен statement_timeout для защиты от deadlock.
+        # SELECT FOR UPDATE блокирует строку до конца транзакции.
+        # Если транзакция долгая (extend_subscription, referral,
+        # audit), параллельные webhook'и висят в очереди.
+        #
+        # SET LOCAL действует только до конца текущей транзакции.
+        #
+        try:
+            await session.execute(
+                text("SET LOCAL statement_timeout = '10s'")
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to set statement_timeout: %s", e,
+            )
+
         stmt = (
             select(Payment)
             .options(
@@ -762,8 +798,10 @@ class PaymentService:
         elif status == "CANCELED":
             if payment.status == "refunded":
                 return True, "already_processed"
+
             if payment.status == "cancelled":
                 return True, "already_processed"
+
             if payment.status == "completed":
                 snapshot = _build_payment_snapshot(payment)
                 await _log_event_safe(
@@ -794,11 +832,13 @@ class PaymentService:
 
             payment.status = "cancelled"
             await session.flush()
+
             await _log_event_safe(
                 session, payment.id, "cancelled",
                 provider_status=status,
                 source="yookassa_callback",
             )
+
             try:
                 await AuditService.log_action(
                     session, admin_id=0,
@@ -812,6 +852,7 @@ class PaymentService:
                 )
             except Exception:
                 pass
+
             return True, "success"
 
         elif status == "CHARGEBACKED":
@@ -821,9 +862,10 @@ class PaymentService:
 
         return False, "error"
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
     # Проверка статуса платежа (кнопка «Я оплатил»)
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+
     @staticmethod
     async def check_yookassa_payment(
         session: AsyncSession,
@@ -856,6 +898,7 @@ class PaymentService:
                             source="check_yookassa_cancelled",
                         )
                         return False, "manual_review"
+
                     cb_decimal = _to_decimal(cb_amount)
                     if (
                         cb_decimal is None
@@ -867,6 +910,7 @@ class PaymentService:
                             source="check_yookassa_cancelled",
                         )
                         return False, "manual_review"
+
                     cb_currency = amount_obj.get("currency")
                     if cb_currency:
                         if (
@@ -879,20 +923,25 @@ class PaymentService:
                                 source="check_yookassa_cancelled",
                             )
                             return False, "manual_review"
+
                     return (
                         await PaymentService
                         .handle_successful_payment(
                             session, payment.id,
                         )
                     )
+
                 if provider_status == "canceled":
                     return False, "cancelled"
+
             return False, "cancelled"
 
         if payment.status == "requires_manual_review":
             return False, "manual_review"
+
         if payment.status == "refunded":
             return False, "refunded"
+
         if payment.status != "pending":
             return False, "invalid_status"
 
@@ -914,6 +963,7 @@ class PaymentService:
                     source="check_yookassa_payment",
                 )
                 return False, "manual_review"
+
             cb_decimal = _to_decimal(cb_amount)
             if cb_decimal is None or payment.amount != cb_decimal:
                 await PaymentService._set_manual_review(
@@ -922,6 +972,7 @@ class PaymentService:
                     source="check_yookassa_payment",
                 )
                 return False, "manual_review"
+
             cb_currency = amount_obj.get("currency")
             if cb_currency:
                 if (
@@ -934,11 +985,13 @@ class PaymentService:
                         source="check_yookassa_payment",
                     )
                     return False, "manual_review"
+
             return (
                 await PaymentService.handle_successful_payment(
                     session, payment.id,
                 )
             )
+
         elif provider_status == "canceled":
             if payment.status == "completed":
                 snapshot = _build_payment_snapshot(payment)
@@ -958,6 +1011,7 @@ class PaymentService:
                     ),
                 )
                 return False, "manual_review"
+
             if payment.status != "cancelled":
                 payment.status = "cancelled"
                 await session.flush()
@@ -965,9 +1019,10 @@ class PaymentService:
 
         return False, "pending"
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
     # Manual review
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+
     @staticmethod
     async def _set_manual_review(
         session: AsyncSession,
@@ -1008,11 +1063,14 @@ class PaymentService:
         payment = await get_payment_by_id(
             session, payment_id,
         )
+
         await _log_event_safe(
             session, payment_id, "manual_review",
             reason=reason, source=source,
         )
+
         snapshot = _build_payment_snapshot(payment)
+
         await AuditService.log_action(
             session, admin_id=0,
             action="PAYMENT_MANUAL_REVIEW",
@@ -1023,17 +1081,20 @@ class PaymentService:
                 f"user={payment.user_id if payment else '—'}"
             ),
         )
+
         queue_post_commit_task(
             session,
             lambda s=snapshot, r=reason, src=source: (
                 _send_manual_review_alert_now(s, r, src)
             ),
         )
+
         return True, "manual_review"
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
     # Chargeback
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+
     @staticmethod
     async def _process_chargeback(
         session: AsyncSession,
@@ -1047,12 +1108,14 @@ class PaymentService:
                 )
                 if not payment:
                     return False, "not_found"
+
                 if payment.status == "refunded":
                     return True, "already_processed"
 
                 was_completed = (
                     payment.status == "completed"
                 )
+
                 payment.status = "refunded"
                 payment.manual_review_reason = None
                 await session.flush()
@@ -1069,6 +1132,7 @@ class PaymentService:
                 user = payment.user
                 if user:
                     current_time = now_utc()
+
                     if was_completed:
                         user.subscription_end = current_time
                         user.current_tariff_id = None
@@ -1080,6 +1144,7 @@ class PaymentService:
                                 payment
                             ) or 0
                         )
+
                         if (
                             user.referred_by
                             and duration_days >= 30
@@ -1142,21 +1207,21 @@ class PaymentService:
                                             )
                                         )
 
-                                if (
-                                    bonus_user > 0
-                                    and user.subscription_end
-                                    and user.subscription_end
-                                    > current_time
-                                    and user
-                                    .subscription_end.year
-                                    < 2100
-                                ):
-                                    user.subscription_end = (
-                                        user.subscription_end
-                                        - timedelta(
-                                            days=bonus_user
+                                    if (
+                                        bonus_user > 0
+                                        and user.subscription_end
+                                        and user.subscription_end
+                                        > current_time
+                                        and user
+                                        .subscription_end.year
+                                        < 2100
+                                    ):
+                                        user.subscription_end = (
+                                            user.subscription_end
+                                            - timedelta(
+                                                days=bonus_user
+                                            )
                                         )
-                                    )
                             except Exception as e:
                                 logger.error(
                                     "Chargeback referral "
@@ -1184,6 +1249,7 @@ class PaymentService:
                     invalidate_user_cache(user.telegram_id)
 
                 snapshot = _build_payment_snapshot(payment)
+
                 try:
                     await AuditService.log_action(
                         session, admin_id=0,
@@ -1211,6 +1277,7 @@ class PaymentService:
                         _notify_client_chargeback_now(s)
                     ),
                 )
+
                 return True, "success"
 
         except Exception as e:

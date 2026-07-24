@@ -43,8 +43,7 @@ _redis_client: aioredis.Redis | None = None
 # ИСПРАВЛЕНО (БАГ 9):
 #
 # Раньше _user_locks и _server_locks были dict[int, asyncio.Lock]
-# и росли бесконечно. При тысячах пользователей это приводило
-# к утечке памяти.
+# и росли бесконечно.
 #
 # Теперь каждый lock хранится как (lock, last_used_timestamp).
 # Функция _cleanup_locks() вызывается каждые 3600 секунд
@@ -58,12 +57,6 @@ _LOCK_TTL = 3600.0
 
 
 def _cleanup_locks(now: float) -> None:
-    """
-    Удаляет незаблокированные locks, которые не использовались
-    дольше _LOCK_TTL секунд.
-
-    Вызывается периодически из _get_user_lock / _get_server_lock.
-    """
     old_users = [
         uid
         for uid, (lock, last_used) in _user_locks.items()
@@ -93,7 +86,6 @@ def _cleanup_locks(now: float) -> None:
 
 def _get_server_lock(server_id: int) -> asyncio.Lock:
     global _last_lock_cleanup
-
     now = time.monotonic()
     if now - _last_lock_cleanup > _LOCK_CLEANUP_INTERVAL:
         _cleanup_locks(now)
@@ -104,7 +96,6 @@ def _get_server_lock(server_id: int) -> asyncio.Lock:
     else:
         lock, _ = _server_locks[server_id]
         _server_locks[server_id] = (lock, now)
-
     return _server_locks[server_id][0]
 
 
@@ -114,13 +105,8 @@ async def _queue_failed_rollback_deletion(
     user_id: int,
     reason: str,
 ) -> None:
-    """
-    Если rollback-удаление пира не удалось, ставим его в pending.
-    Используем отдельную сессию, чтобы не зависеть от текущего rollback.
-    """
     if not server.api_url or not server.api_key:
         return
-
     try:
         async with session_scope() as session:
             pending = PendingAPIDeletion(
@@ -191,7 +177,6 @@ class InvalidConfig(DeviceCreationError):
 
 def _get_user_lock(user_id: int) -> asyncio.Lock:
     global _last_lock_cleanup
-
     now = time.monotonic()
     if now - _last_lock_cleanup > _LOCK_CLEANUP_INTERVAL:
         _cleanup_locks(now)
@@ -202,7 +187,6 @@ def _get_user_lock(user_id: int) -> asyncio.Lock:
     else:
         lock, _ = _user_locks[user_id]
         _user_locks[user_id] = (lock, now)
-
     return _user_locks[user_id][0]
 
 
@@ -227,7 +211,6 @@ async def _get_server_profiles_count(
 
 
 class DeviceService:
-
     @staticmethod
     async def create_device(
         session: AsyncSession,
@@ -252,11 +235,6 @@ class DeviceService:
             )
             raise ServerUnavailable("Server is disabled by admin")
 
-        #
-        # Сервисный запрет создания устройства без активной подписки.
-        # Это дополнительная защита даже если handler по какой-то причине
-        # пропустил проверку.
-        #
         if not await SubscriptionService.check_access(
             session,
             user.telegram_id,
@@ -279,14 +257,17 @@ class DeviceService:
                 redis = await _get_redis()
                 lock_key = f"lock:create_device:server:{server.id}"
                 #
-                # Увеличенный timeout Redis-lock.
-                # Раньше было 30 секунд, что могло быть мало при медленном API
-                # и повторных попытках.
+                # ИСПРАВЛЕНО (Фаза 3, фикс 10):
+                #
+                # Увеличен timeout Redis-lock с 60 до 120 секунд.
+                # Раньше при медленном API (>60с) lock автоматически
+                # освобождался, второй запрос входил, и на сервере
+                # создавалось два пира для одного слота.
                 #
                 redis_lock = redis.lock(
                     lock_key,
-                    timeout=60,
-                    blocking_timeout=10,
+                    timeout=120,
+                    blocking_timeout=15,
                 )
                 acquired = await redis_lock.acquire()
                 using_redis = True
@@ -314,7 +295,6 @@ class DeviceService:
                 server.id,
             )
             free_slots = server.max_clients - local_count
-
             if free_slots <= 0:
                 logger.warning(
                     "create_device: server %s is full "
@@ -368,11 +348,6 @@ class DeviceService:
                 if not user:
                     raise ServerUnavailable("User disappeared")
 
-                #
-                # Повторная проверка подписки уже под блокировкой.
-                # Это защищает от гонки, если подписка истекла прямо
-                # во время создания устройства.
-                #
                 if (
                     user.is_banned
                     or not user.subscription_end
@@ -435,7 +410,6 @@ class DeviceService:
                 )[:10]
                 if not clean_device_name:
                     clean_device_name = "Device"
-
                 client_name = (
                     f"tg_{user.telegram_id}_"
                     f"{clean_device_name}_{short_hash}"
@@ -465,9 +439,6 @@ class DeviceService:
                     peer_id = api_result.id
                     raw_config = api_result.config
 
-                    #
-                    # Проверяем, что API вернул валидный vpn:// URI.
-                    #
                     if not is_valid_vpn_uri(raw_config):
                         logger.error(
                             "create_device: API returned invalid "
@@ -495,10 +466,6 @@ class DeviceService:
                             "Invalid configuration URI"
                         )
 
-                    #
-                    # Проверяем, что из vpn:// реально достаётся готовый .conf.
-                    # Если конфиг битый, откатываем создание пира.
-                    #
                     conf_content = build_conf_file(raw_config)
                     if not conf_content:
                         logger.error(
@@ -679,7 +646,6 @@ class DeviceService:
             session,
             profile.server_id,
         )
-
         if not server:
             logger.error(
                 "delete_device: server %s not found for profile %s. "
@@ -691,7 +657,17 @@ class DeviceService:
                 await delete_profile(session, profile)
                 return True
             except Exception as e:
-                await session.rollback()
+                #
+                # ИСПРАВЛЕНО (Фаза 2, фикс 5):
+                #
+                # Раньше здесь был session.rollback(), который
+                # откатывал ВСЮ транзакцию handler'а, включая
+                # изменения сделанные ранее (аудит и т.д.).
+                #
+                # Теперь rollback не нужен: если delete_profile
+                # падает, begin_nested() в вызывающем коде
+                # откатывает только savepoint.
+                #
                 logger.error(
                     "delete_device: failed to delete profile %s "
                     "from DB: %s",
@@ -757,7 +733,12 @@ class DeviceService:
                 return True
 
         except Exception as e:
-            await session.rollback()
+            #
+            # ИСПРАВЛЕНО (Фаза 2, фикс 5):
+            #
+            # Убран session.rollback(). begin_nested() уже
+            # откатил savepoint. Внешняя транзакция цела.
+            #
             logger.error(
                 "delete_device: DB error: %s",
                 e,

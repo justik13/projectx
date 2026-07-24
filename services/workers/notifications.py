@@ -4,7 +4,7 @@ import time
 from datetime import timedelta
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from cachetools import TTLCache
 from sqlalchemy import or_, select
@@ -17,6 +17,7 @@ from bot.constants import (
 from database.connection import session_scope
 from database.models import User
 from utils.datetime_helpers import now_utc
+from utils.global_rate_limiter import acquire_global_rate
 
 logger = logging.getLogger("BackgroundWorker")
 
@@ -29,43 +30,16 @@ GRACE_PERIOD_HOURS = 48
 #
 # ИСПРАВЛЕНО: TTLCache вместо бесконечного dict.
 #
-# Раньше _last_notification_type: dict[int, str] рос
-# бесконечно. Каждый пользователь, получивший уведомление,
-# добавлял запись. За год — десятки тысяч записей.
-#
-# Теперь TTLCache с TTL=24 часа и maxsize=10000.
-#
 _last_notification_type: TTLCache[int, str] = TTLCache(
     maxsize=10000,
     ttl=86400,
 )
 
-
-class NotificationRateLimiter:
-    def __init__(self, rate: float = 25.0):
-        self.rate = rate
-        self.tokens = rate
-        self.last_refill = time.monotonic()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self):
-        while True:
-            async with self._lock:
-                now = time.monotonic()
-                elapsed = now - self.last_refill
-                self.tokens = min(
-                    self.rate,
-                    self.tokens + elapsed * self.rate,
-                )
-                self.last_refill = now
-                if self.tokens >= 1.0:
-                    self.tokens -= 1.0
-                    return
-                wait_time = (1.0 - self.tokens) / self.rate
-            await asyncio.sleep(wait_time)
-
-
-_notification_limiter = NotificationRateLimiter(rate=25.0)
+#
+# Максимальное количество повторных попыток при TelegramRetryAfter
+# для одного уведомления. Защищает от бесконечного цикла.
+#
+_MAX_RETRY_AFTER_RETRIES = 3
 
 
 def _get_backoff_delay(retry_count: int) -> int:
@@ -88,9 +62,6 @@ def _maybe_reset_retry_on_type_change(
     user: User,
     notification_type: str,
 ) -> None:
-    """
-    Сбрасывает retry-счётчик, если тип уведомления сменился.
-    """
     last_type = _last_notification_type.get(user.id)
     if last_type and last_type != notification_type:
         user.notification_retry_count = 0
@@ -180,7 +151,6 @@ async def _send_pre_expiry_notifications(
 
     for i in range(0, len(user_ids), NOTIFICATION_BATCH_SIZE):
         batch_ids = user_ids[i : i + NOTIFICATION_BATCH_SIZE]
-
         async with session_scope() as session:
             users_result = await session.execute(
                 select(User).where(User.id.in_(batch_ids))
@@ -246,7 +216,12 @@ async def _send_pre_expiry_notifications(
                 retry_count = user.notification_retry_count or 0
 
                 try:
-                    await _notification_limiter.acquire()
+                    #
+                    # ИСПРАВЛЕНО (Фаза 2, фикс 6):
+                    # Единый global rate limiter.
+                    #
+                    await acquire_global_rate()
+
                     builder = InlineKeyboardBuilder()
                     builder.button(
                         text="💳 Продлить доступ",
@@ -257,12 +232,14 @@ async def _send_pre_expiry_notifications(
                         callback_data="dismiss_notification",
                     )
                     builder.adjust(1)
+
                     await bot.send_message(
                         user.telegram_id,
                         msg,
                         reply_markup=builder.as_markup(),
                         parse_mode="HTML",
                     )
+
                     user.notification_retry_count = 0
                     user.last_notification_attempt = current_time
                     if notification_type == "2h":
@@ -274,12 +251,71 @@ async def _send_pre_expiry_notifications(
                         user.notified_3d = True
                     elif notification_type == "3d":
                         user.notified_3d = True
+
+                #
+                # ИСПРАВЛЕНО (Фаза 1, фикс 4):
+                #
+                # Раньше TelegramRetryAfter попадал в общий
+                # except Exception, retry_count рос, и после
+                # MAX_RETRY_COUNT уведомление помечалось как
+                # отправленное, хотя пользователь его НЕ получил.
+                #
+                # Теперь: при RetryAfter ждём и повторяем
+                # (до _MAX_RETRY_AFTER_RETRIES раз).
+                # retry_count НЕ увеличивается.
+                #
+                except TelegramRetryAfter as e:
+                    wait = min(e.retry_after + 1, 60)
+                    logger.warning(
+                        "TelegramRetryAfter for user %s "
+                        "(pre-expiry), waiting %ss",
+                        user.telegram_id,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                    # Повторяем отправку один раз
+                    try:
+                        await acquire_global_rate()
+                        builder = InlineKeyboardBuilder()
+                        builder.button(
+                            text="💳 Продлить доступ",
+                            callback_data="menu_subscription",
+                        )
+                        builder.button(
+                            text="✅ Прочитано (убрать)",
+                            callback_data="dismiss_notification",
+                        )
+                        builder.adjust(1)
+                        await bot.send_message(
+                            user.telegram_id,
+                            msg,
+                            reply_markup=builder.as_markup(),
+                            parse_mode="HTML",
+                        )
+                        user.notification_retry_count = 0
+                        user.last_notification_attempt = current_time
+                        if notification_type == "2h":
+                            user.notified_2h = True
+                            user.notified_1d = True
+                            user.notified_3d = True
+                        elif notification_type == "1d":
+                            user.notified_1d = True
+                            user.notified_3d = True
+                        elif notification_type == "3d":
+                            user.notified_3d = True
+                    except TelegramForbiddenError:
+                        user.is_bot_blocked = True
+                    except Exception:
+                        user.notification_retry_count = retry_count + 1
+                        user.last_notification_attempt = current_time
+
                 except TelegramForbiddenError:
                     logger.info(
                         "User %s blocked the bot",
                         user.telegram_id,
                     )
                     user.is_bot_blocked = True
+
                 except Exception as e:
                     user.notification_retry_count = retry_count + 1
                     user.last_notification_attempt = current_time
@@ -328,7 +364,6 @@ async def _send_post_expiry_notifications(
 
     for i in range(0, len(user_ids), NOTIFICATION_BATCH_SIZE):
         batch_ids = user_ids[i : i + NOTIFICATION_BATCH_SIZE]
-
         async with session_scope() as session:
             users_result = await session.execute(
                 select(User).where(User.id.in_(batch_ids))
@@ -392,7 +427,12 @@ async def _send_post_expiry_notifications(
                 retry_count = user.notification_retry_count or 0
 
                 try:
-                    await _notification_limiter.acquire()
+                    #
+                    # ИСПРАВЛЕНО (Фаза 2, фикс 6):
+                    # Единый global rate limiter.
+                    #
+                    await acquire_global_rate()
+
                     builder = InlineKeyboardBuilder()
                     builder.button(
                         text="🚀 Купить доступ",
@@ -407,12 +447,14 @@ async def _send_post_expiry_notifications(
                         callback_data="dismiss_notification",
                     )
                     builder.adjust(1)
+
                     await bot.send_message(
                         user.telegram_id,
                         msg,
                         reply_markup=builder.as_markup(),
                         parse_mode="HTML",
                     )
+
                     user.notification_retry_count = 0
                     user.last_notification_attempt = current_time
                     if notification_type == "grace_12h":
@@ -420,12 +462,63 @@ async def _send_post_expiry_notifications(
                         user.notified_expired = True
                     elif notification_type == "expired":
                         user.notified_expired = True
+
+                #
+                # ИСПРАВЛЕНО (Фаза 1, фикс 4):
+                # Аналогично pre-expiry: TelegramRetryAfter
+                # обрабатывается отдельно, retry_count НЕ растёт.
+                #
+                except TelegramRetryAfter as e:
+                    wait = min(e.retry_after + 1, 60)
+                    logger.warning(
+                        "TelegramRetryAfter for user %s "
+                        "(post-expiry), waiting %ss",
+                        user.telegram_id,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                    try:
+                        await acquire_global_rate()
+                        builder = InlineKeyboardBuilder()
+                        builder.button(
+                            text="🚀 Купить доступ",
+                            callback_data="menu_buy",
+                        )
+                        builder.button(
+                            text="💬 Поддержка",
+                            callback_data="menu_support",
+                        )
+                        builder.button(
+                            text="✅ Прочитано (убрать)",
+                            callback_data="dismiss_notification",
+                        )
+                        builder.adjust(1)
+                        await bot.send_message(
+                            user.telegram_id,
+                            msg,
+                            reply_markup=builder.as_markup(),
+                            parse_mode="HTML",
+                        )
+                        user.notification_retry_count = 0
+                        user.last_notification_attempt = current_time
+                        if notification_type == "grace_12h":
+                            user.notified_grace_12h = True
+                            user.notified_expired = True
+                        elif notification_type == "expired":
+                            user.notified_expired = True
+                    except TelegramForbiddenError:
+                        user.is_bot_blocked = True
+                    except Exception:
+                        user.notification_retry_count = retry_count + 1
+                        user.last_notification_attempt = current_time
+
                 except TelegramForbiddenError:
                     logger.info(
                         "User %s blocked the bot",
                         user.telegram_id,
                     )
                     user.is_bot_blocked = True
+
                 except Exception as e:
                     user.notification_retry_count = retry_count + 1
                     user.last_notification_attempt = current_time

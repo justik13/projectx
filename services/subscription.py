@@ -29,6 +29,9 @@ from utils.datetime_helpers import is_expired, now_utc
 
 logger = logging.getLogger(__name__)
 
+# Количество повторных попыток синхронизации статуса на серверах
+_SYNC_MAX_RETRIES = 3
+
 
 class SubscriptionService:
     @staticmethod
@@ -107,11 +110,6 @@ class SubscriptionService:
         #
         # Ищем пользователя включая soft-deleted.
         #
-        # Это нужно, чтобы:
-        # - не ловить unique constraint при повторном входе;
-        # - безопасно восстанавливать soft-deleted пользователя;
-        # - не создавать дубликат.
-        #
         user = await get_user_by_telegram_id_any(
             session,
             telegram_id,
@@ -119,10 +117,6 @@ class SubscriptionService:
 
         #
         # Если пользователь был soft-deleted, восстанавливаем его.
-        #
-        # В проекте пока нет полноценного пользовательского удаления,
-        # поэтому восстановление при /start безопасно и защищает
-        # от unique constraint error.
         #
         if user is not None and user.is_deleted:
             user.is_deleted = False
@@ -145,9 +139,6 @@ class SubscriptionService:
 
             #
             # Поздняя привязка реферала.
-            #
-            # Если пользователь уже существует, но пришёл по реферальной
-            # ссылке и ещё не был привязан к рефереру, привязываем.
             #
             if ref_id is not None and user.referred_by is None:
                 is_valid = await SubscriptionService._validate_referral(
@@ -186,26 +177,32 @@ class SubscriptionService:
                 )
 
         #
-        # ИСПРАВЛЕНО (БАГ 1):
+        # ИСПРАВЛЕНО (Фаза 1, фикс 1):
         #
-        # Обёрнут create_user в try/except IntegrityError.
+        # Обёрнуто в begin_nested() (SAVEPOINT) вместо session.rollback().
         #
-        # Если два одновременных /start от нового пользователя
-        # пройдут get_user_by_telegram_id_any → None, оба попытаются
-        # create_user. Второй упадёт с IntegrityError (unique на
-        # telegram_id). Теперь вместо 500 ошибки мы делаем rollback
-        # и перечитываем пользователя, созданного первым запросом.
+        # Раньше IntegrityError приводил к session.rollback(),
+        # который откатывал ВСЮ транзакцию handler'а, включая
+        # изменения сделанные ранее (аудит, обновление профиля и т.д.).
+        #
+        # Теперь при IntegrityError откатывается только SAVEPOINT,
+        # внешняя транзакция остаётся целой.
         #
         try:
-            user = await create_user(
-                session,
-                telegram_id,
-                username,
-                first_name,
-                referred_by,
-            )
+            async with session.begin_nested():
+                user = await create_user(
+                    session,
+                    telegram_id,
+                    username,
+                    first_name,
+                    referred_by,
+                )
         except IntegrityError:
-            await session.rollback()
+            #
+            # Гонка: два одновременных /start от нового пользователя.
+            # SAVEPOINT откатился, внешняя транзакция цела.
+            # Перечитываем пользователя, созданного первым запросом.
+            #
             user = await get_user_by_telegram_id_any(
                 session,
                 telegram_id,
@@ -260,10 +257,6 @@ class SubscriptionService:
         # Если days == 0 и активной подписки нет,
         # не делаем подписку "активной до сейчас".
         #
-        # Это нужно для сценария админской смены тарифа без продления:
-        # тариф/лимит можно поменять, но доступ не должен внезапно
-        # стать активным.
-        #
         if days == 0 and not had_active_subscription:
             new_end = user.subscription_end
         else:
@@ -282,26 +275,14 @@ class SubscriptionService:
         user.notified_3d = False
         user.notified_1d = False
         user.notified_2h = False
-
-        #
-        # Сбрасываем grace-уведомления, чтобы после продления
-        # пользователь не получал старые уведомления об истечении.
-        #
         user.notified_expired = False
         user.notified_grace_12h = False
-
-        #
-        # Сбрасываем notification retry state.
-        #
-        # Иначе старый счётчик ошибок может задержать новые уведомления.
-        #
         user.notification_retry_count = 0
         user.last_notification_attempt = None
 
         if new_device_limit is not None:
             old_device_limit = user.device_limit
             user.device_limit = new_device_limit
-
             if new_device_limit > old_device_limit:
                 user.device_creations_today = 0
                 user.last_creation_date = None
@@ -320,15 +301,7 @@ class SubscriptionService:
         await session.flush()
         invalidate_user_cache(telegram_id)
 
-        #
-        # После изменения подписки синхронизируем статус устройств:
-        # - если доступ активен и пользователь не забанен —
-        #   устройства активны;
-        # - если доступ неактивен или пользователь забанен —
-        #   устройства неактивны.
-        #
         await SubscriptionService._sync_access_state(session, user)
-
         return user
 
     @staticmethod
@@ -338,15 +311,6 @@ class SubscriptionService:
     ) -> None:
         """
         Синхронизирует is_active у профилей в БД и статус на сервере.
-
-        Правила:
-        - если подписка активна и пользователь не забанен:
-          профили активны;
-        - если подписка истекла или пользователь забанен:
-          профили неактивны.
-
-        Важно:
-        - API-синхронизация выполняется только после commit.
         """
         target_active = bool(
             user.subscription_end
@@ -359,7 +323,6 @@ class SubscriptionService:
             return
 
         profile_ids = [profile.id for profile in profiles]
-
         await session.execute(
             update(VPNProfile)
             .where(VPNProfile.id.in_(profile_ids))
@@ -391,6 +354,14 @@ class SubscriptionService:
         expires_ts: Optional[int],
         target_status: str = "active",
     ):
+        #
+        # ИСПРАВЛЕНО (Фаза 2, фикс 7):
+        #
+        # Добавлены повторные попытки (до 3) с экспоненциальным
+        # backoff. Раньше при ошибке API задача молча падала,
+        # и expiresAt на сервере не обновлялся до следующего
+        # цикла traffic sync (15 минут).
+        #
         from database.connection import session_scope
 
         try:
@@ -414,24 +385,14 @@ class SubscriptionService:
                     server = servers_map.get(profile.server_id)
                     if not server:
                         continue
-
                     client = AmneziaClient(
                         server.api_url,
                         server.api_key,
                     )
-
-                    #
-                    # Для вечной подписки expires_ts=None.
-                    #
-                    # Если целевой статус active и expires_ts=None,
-                    # нужно явно очистить expiresAt на сервере.
-                    # Иначе API может сохранить старый срок истечения.
-                    #
                     clear_expires_at = (
                         target_status == "active"
                         and expires_ts is None
                     )
-
                     tasks.append(
                         client.update_client(
                             client_id=profile.peer_id,
@@ -445,7 +406,13 @@ class SubscriptionService:
                         )
                     )
 
-                if tasks:
+                if not tasks:
+                    return
+
+                #
+                # Retry-логика: до 3 попыток с backoff 1s, 2s.
+                #
+                for attempt in range(_SYNC_MAX_RETRIES):
                     results = await asyncio.gather(
                         *tasks,
                         return_exceptions=True,
@@ -453,14 +420,32 @@ class SubscriptionService:
                     success = sum(
                         1 for r in results if r is True
                     )
+                    failed = len(tasks) - success
+
                     logger.info(
                         "Access state sync: %s/%s servers updated "
-                        "for user_id=%s, status=%s",
+                        "for user_id=%s, status=%s (attempt %s/%s)",
                         success,
                         len(tasks),
                         user_id,
                         target_status,
+                        attempt + 1,
+                        _SYNC_MAX_RETRIES,
                     )
+
+                    if failed == 0:
+                        break
+
+                    if attempt < _SYNC_MAX_RETRIES - 1:
+                        backoff = 2 ** attempt
+                        logger.warning(
+                            "Access state sync: %s failures, "
+                            "retrying in %ss",
+                            failed,
+                            backoff,
+                        )
+                        await asyncio.sleep(backoff)
+
         except Exception as e:
             logger.error(
                 "Access state sync failed for user_id=%s: %s",
@@ -483,6 +468,5 @@ class SubscriptionService:
                 user.telegram_id,
             )
             return None
-
         expires_ts = int(user.subscription_end.timestamp())
         return expires_ts
